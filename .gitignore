@@ -1,6 +1,8 @@
 /ref/
 .env
-.env.*
+.env.local
+.env.prod
+.env.production
 node_modules/
 dist/
 coverage/
