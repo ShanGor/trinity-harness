@@ -12,7 +12,14 @@ const serverEnvSchema = z.object({
   /** Workspace the sandbox is rooted at for coding sessions. */
   WORKSPACE_ROOT: z.string().min(1).default(process.cwd()),
   /** Model in "provider/model-id" form (see AiSdkGateway routing). */
-  MODEL: z.string().min(1).default('anthropic/claude-sonnet-4-20250514'),
+  MODEL: z
+    .string()
+    .min(1)
+    .regex(
+      /^[^/]+\/[^/]+$/,
+      'MODEL must be in "provider/model-id" form, e.g. "anthropic/claude-sonnet-4-20250514"',
+    )
+    .default('anthropic/claude-sonnet-4-20250514'),
   SYSTEM_PROMPT: z.string().min(1).default('You are Trinity, a software engineering agent.'),
   /** Anthropic extended thinking budget (tokens). */
   REASONING_BUDGET_TOKENS: z.coerce.number().int().positive().optional(),

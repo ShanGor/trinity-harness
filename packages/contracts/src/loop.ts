@@ -4,6 +4,7 @@ import type { ToolCall, ToolResult } from './tools.js';
 export type LoopEvent =
   | { type: 'turn/start'; turn: number }
   | { type: 'text-delta'; text: string }
+  | { type: 'reasoning-delta'; text: string }
   | { type: 'message/assistant'; content: string }
   | { type: 'tool/call'; call: ToolCall }
   | { type: 'tool/result'; callId: string; name: string; result: ToolResult }

@@ -102,12 +102,24 @@ export class CoreAgentLoop implements AgentLoop {
         const chunks = await llm.stream(request);
 
         let text = '';
+        let reasoningText = '';
+        let reasoningSignature: string | undefined;
         const toolCalls: ToolCall[] = [];
         for await (const chunk of chunks) {
           throwIfAborted();
           if (chunk.kind === 'text-delta') {
             text += chunk.text;
             sink.emit({ type: 'text-delta', text: chunk.text });
+          } else if (chunk.kind === 'reasoning-delta') {
+            // Reasoning is persisted on the assistant event so subsequent
+            // steps replay it (MiniMax-M3 requires the last reasoning output).
+            if (chunk.signature !== undefined) {
+              reasoningSignature = chunk.signature;
+            }
+            if (chunk.text.length > 0) {
+              reasoningText += chunk.text;
+              sink.emit({ type: 'reasoning-delta', text: chunk.text });
+            }
           } else if (chunk.kind === 'tool-call') {
             toolCalls.push({ id: chunk.call.id, name: chunk.call.name, args: chunk.call.args });
           } else if (chunk.kind === 'finish' && chunk.reason === 'error') {
@@ -115,16 +127,31 @@ export class CoreAgentLoop implements AgentLoop {
           }
         }
 
-        if (text.length > 0) {
+        if (text.length > 0 || reasoningText.length > 0) {
           await store.append(sessionId, [
             {
               ...meta(),
               type: 'message/assistant',
               surfaceOp: 'append',
-              content: [{ kind: 'text', text }],
+              content: [
+                ...(reasoningText.length > 0
+                  ? [
+                      {
+                        kind: 'reasoning' as const,
+                        text: reasoningText,
+                        ...(reasoningSignature !== undefined
+                          ? { signature: reasoningSignature }
+                          : {}),
+                      },
+                    ]
+                  : []),
+                ...(text.length > 0 ? [{ kind: 'text' as const, text }] : []),
+              ],
             },
           ]);
-          sink.emit({ type: 'message/assistant', content: text });
+          if (text.length > 0) {
+            sink.emit({ type: 'message/assistant', content: text });
+          }
         }
 
         if (toolCalls.length === 0) {

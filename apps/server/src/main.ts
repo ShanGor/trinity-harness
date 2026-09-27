@@ -25,22 +25,25 @@ async function main(): Promise<void> {
     registry.register(tool);
   }
 
-  const app = await buildServer({
-    store,
-    workspaceRoot: env.WORKSPACE_ROOT,
-    createLoop: () =>
-      new CoreAgentLoop({
-        llm: new AiSdkGateway(undefined, {
-          reasoningBudgetTokens: env.REASONING_BUDGET_TOKENS,
-          reasoningEffort: env.REASONING_EFFORT,
+  const app = await buildServer(
+    {
+      store,
+      workspaceRoot: env.WORKSPACE_ROOT,
+      createLoop: () =>
+        new CoreAgentLoop({
+          llm: new AiSdkGateway(undefined, {
+            reasoningBudgetTokens: env.REASONING_BUDGET_TOKENS,
+            reasoningEffort: env.REASONING_EFFORT,
+          }),
+          model: env.MODEL,
+          systemPrompt: env.SYSTEM_PROMPT,
+          tools: registry,
+          store,
+          workspaceRoot: env.WORKSPACE_ROOT,
         }),
-        model: env.MODEL,
-        systemPrompt: env.SYSTEM_PROMPT,
-        tools: registry,
-        store,
-        workspaceRoot: env.WORKSPACE_ROOT,
-      }),
-  });
+    },
+    { logger: true },
+  );
 
   await app.listen({ port: env.PORT, host: env.HOST });
   app.log.info(`trinity-harness server listening on http://${env.HOST}:${env.PORT}`);

@@ -8,7 +8,12 @@ import {
   MemorySessionStore,
   writeFileTool,
 } from '../src/index.js';
-import { FakeLLM, textChunks, toolCallThenFinish } from '../src/testing/fake-llm.js';
+import {
+  FakeLLM,
+  reasoningChunks,
+  textChunks,
+  toolCallThenFinish,
+} from '../src/testing/fake-llm.js';
 import { FakeSandbox } from '../src/testing/fake-sandbox.js';
 
 function makeLoop(scripts: FakeLLM, sandbox = new FakeSandbox(), extra?: { maxSteps?: number }) {
@@ -152,6 +157,57 @@ describe('CoreAgentLoop', () => {
     const outcome = await loop.run('s1', 'go', new CollectingSink(), { signal: ac.signal });
     expect(outcome.reason).toBe('aborted');
     expect((await store.load('s1')).at(-1)).toMatchObject({ type: 'turn/end', reason: 'aborted' });
+  });
+
+  it('persists reasoning and replays it to the model on the next turn', async () => {
+    const llm = new FakeLLM(
+      () => [...reasoningChunks('Let me think. '), ...textChunks('answer: 4')],
+      () => textChunks('6'),
+    );
+    const { store, loop } = makeLoop(llm);
+
+    const first = await loop.run('s1', 'what is 2+2?', new CollectingSink());
+    expect(first).toEqual({ reason: 'completed', steps: 1 });
+
+    // Reasoning is part of the assistant event (replayable from the log).
+    const assistantEvent = (await store.load('s1')).find((e) => e.type === 'message/assistant');
+    expect(assistantEvent).toEqual(
+      expect.objectContaining({
+        content: [
+          { kind: 'reasoning', text: 'Let me think. ', signature: 'sig-test' },
+          { kind: 'text', text: 'answer: 4' },
+        ],
+      }),
+    );
+
+    const second = await loop.run('s1', 'and 3+3?', new CollectingSink());
+
+    expect(second).toEqual({ reason: 'completed', steps: 1 });
+    // The next model request must echo the reasoning back (MiniMax-M3).
+    expect(llm.requests[1]!.messages).toEqual([
+      { role: 'user', content: 'what is 2+2?' },
+      {
+        role: 'assistant',
+        content: 'answer: 4',
+        reasoning: [{ text: 'Let me think. ', signature: 'sig-test' }],
+      },
+      { role: 'user', content: 'and 3+3?' },
+    ]);
+  });
+
+  it('streams reasoning deltas to the sink in real time', async () => {
+    const llm = new FakeLLM(() => [...reasoningChunks('hmm '), ...textChunks('ok')]);
+    const { loop } = makeLoop(llm);
+    const sink = new CollectingSink();
+
+    await loop.run('s1', 'go', sink);
+
+    expect(sink.types()).toEqual([
+      'reasoning-delta',
+      'text-delta',
+      'message/assistant',
+      'turn/end',
+    ]);
   });
 
   it('accumulates multiple turns in one session log', async () => {

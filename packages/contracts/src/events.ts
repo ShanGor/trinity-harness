@@ -3,6 +3,17 @@ import { z } from 'zod';
 /** Content blocks exchanged with the model (AI SDK-compatible shape). */
 export const contentBlockSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('text'), text: z.string() }),
+  /**
+   * Model reasoning ("thinking") block, assistant messages only. Must be
+   * replayed verbatim on subsequent turns for reasoning models (MiniMax-M3
+   * requires the last reasoning output in chat history); the provider
+   * signature is kept when the provider returns one (Anthropic format).
+   */
+  z.object({
+    kind: z.literal('reasoning'),
+    text: z.string(),
+    signature: z.string().optional(),
+  }),
   z.object({
     kind: z.literal('image'),
     uri: z.string(),

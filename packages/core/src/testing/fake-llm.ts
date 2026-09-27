@@ -40,6 +40,14 @@ export function textChunks(...texts: string[]): StreamChunk[] {
   ];
 }
 
+/** Reasoning chunks followed by a stop finish. */
+export function reasoningChunks(...texts: string[]): StreamChunk[] {
+  return [
+    ...texts.map((text): StreamChunk => ({ kind: 'reasoning-delta', text, signature: 'sig-test' })),
+    { kind: 'finish', reason: 'stop' },
+  ];
+}
+
 export function toolCallChunk(id: string, name: string, args: unknown): StreamChunk {
   return { kind: 'tool-call', call: { id, name, args } };
 }

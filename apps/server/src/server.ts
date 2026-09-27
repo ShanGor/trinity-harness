@@ -32,6 +32,12 @@ export function toServerEvent(sessionId: string, event: LoopEvent): ServerEvent 
         sessionId,
         update: { kind: 'agent_message_chunk', text: event.text },
       };
+    case 'reasoning-delta':
+      return {
+        type: 'session/update',
+        sessionId,
+        update: { kind: 'agent_thought_chunk', text: event.text },
+      };
     case 'message/assistant':
       return {
         type: 'message/committed',
@@ -141,7 +147,13 @@ export async function buildServer(
       messages: surface.map((m) => ({
         role: m.role,
         content: m.content
-          .map((b) => (b.kind === 'text' ? b.text : `[${b.kind}: ${b.uri}]`))
+          .map((b) =>
+            b.kind === 'reasoning'
+              ? `[reasoning]\n${b.text}`
+              : b.kind === 'text'
+                ? b.text
+                : `[${b.kind}: ${b.uri}]`,
+          )
           .join('\n'),
       })),
     };

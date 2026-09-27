@@ -87,6 +87,29 @@ describe('toModelMessages', () => {
     });
   });
 
+  it('replays assistant reasoning blocks verbatim (MiniMax-M3 requirement)', () => {
+    const messages = toModelMessages([
+      user('what is 2+2?'),
+      {
+        type: 'message/assistant',
+        eventId: id(),
+        at: now(),
+        surfaceOp: 'append',
+        content: [{ kind: 'reasoning', text: 'thinking…', signature: 'sig-9' }, text('4')],
+      },
+      user('and 3+3?'),
+    ]);
+    expect(messages).toEqual([
+      { role: 'user', content: 'what is 2+2?' },
+      {
+        role: 'assistant',
+        content: '4',
+        reasoning: [{ text: 'thinking…', signature: 'sig-9' }],
+      },
+      { role: 'user', content: 'and 3+3?' },
+    ]);
+  });
+
   it('ignores non-model-facing events', () => {
     const events: SessionEvent[] = [
       { type: 'session/created', eventId: id(), at: now(), workspaceUri: '/ws' },

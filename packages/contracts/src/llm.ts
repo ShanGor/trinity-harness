@@ -10,10 +10,25 @@ export interface ModelToolCall {
   args: unknown;
 }
 
+/**
+ * One reasoning ("thinking") block of an assistant message. `signature` is the
+ * provider round-trip token (Anthropic thinking-block signature); required by
+ * the AI SDK to echo the block back to Anthropic-compatible endpoints.
+ */
+export interface ReasoningBlock {
+  text: string;
+  signature?: string | undefined;
+}
+
 /** One message in model-conversation form (user/assistant text + tool calls). */
 export interface ConversationMessage {
   role: 'user' | 'assistant' | 'tool';
   content: string;
+  /**
+   * Present on assistant messages produced by a reasoning model; replayed
+   * verbatim on subsequent turns (MiniMax-M3: "原样保留这些内容块").
+   */
+  reasoning?: ReasoningBlock[] | undefined;
   /** Present on assistant messages that requested tool calls. */
   toolCalls?: ModelToolCall[];
   /** Present on role 'tool' messages: which call this result answers. */
@@ -40,6 +55,7 @@ export interface ToolSchema {
 
 export type StreamChunk =
   | { kind: 'text-delta'; text: string }
+  | { kind: 'reasoning-delta'; text: string; signature?: string | undefined }
   | { kind: 'tool-call'; call: ModelToolCall }
   | { kind: 'usage'; inputTokens: number; outputTokens: number }
   | { kind: 'finish'; reason: 'stop' | 'length' | 'error' };

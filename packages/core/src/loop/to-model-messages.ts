@@ -8,13 +8,28 @@ function textFromContent(
       switch (block.kind) {
         case 'text':
           return block.text;
+        case 'reasoning':
+          // Reasoning blocks replay via `reasoning`, never inline in text.
+          return '';
         case 'image':
           return `[image: ${block.uri}]`;
         case 'file':
           return `[file: ${block.uri}]`;
       }
     })
+    .filter((s) => s.length > 0)
     .join('\n');
+}
+
+function reasoningFromContent(
+  content: Extract<SessionEvent, { type: 'message/assistant' }>['content'],
+): { text: string; signature?: string }[] {
+  return content
+    .filter((block) => block.kind === 'reasoning')
+    .map((block) => ({
+      text: block.text,
+      ...(block.signature !== undefined ? { signature: block.signature } : {}),
+    }));
 }
 
 /**
@@ -31,9 +46,15 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
       case 'message/user':
         messages.push({ role: 'user', content: textFromContent(event.content) });
         break;
-      case 'message/assistant':
-        messages.push({ role: 'assistant', content: textFromContent(event.content) });
+      case 'message/assistant': {
+        const reasoning = reasoningFromContent(event.content);
+        messages.push({
+          role: 'assistant',
+          content: textFromContent(event.content),
+          ...(reasoning.length > 0 ? { reasoning } : {}),
+        });
         break;
+      }
       case 'tool/call': {
         toolNames.set(event.callId, event.name);
         let last = messages.at(-1);

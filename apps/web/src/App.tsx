@@ -49,6 +49,7 @@ export default function App() {
   const [items, setItems] = useState<ChatItem[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [input, setInput] = useState('');
   const sessionRef = useRef<string | null>(null);
   const streamRef = useRef<{ close(): void } | null>(null);
 
@@ -192,8 +193,12 @@ export default function App() {
         style={{ flex: 1, overflowY: 'auto', paddingBlock: 16 }}
       />
       <Sender
-        value=""
-        onSubmit={onSubmit}
+        value={input}
+        onChange={setInput}
+        onSubmit={(text) => {
+          setInput('');
+          void onSubmit(text);
+        }}
         loading={busy}
         placeholder="Describe a coding task…"
         style={{ marginBottom: 16 }}

@@ -52,6 +52,15 @@ function toAiMessages(messages: ConversationMessage[]): ModelMessage[] {
       return {
         role: 'assistant',
         content: [
+          // Reasoning blocks precede text/tool calls; the AI SDK re-sends them
+          // as thinking blocks only when the provider signature rides along.
+          ...(m.reasoning?.map((r) => ({
+            type: 'reasoning' as const,
+            text: r.text,
+            ...(r.signature !== undefined
+              ? { providerOptions: { anthropic: { signature: r.signature } } }
+              : {}),
+          })) ?? []),
           ...(m.content.length > 0 ? [{ type: 'text' as const, text: m.content }] : []),
           ...(m.toolCalls?.map((tc) => ({
             type: 'tool-call' as const,
@@ -85,6 +94,12 @@ function mapFinishReason(
 }
 
 export interface GatewayOptions {
+  /**
+   * Anthropic-format thinking control (provider: anthropic). `adaptive` is
+   * what MiniMax-M3 expects (`thinking: {"type": "adaptive"}`); `enabled`
+   * pairs with `reasoningBudgetTokens` for Claude-style budgeted thinking.
+   */
+  thinkingType?: 'adaptive' | 'enabled' | 'disabled' | undefined;
   /** Anthropic extended thinking budget in tokens (provider: anthropic). */
   reasoningBudgetTokens?: number | undefined;
   /** OpenAI reasoning effort level (provider: openai). */
@@ -121,9 +136,18 @@ export class AiSdkGateway implements LLMPort {
     // Reasoning configuration is provider-specific (design.md §17: OTel usage
     // metering rides along in the gateway in later milestones).
     const providerOptions: Record<string, Record<string, unknown>> = {};
-    if (providerName === 'anthropic' && this.opts.reasoningBudgetTokens) {
+    if (
+      providerName === 'anthropic' &&
+      (this.opts.thinkingType || this.opts.reasoningBudgetTokens)
+    ) {
+      const thinkingType = this.opts.thinkingType ?? 'enabled';
       providerOptions['anthropic'] = {
-        thinking: { type: 'enabled', budgetTokens: this.opts.reasoningBudgetTokens },
+        thinking: {
+          type: thinkingType,
+          ...(thinkingType === 'enabled' && this.opts.reasoningBudgetTokens
+            ? { budgetTokens: this.opts.reasoningBudgetTokens }
+            : {}),
+        },
       };
     }
     if (providerName === 'openai' && this.opts.reasoningEffort) {
@@ -165,6 +189,18 @@ export class AiSdkGateway implements LLMPort {
       for await (const chunk of result.stream) {
         if (chunk.type === 'text-delta') {
           yield { kind: 'text-delta', text: chunk.text };
+        } else if (chunk.type === 'reasoning-delta') {
+          // The Anthropic provider delivers the thinking-block signature as
+          // providerMetadata on a separate (empty-text) reasoning-delta.
+          const signature = (
+            chunk.providerMetadata as { anthropic?: { signature?: string } } | undefined
+          )?.anthropic?.signature;
+          yield {
+            kind: 'reasoning-delta',
+            // v7 stream chunks carry reasoning text in `text` (v3 used `delta`).
+            text: chunk.text ?? '',
+            ...(signature !== undefined ? { signature } : {}),
+          };
         }
       }
       const [steps, usage, finishReason] = await Promise.all([
