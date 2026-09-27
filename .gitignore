@@ -1,1 +1,9 @@
 /ref/
+.env
+.env.*
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+/.idea/
+/.github/

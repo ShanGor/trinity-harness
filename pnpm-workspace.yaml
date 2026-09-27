@@ -1,0 +1,14 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true
+
+# Link internal workspace packages referenced with plain "*" versions (npm-compatible,
+# see docs/design.md §3) instead of the pnpm-exclusive workspace: protocol.
+linkWorkspacePackages: true
+
+onlyBuiltDependencies:
+  - esbuild
