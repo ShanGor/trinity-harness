@@ -72,7 +72,7 @@ describe('AcpClient', () => {
       onError: (e) => errors.push(e),
     });
 
-    expect(fake.url).toBe('http://x/api/sessions/abc/events');
+    expect(fake.url).toBe('http://x/api/sessions/abc/events?afterSeq=0');
 
     fake.emit({
       type: 'message/committed',

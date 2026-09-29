@@ -4,6 +4,8 @@
  * lives in packages/core and is the only place that touches provider APIs.
  */
 
+import type { ContentBlock } from './events.js';
+
 export interface ModelToolCall {
   id: string;
   name: string;
@@ -25,6 +27,13 @@ export interface ConversationMessage {
   role: 'user' | 'assistant' | 'tool';
   content: string;
   /**
+   * M4 multimodal (docs/design.md §10): user messages may carry image/file
+   * content blocks in addition to (or instead of) plain `content` text. The
+   * gateway maps them to AI SDK ImagePart/FileParts; `content` remains the
+   * text fallback for providers/blocks without multimodal support.
+   */
+  blocks?: ContentBlock[] | undefined;
+  /**
    * Present on assistant messages produced by a reasoning model; replayed
    * verbatim on subsequent turns (MiniMax-M3: "原样保留这些内容块").
    */
@@ -44,6 +53,13 @@ export interface LLMRequest {
   messages: ConversationMessage[];
   tools: ToolSchema[];
   signal?: AbortSignal | undefined;
+  /**
+   * M4: resolves `blob://` URIs (multimodal blocks, spilled content) to bytes
+   * so the gateway can encode provider-native image/file parts. Provided by
+   * the composition root (BlobStore); absent ⇒ blob URIs are a clean error
+   * (fail-closed, AGENTS.md §3.4).
+   */
+  resolveBlob?: ((uri: string) => Promise<Uint8Array>) | undefined;
 }
 
 /** JSON-Schema-shaped tool description (design.md §5.2). */

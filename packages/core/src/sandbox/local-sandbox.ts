@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { glob as fsGlob } from 'node:fs/promises';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -7,6 +7,8 @@ import type {
   EditFileResult,
   ExecOptions,
   ExecResult,
+  LongRunningProcess,
+  OpenProcessOptions,
   ReadFileResult,
   SandboxPort,
 } from '@trinity-harness/contracts';
@@ -110,5 +112,50 @@ export class LocalSandbox implements SandboxPort {
       matches.push(match);
     }
     return matches;
+  }
+
+  /**
+   * Long-running stdio process (M4 LSP, docs/design.md §9). stderr is drained
+   * to the void (language servers are chatty); the caller consumes stdout as
+   * raw byte chunks and does its own framing (LSP Content-Length headers).
+   */
+  openProcess(command: string, args: string[], opts?: OpenProcessOptions): LongRunningProcess {
+    const cwd = opts?.cwd ? this.resolve(opts.cwd) : this.workspaceRoot;
+    const child = spawn(command, args, {
+      cwd,
+      env: { ...process.env, ...opts?.env },
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    let exitResolve!: (code: number | null) => void;
+    const exited = new Promise<number | null>((resolve) => {
+      exitResolve = resolve;
+    });
+    child.once('exit', (code) => exitResolve(code));
+    child.once('error', () => exitResolve(null));
+    opts?.signal?.addEventListener(
+      'abort',
+      () => {
+        child.kill('SIGTERM');
+      },
+      { once: true },
+    );
+    const stdout = child.stdout;
+    return {
+      write: (data) => {
+        if (!child.killed && child.stdin.writable) {
+          child.stdin.write(data);
+        }
+      },
+      chunks: (): AsyncIterable<Uint8Array> =>
+        (async function* (): AsyncIterable<Uint8Array> {
+          for await (const chunk of stdout) {
+            yield chunk as Uint8Array;
+          }
+        })(),
+      kill: () => {
+        child.kill('SIGTERM');
+      },
+      exited,
+    };
   }
 }

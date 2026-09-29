@@ -18,12 +18,16 @@
     "@fastify/cors": "^11.3.0",
     "@trinity-harness/contracts": "*",
     "@trinity-harness/core": "*",
+    "@trinity-harness/db": "*",
+    "@trinity-harness/redis": "*",
     "@trinity-harness/shared": "*",
     "fastify": "^5.12.5",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "dotenv": "^18.0.4",
-    "tsx": "^4.23.15"
+    "tsx": "^4.23.15",
+    "pg": "^8.23.0",
+    "@types/pg": "^8.23.1"
   }
 }

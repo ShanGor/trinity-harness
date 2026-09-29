@@ -1,6 +1,8 @@
 import type {
   EditFileResult,
   ExecResult,
+  LongRunningProcess,
+  OpenProcessOptions,
   ReadFileResult,
   SandboxPort,
 } from '@trinity-harness/contracts';
@@ -60,5 +62,19 @@ export class FakeSandbox implements SandboxPort {
     // Minimal test double: "*" suffix match on stored paths.
     const prefix = pattern.replace(/\*+$/, '');
     return [...this.files.keys()].filter((p) => p.startsWith(prefix)).sort();
+  }
+
+  /**
+   * Test hook: when set, receives openProcess() calls (fake language servers
+   * in LSP tests); otherwise spawning fails deterministically.
+   */
+  processHandler: ((command: string, args: string[]) => LongRunningProcess) | undefined = undefined;
+
+  openProcess(command: string, args: string[], opts?: OpenProcessOptions): LongRunningProcess {
+    void opts;
+    if (!this.processHandler) {
+      throw new Error(`FakeSandbox: no process handler for: ${command} ${args.join(' ')}`);
+    }
+    return this.processHandler(command, args);
   }
 }

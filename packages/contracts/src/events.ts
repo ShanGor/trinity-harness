@@ -90,6 +90,23 @@ export const compactionSummaryEventSchema = z.object({
   summary: z.string(),
 });
 
+export const approvalRequestedEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('approval/requested'),
+  approvalId: z.uuid(),
+  toolCallId: z.string().min(1),
+  toolName: z.string().min(1),
+  argsPreview: z.string().max(2000),
+});
+
+export const approvalResolvedEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('approval/resolved'),
+  approvalId: z.uuid(),
+  outcome: z.enum(['allowed', 'rejected']),
+  decidedBy: z.string().min(1),
+});
+
 /**
  * Session event log entry — discriminated union, zod-validated, append-only.
  * See docs/design.md §7.
@@ -103,6 +120,8 @@ export const sessionEventSchema = z.discriminatedUnion('type', [
   toolCallEventSchema,
   toolResultEventSchema,
   compactionSummaryEventSchema,
+  approvalRequestedEventSchema,
+  approvalResolvedEventSchema,
 ]);
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
 export type SessionEventType = SessionEvent['type'];

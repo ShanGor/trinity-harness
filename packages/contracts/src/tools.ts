@@ -52,4 +52,10 @@ export interface ToolRegistry {
   /** Zod-validated dispatch; bad args / unknown tools become isError results. */
   execute(call: ToolCall, ctx: ToolContextInput): Promise<ToolResult>;
   schemas(): ToolSchema[];
+  /**
+   * Concurrency class of a tool (design.md §6.3); 'exclusive' tools never run
+   * concurrently with anything. Unknown tools are 'parallel' (they will fail
+   * at execute() with an isError result anyway).
+   */
+  concurrencyOf(name: string): 'parallel' | 'exclusive';
 }

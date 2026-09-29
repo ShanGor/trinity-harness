@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import type { SessionEvent } from '@trinity-harness/contracts';
 import { projectMessages, sessionEventSchema } from '@trinity-harness/contracts';
 import type { AppendOptions, Message, SeqRange, SessionStore } from '@trinity-harness/contracts';
-import { and, asc, desc, eq, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lte, sql } from 'drizzle-orm';
 
 import type { Db } from './client.js';
 import { sessionEvents } from './schema.js';
@@ -102,7 +102,42 @@ export class PgSessionStore implements SessionStore {
     return rows.map((row) => sessionEventSchema.parse(row.payload));
   }
 
+  async loadRange(
+    sessionId: string,
+    opts: { afterSeq: number; toSeq?: number },
+  ): Promise<{ seq: number; event: SessionEvent }[]> {
+    const conditions = [
+      eq(sessionEvents.sessionId, sessionId),
+      gt(sessionEvents.seq, BigInt(opts.afterSeq)),
+    ];
+    if (opts.toSeq !== undefined) {
+      conditions.push(lte(sessionEvents.seq, BigInt(opts.toSeq)));
+    }
+    const rows = await this.db
+      .select()
+      .from(sessionEvents)
+      .where(and(...conditions))
+      .orderBy(asc(sessionEvents.seq));
+    return rows.map((row) => ({
+      seq: Number(row.seq),
+      event: sessionEventSchema.parse(row.payload),
+    }));
+  }
+
   async projectMessages(sessionId: string): Promise<Message[]> {
     return projectMessages(await this.load(sessionId));
+  }
+
+  /**
+   * M3 sanctioned append-only exception (see SessionStore.remove in contracts):
+   * removing a just-appended user prompt that the permission policy rejected
+   * before the turn started. The PG trigger `session_events_append_only`
+   * enforces the narrow contract (only a `message/user` TAIL row may go —
+   * see migration 0003); a violation surfaces as a query error.
+   */
+  async remove(sessionId: string, seq: number): Promise<void> {
+    await this.db
+      .delete(sessionEvents)
+      .where(and(eq(sessionEvents.sessionId, sessionId), eq(sessionEvents.seq, BigInt(seq))));
   }
 }

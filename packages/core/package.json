@@ -17,11 +17,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@trinity-harness/contracts": "*",
-    "@trinity-harness/shared": "*",
     "@ai-sdk/anthropic": "^4.0.65",
     "@ai-sdk/openai": "^4.0.78",
+    "@trinity-harness/contracts": "*",
+    "@trinity-harness/shared": "*",
     "ai": "^7.0.116",
+    "pdf-parse": "^2.4.5",
     "zod": "^4.6.5"
   }
 }

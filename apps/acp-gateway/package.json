@@ -1,0 +1,32 @@
+{
+  "name": "@trinity-harness/acp-gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.5.0",
+    "dotenv": "^18.0.4",
+    "tsx": "^4.23.15",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@trinity-harness/contracts": "*",
+    "@trinity-harness/core": "*",
+    "@trinity-harness/db": "*",
+    "@trinity-harness/redis": "*",
+    "@trinity-harness/shared": "*",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.0"
+  }
+}

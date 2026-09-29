@@ -26,7 +26,23 @@ export class MemorySessionStore implements SessionStore {
     return opts?.toSeq !== undefined ? log.slice(0, opts.toSeq) : [...log];
   }
 
+  async loadRange(
+    sessionId: string,
+    opts: { afterSeq: number; toSeq?: number },
+  ): Promise<{ seq: number; event: SessionEvent }[]> {
+    const log = this.logs.get(sessionId) ?? [];
+    const end = opts.toSeq ?? log.length;
+    return log.slice(opts.afterSeq, end).map((event, i) => ({ seq: opts.afterSeq + i + 1, event }));
+  }
+
   async projectMessages(sessionId: string) {
     return projectMessages(await this.load(sessionId));
+  }
+
+  async remove(sessionId: string, seq: number): Promise<void> {
+    const log = this.logs.get(sessionId);
+    if (log && seq >= 1 && seq <= log.length) {
+      log.splice(seq - 1, 1);
+    }
   }
 }

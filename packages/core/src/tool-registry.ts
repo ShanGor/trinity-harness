@@ -45,6 +45,10 @@ export class CoreToolRegistry implements ToolRegistry {
     }));
   }
 
+  concurrencyOf(name: string): 'parallel' | 'exclusive' {
+    return this.tools.get(name)?.concurrency ?? 'parallel';
+  }
+
   async execute(call: ToolCall, ctx: ToolContextInput): Promise<ToolResult> {
     const def = this.tools.get(call.name);
     if (!def) {

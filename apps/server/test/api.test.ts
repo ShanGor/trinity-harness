@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { CoreAgentLoop, CoreToolRegistry, MemorySessionStore } from '@trinity-harness/core';
+import {
+  CoreAgentLoop,
+  CoreToolRegistry,
+  MemorySessionStore,
+  writeFileTool,
+} from '@trinity-harness/core';
 import {
   FakeLLM,
   FakeSandbox,
@@ -19,6 +24,8 @@ function makeApp() {
     () => toolCallThenFinish('c1', 'write_file', { path: 'hi.txt', content: 'hello' }),
     () => textChunks('File written.'),
   );
+  const tools = new CoreToolRegistry(sandbox);
+  tools.register(writeFileTool);
   return buildServer({
     store,
     workspaceRoot: '/ws',
@@ -26,7 +33,7 @@ function makeApp() {
       new CoreAgentLoop({
         llm,
         model: 'fake/model',
-        tools: new CoreToolRegistry(sandbox),
+        tools,
         store,
         workspaceRoot: '/ws',
       }),
@@ -130,7 +137,11 @@ describe('buildServer', () => {
   });
 
   it('serves the projected history', async () => {
-    const created = await fetch(`${baseUrl}/api/sessions`, { method: 'POST', body: '{}' });
+    const created = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
     const { sessionId } = (await created.json()) as { sessionId: string };
     await fetch(`${baseUrl}/api/sessions/${sessionId}/messages`, {
       method: 'POST',

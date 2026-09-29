@@ -13,7 +13,7 @@ An enterprise-grade, multi-user, browser ↔ server AI Agent platform (core scen
 - **Reference repositories**: `ref/deepseek-harness` (dsh), `ref/opencode` (oc).
   - ⚠️ `ref/` is gitignored and **read-only reference material. Do not import from it or copy large chunks of code into this repository as committed code** (mind their LICENSEs).
   - Follow the workflow in `docs/design.md` §20 to upgrade reference versions.
-- The project is currently in **M1** (minimal loop: Loop + AI SDK gateway + file/bash tools + in-memory session + simplified Web UI); M0 (monorepo foundation, Drizzle-managed PG `session_events`) is complete. See `docs/project-progress.md`.
+- The project is currently past **M3** (M2 + ACP HTTP binding `POST /acp`/`GET /acp/stream`, stdio `apps/acp-gateway` on the official `@agentclientprotocol/sdk`, permission presets, and the human approval flow with `approvals` table + `approval/*` log events); M0/M1/M2 are complete. See `docs/project-progress.md`.
 
 ---
 

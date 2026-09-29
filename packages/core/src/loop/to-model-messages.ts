@@ -1,7 +1,12 @@
-import type { ConversationMessage, SessionEvent } from '@trinity-harness/contracts';
+import {
+  compactionRanges,
+  compactionSummaryText,
+  type ConversationMessage,
+  type SessionEvent,
+} from '@trinity-harness/contracts';
 
 function textFromContent(
-  content: Extract<SessionEvent, { type: 'message/user' }>['content'],
+  content: Extract<SessionEvent, { type: 'message/user' | 'message/assistant' }>['content'],
 ): string {
   return content
     .map((block) => {
@@ -21,6 +26,22 @@ function textFromContent(
     .join('\n');
 }
 
+function mediaBlocksFromContent(
+  content: Extract<SessionEvent, { type: 'message/user' }>['content'],
+): ConversationMessage['blocks'] {
+  const blocks = content.filter((b) => b.kind === 'image' || b.kind === 'file');
+  return blocks.length > 0 ? blocks : undefined;
+}
+
+function textOnlyFromContent(
+  content: Extract<SessionEvent, { type: 'message/user' | 'message/assistant' }>['content'],
+): string {
+  return content
+    .filter((block) => block.kind === 'text')
+    .map((block) => (block.kind === 'text' ? block.text : ''))
+    .join('\n');
+}
+
 function reasoningFromContent(
   content: Extract<SessionEvent, { type: 'message/assistant' }>['content'],
 ): { text: string; signature?: string }[] {
@@ -36,16 +57,45 @@ function reasoningFromContent(
  * Pure fold of the session event log into model-conversation messages
  * (docs/design.md §7): message events become user/assistant turns; tool/call
  * attaches to the preceding assistant message; tool/result becomes a
- * role:'tool' message. Deterministic — unit tested without any IO.
+ * role:'tool' message. M4: events inside applied `compaction/summary` ranges
+ * are skipped and the summary is injected IN PLACE of the range (chronological
+ * order preserved despite the append-only log); user messages carry image/file
+ * blocks for the multimodal gateway. Deterministic — unit tested without IO.
  */
 export function toModelMessages(events: readonly SessionEvent[]): ConversationMessage[] {
   const messages: ConversationMessage[] = [];
+  const ranges = compactionRanges(events);
+  let emitIdx = 0;
+  let activeIdx = -1; // range currently covering events
   const toolNames = new Map<string, string>();
-  for (const event of events) {
+  events.forEach((event, i) => {
+    const seq = i + 1;
+    // In-place summary insertion at the start of each covered range; the
+    // range becomes active so its own events (starting at fromSeq) are
+    // skipped below.
+    while (emitIdx < ranges.length && ranges[emitIdx]!.fromSeq === seq) {
+      messages.push({ role: 'user', content: compactionSummaryText(ranges[emitIdx]!.summary) });
+      activeIdx = emitIdx;
+      emitIdx += 1;
+    }
+    if (activeIdx >= 0 && seq >= ranges[activeIdx]!.fromSeq && seq <= ranges[activeIdx]!.toSeq) {
+      return; // covered by the current compaction range
+    }
     switch (event.type) {
-      case 'message/user':
-        messages.push({ role: 'user', content: textFromContent(event.content) });
+      case 'message/user': {
+        const media = mediaBlocksFromContent(event.content);
+        messages.push({
+          role: 'user',
+          // With media blocks the text part carries only text blocks — image
+          // content reaches the provider via `blocks`, not as a marker line.
+          content:
+            media !== undefined
+              ? textOnlyFromContent(event.content)
+              : textFromContent(event.content),
+          ...(media !== undefined ? { blocks: media } : {}),
+        });
         break;
+      }
       case 'message/assistant': {
         const reasoning = reasoningFromContent(event.content);
         messages.push({
@@ -78,8 +128,13 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
         });
         break;
       default:
-        break; // session/created, turn/*, compaction/* are not model-facing
+        break; // session/created, turn/*, approval/*, compaction/* not model-facing
     }
+  });
+  // Trailing ranges (defensive: compaction normally never covers the tail).
+  while (emitIdx < ranges.length) {
+    messages.push({ role: 'user', content: compactionSummaryText(ranges[emitIdx]!.summary) });
+    emitIdx += 1;
   }
   return messages;
 }

@@ -4,6 +4,7 @@ packages:
 
 allowBuilds:
   esbuild: true
+  msgpackr-extract: false # optional native accelerator; not required
   unrs-resolver: true
 
 # Link internal workspace packages referenced with plain "*" versions (npm-compatible,

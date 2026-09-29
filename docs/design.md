@@ -75,19 +75,24 @@ Monorepo 采用 pnpm/npm workspaces，分层目录：
 trinity-harness/
 ├── apps/
 │   ├── web/                    # React 19 + antd 前端
-│   ├── server/                 # API 服务（Fastify，无状态）
-│   ├── agent-worker/           # Agent 执行进程（Loop 所在）
-│   └── acp-gateway/            # ACP 协议网关（stdio ↔ 内部 API）
+│   ├── server/                 # API 服务（Fastify，无状态；M2 起 enqueue-only + SSE relay）
+│   ├── agent-worker/           # Agent 执行进程（Loop 所在；消费 BullMQ turn 队列）
+│   ├── audit-consumer/         # 审计消费者（M2：audit stream → audit_log，见 §13）
+│   └── acp-gateway/            # ACP 协议网关（stdio ↔ /acp HTTP binding，M3，官方 SDK）
 ├── packages/
 │   ├── contracts/              # ★ 全局接口契约（所有模块边界的唯一定义处）
-│   ├── core/                   # 模块实现：loop、tools、session、llm…
-│   ├── modules/                # 各功能模块实现（见 §5）
+│   ├── core/                   # 模块实现：loop、tools、session、llm、auth（token/password）…
+│   ├── redis/                  # Redis 适配层（EventBus/Stream/PubSub/BullMQ，M2）
 │   ├── shared/                 # 工具函数、zod schema、事件类型
-│   └── db/                     # PostgreSQL 适配层（Drizzle schema/migrations、SessionStore 实现）
+│   └── db/                     # PostgreSQL 适配层（Drizzle schema/migrations、SessionStore/Identity/Audit 实现）
 ├── deploy/
 │   └── k8s/                    # K8s manifests / Helm
 └── docs/                       # 设计文档
 ```
+
+> M2 实现注记：§13 审计采用"独立 `audit` stream + `audit_log` 表 + 独立 consumer"路径（`apps/audit-consumer`），登录等无会话上下文的操作由此覆盖；`session_events` 内嵌 `audit/*` 事件类型未采用。
+>
+> M3 实现注记：§12 审批采用"Loop 内策略门（`PolicyToolRegistry` 装饰器）+ Redis Pub/Sub 审批通道（`sessappr:*`）+ `approvals` 表 + 事件日志 `approval/requested`/`approval/resolved`"组合；`session_events` 的 append-only 触发器为"被策略拒绝且从未运行的 user prompt"开了一个受控例外（仅允许删除会话尾部的 `message/user` 行，迁移 0003）。审批通道 fail-closed：无应答器/超时/取消一律拒绝。`acp-gateway` 使用官方 `@agentclientprotocol/sdk`（包名无连字符）走 stdio NDJSON，翻译到 server 的 `/acp` HTTP binding；`session/prompt` 由 server 持有至 turn 结束（ACP 语义），`session/request_permission` 经 `/acp/stream` 下发、经 REST respond 端点回传。
 
 **`packages/contracts` 是全设计的核心**：所有模块接口（端口）、事件类型、DTO schema 集中定义，模块之间只允许依赖它。
 
@@ -296,6 +301,7 @@ while (msg = inbox.claim()):            // inbox = 用户消息 + 工具延期�
 - **Fork**：复制事件前缀 + `session/forked` 标记，O(1) 元数据操作 + 逻辑视图。
 - **回放**：worker 崩溃恢复时，从上次 `turn/end` 之后截断的尾部自动合成关闭事件（借鉴 dsh 的 torn-tail 修复）。
 - **Compaction**：LLM 生成摘要替换表面区间；摘要边界吸附在 tool call/result 配对处；图像转储（image offload）、大结果 spill 到对象存储仅留引用（借鉴 dsh `spill/`）。
+  - **M4 实现备注**：`compaction/summary` 事件携带 `[fromSeq, toSeq]`，投影**原地**替换该区间（摘要占据首个被覆盖事件的位置，时序不变）；边界按"整个交换（用户消息 + 其后全部事件）"吸附，当前 turn 的最新交换永不压缩；compaction 在每个模型请求前与工具波后检查上下文压力（`ContextManager`，可注入 token 估算器）。spill 落在 `BlobStore`（M4 为本地文件系统适配器，S3 可替换），日志仅存 `blob://` 引用 + 预览，`read_blob` 工具取回。
 
 ---
 
@@ -324,6 +330,7 @@ while (msg = inbox.claim()):            // inbox = 用户消息 + 工具延期�
 - **进程模型**：agent-worker Pod 内运行 LSP 进程池，按 workspace 缓存；worker 缩容时优雅 shutdown。
 - 对 Loop 的暴露：LSP 能力通过 `lsp_*` 工具供模型主动调用；同时 **diagnostics 作为自动上下文注入**——在 `beforeStep` 拦截点收集当前会话涉及文件的诊断信息，注入 system prompt 区域（带缓存与失效策略）。
 - 伸缩考虑：LSP 进程是 worker 内存大头，配置 per-pod 上限 + LRU 回收。
+  - **M4 实现备注**：语言服务器进程经 `SandboxPort.openProcess`（长生命周期 stdio 双工，唯一允许的 spawn 路径）拉起，JSON-RPC 由 core 内的 `LspConnection`（Content-Length 帧）实现；进程池按 `(workspaceRoot, lang)` 惰性启动、单飞（single-flight）、`LSP_MAX_SERVERS` LRU 回收、`dispose()` 确定性关闭。diagnostics 自动注入实现为 Loop 的 `augmentSystem` 钩子：扫描会话日志近期工具调用涉及的文件（≤5 个），每步前拉取诊断拼进 system prompt，失败降级为空注入。
 
 ---
 
@@ -336,6 +343,8 @@ while (msg = inbox.claim()):            // inbox = 用户消息 + 工具延期�
 | 输出             | 图表生成（mermaid/代码）前端渲染；图像生成工具预留                                                                                 |
 | 上下文成本       | 图片超过阈值时压缩/转储，引用代替内联（offload）                                                                                   |
 | 会话中的历史附件 | 事件日志只存引用（URI + 摘要），内容在对象存储                                                                                     |
+
+**M4 实现备注**：`BlobStore` 端口（`blob://` URI）+ 本地文件系统适配器（server 与 worker 共享 workspace 磁盘；S3/MinIO 适配器可替换）。上传走 `POST /api/sessions/:id/attachments`（octet-stream，MIME 白名单 image/png/jpeg/webp/gif + application/pdf，20MB 上限），`GET /api/blobs/<key>` 取回（UI 渲染/模型取回）。PDF 文本抽取用纯 TS 的 `pdf-parse`，抽取文本存为伴生 blob 并作为 text block 注入；**页图渲染通道暂缓**（Node 侧无原生 canvas，留待 M5+/客户端渲染）。多模态 block 经 `LLMRequest.resolveBlob` 在网关侧编码为 provider 原生 image/file part（fail-closed：无法解析 ⇒ 报错，不静默丢附件）。
 
 ---
 

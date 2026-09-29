@@ -1,4 +1,5 @@
 import type {
+  ContentBlock,
   ConversationMessage,
   LLMPort,
   LLMRequest,
@@ -10,6 +11,38 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 
 export type ModelFactory = (modelId: string) => LanguageModel;
+
+const BLOB_SCHEME = 'blob://';
+
+type AiUserPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; image: string }
+  | { type: 'file'; data: string; mediaType: string };
+
+async function blockToAiPart(
+  block: ContentBlock,
+  resolveBlob: LLMRequest['resolveBlob'],
+): Promise<AiUserPart> {
+  if (block.kind === 'text') return { type: 'text', text: block.text };
+  if (block.kind === 'reasoning') return { type: 'text', text: block.text };
+  const isImage = block.kind === 'image';
+  if (block.uri.startsWith(BLOB_SCHEME)) {
+    // Fail-closed: blob content must be resolvable to reach the provider —
+    // never silently drop an attachment (AGENTS.md §3.4).
+    if (!resolveBlob) {
+      throw new Error(`cannot encode ${block.kind} part: no blob resolver for ${block.uri}`);
+    }
+    const bytes = await resolveBlob(block.uri);
+    const mime = block.mimeType ?? (isImage ? 'image/png' : 'application/octet-stream');
+    const dataUrl = `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`;
+    return isImage
+      ? { type: 'image', image: dataUrl }
+      : { type: 'file', data: dataUrl, mediaType: mime };
+  }
+  if (isImage) return { type: 'image', image: block.uri };
+  // Non-blob file URIs still need a media type for the AI SDK FilePart.
+  return { type: 'file', data: block.uri, mediaType: block.mimeType ?? 'application/octet-stream' };
+}
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -43,13 +76,31 @@ export function defaultProviders(): Record<string, ModelFactory> {
   };
 }
 
-function toAiMessages(messages: ConversationMessage[]): ModelMessage[] {
-  return messages.map((m): ModelMessage => {
+async function toAiMessages(
+  messages: ConversationMessage[],
+  resolveBlob: LLMRequest['resolveBlob'],
+): Promise<ModelMessage[]> {
+  const out: ModelMessage[] = [];
+  for (const m of messages) {
     if (m.role === 'user') {
-      return { role: 'user', content: m.content };
+      // M4 multimodal: image/file blocks become AI SDK parts; plain text
+      // messages stay strings (zero overhead for text-only sessions).
+      if (m.blocks !== undefined && m.blocks.length > 0) {
+        const parts = await Promise.all(m.blocks.map((b) => blockToAiPart(b, resolveBlob)));
+        out.push({
+          role: 'user',
+          content: [
+            ...(m.content.length > 0 ? [{ type: 'text' as const, text: m.content }] : []),
+            ...parts,
+          ],
+        });
+      } else {
+        out.push({ role: 'user', content: m.content });
+      }
+      continue;
     }
     if (m.role === 'assistant') {
-      return {
+      out.push({
         role: 'assistant',
         content: [
           // Reasoning blocks precede text/tool calls; the AI SDK re-sends them
@@ -69,9 +120,10 @@ function toAiMessages(messages: ConversationMessage[]): ModelMessage[] {
             input: tc.args,
           })) ?? []),
         ],
-      };
+      });
+      continue;
     }
-    return {
+    out.push({
       role: 'tool',
       content: [
         {
@@ -81,8 +133,9 @@ function toAiMessages(messages: ConversationMessage[]): ModelMessage[] {
           output: { type: 'text', value: m.content },
         },
       ],
-    };
-  });
+    });
+  }
+  return out;
 }
 
 function mapFinishReason(
@@ -157,7 +210,7 @@ export class AiSdkGateway implements LLMPort {
     const result = streamText({
       model: factory(modelId),
       ...(req.system !== undefined ? { system: req.system } : {}),
-      messages: toAiMessages(req.messages),
+      messages: await toAiMessages(req.messages, req.resolveBlob),
       tools: Object.fromEntries(
         req.tools.map((t) => [
           t.name,

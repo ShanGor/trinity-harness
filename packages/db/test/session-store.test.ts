@@ -1,6 +1,6 @@
 import 'dotenv/config';
 
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -158,6 +158,18 @@ describe.skipIf(!reachable)('PgSessionStore (integration)', () => {
   it('enforces append-only at the database level (trigger)', async () => {
     const sessionId = crypto.randomUUID();
     await store.append(sessionId, [userMessage('immutable')]);
+    // A second event makes the user message a NON-tail row: even the M3
+    // prompt-gate exception must not allow its deletion.
+    await store.append(sessionId, [
+      {
+        type: 'tool/call',
+        eventId: crypto.randomUUID(),
+        at: new Date().toISOString(),
+        callId: 'c1',
+        name: 'read_file',
+        args: { path: 'x' },
+      },
+    ]);
 
     // drizzle re-wraps driver errors; the original PG message lives in `cause`.
     const pgMessage = (err: unknown): string =>
@@ -179,9 +191,11 @@ describe.skipIf(!reachable)('PgSessionStore (integration)', () => {
     expect(updateError).not.toBeNull();
     expect(pgMessage(updateError)).toMatch(/append-only/i);
 
+    // Deleting the (non-tail) user message is forbidden (M3 only sanctions a
+    // TAIL `message/user` removal — the prompt-gate case).
     const deleteError = await db
       .delete(sessionEvents)
-      .where(eq(sessionEvents.sessionId, sessionId))
+      .where(and(eq(sessionEvents.sessionId, sessionId), eq(sessionEvents.type, 'message/user')))
       .then(
         () => null,
         (err: unknown) => err,
