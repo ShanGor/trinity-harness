@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.22.0",
   "engines": {
     "node": ">=22.12.0"
   },
@@ -22,7 +23,8 @@
     "start:worker": "pnpm --filter @trinity-harness/agent-worker run start",
     "start:audit": "pnpm --filter @trinity-harness/audit-consumer run start",
     "start:gateway": "pnpm --filter @trinity-harness/acp-gateway run start",
-    "dev:gateway": "pnpm --filter @trinity-harness/acp-gateway run dev"
+    "dev:gateway": "pnpm --filter @trinity-harness/acp-gateway run dev",
+    "load:test": "node scripts/load-test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

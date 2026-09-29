@@ -20,12 +20,51 @@ const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 const MAX_BUFFER = 10 * 1024 * 1024;
 
 /**
+ * M5 hardening (docs/design.md §12.3): `minimal` (DEFAULT) scrubs the env of
+ * every spawned shell/process so server-side secrets (model API keys,
+ * TOKEN_SECRET, DATABASE_URL, …) can never leak into tool-executed children
+ * (AGENTS.md §5). `inherit` is the legacy full-passthrough mode for local
+ * convenience only — never used in composed deployments.
+ */
+export type SandboxEnvMode = 'minimal' | 'inherit';
+
+export interface LocalSandboxOptions {
+  envMode?: SandboxEnvMode | undefined;
+}
+
+/**
  * Local development sandbox (docs/design.md §12.3, M1): filesystem rooted at
  * the workspace directory, commands via `bash -c`. This class is the ONLY
  * place in the repo allowed to spawn processes or touch the FS outside tests.
  */
 export class LocalSandbox implements SandboxPort {
-  constructor(private readonly workspaceRoot: string) {}
+  private readonly envMode: SandboxEnvMode;
+
+  constructor(
+    private readonly workspaceRoot: string,
+    opts?: LocalSandboxOptions,
+  ) {
+    this.envMode = opts?.envMode ?? 'minimal';
+  }
+
+  /**
+   * The environment handed to spawned children. `minimal` keeps only
+   * operational variables (PATH so bash/python/node resolve, HOME/LANG/TZ/
+   * TMPDIR for language servers); everything else — in particular all
+   * secrets — stays server-side.
+   */
+  private childEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+    if (this.envMode === 'inherit') {
+      return { ...process.env, ...extra };
+    }
+    const minimal: NodeJS.ProcessEnv = {};
+    for (const key of ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR', 'USER', 'SHELL']) {
+      const value = process.env[key];
+      if (value !== undefined) minimal[key] = value;
+    }
+    minimal['TRINITY_WORKSPACE'] = this.workspaceRoot;
+    return { ...minimal, ...extra };
+  }
 
   /** Resolves a workspace-relative path and refuses escapes. */
   resolve(relativePath: string): string {
@@ -48,7 +87,7 @@ export class LocalSandbox implements SandboxPort {
         ['-c', command],
         {
           cwd,
-          env: { ...process.env, ...opts?.env },
+          env: this.childEnv(opts?.env),
           signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals),
           maxBuffer: MAX_BUFFER,
         },
@@ -123,7 +162,7 @@ export class LocalSandbox implements SandboxPort {
     const cwd = opts?.cwd ? this.resolve(opts.cwd) : this.workspaceRoot;
     const child = spawn(command, args, {
       cwd,
-      env: { ...process.env, ...opts?.env },
+      env: this.childEnv(opts?.env),
       stdio: ['pipe', 'pipe', 'ignore'],
     });
     let exitResolve!: (code: number | null) => void;

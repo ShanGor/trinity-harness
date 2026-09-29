@@ -1,0 +1,14 @@
+Trinity Harness {{ .Chart.AppVersion }} (M5 production chart)
+
+Access:
+  Web UI:   http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}/
+  API:      http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}/api/health
+  ACP:      http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}/acp  (POST JSON-RPC, stream via /acp/stream)
+
+First boot:
+  1. `pnpm db:migrate` has been applied against secrets.databaseUrl.
+  2. Sign in with secrets.adminEmail / secrets.adminPassword and rotate the
+     password; provision users via POST /api/admin/users.
+  3. Set the tenant model quota: PUT /api/admin/quota {"dailyTokens": …}.
+
+Before going live, walk docs/production-checklist.md (M5 acceptance).

@@ -1,0 +1,11 @@
+node_modules
+**/node_modules
+**/dist
+.git
+ref
+docs
+*.md
+.env
+.env.*
+deploy/helm
+scripts

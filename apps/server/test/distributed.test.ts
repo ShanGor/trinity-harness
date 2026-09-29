@@ -116,6 +116,8 @@ describe.skipIf(!hasInfra)('M2 distributed topology (integration)', () => {
   let queue: RedisTurnQueue;
   const sessionIds: string[] = [];
   const auditProbe: { actions: string[]; dispose(): void } = { actions: [], dispose: () => {} };
+  // M5: the enqueued TurnTask must carry tenant attribution for usage/quota.
+  const tenantProbe: string[] = [];
 
   beforeAll(async () => {
     const env = loadEnv(process.env, { requireDatabaseUrl: true });
@@ -140,6 +142,7 @@ describe.skipIf(!hasInfra)('M2 distributed topology (integration)', () => {
     // In-process worker consuming the same queue the server enqueues to.
     const sandbox = new FakeSandbox();
     worker = createTurnWorker({ url: redisUrl }, async (task) => {
+      tenantProbe.push(task.tenantId);
       const tools = new CoreToolRegistry(sandbox);
       tools.register(writeFileTool);
       const llm = new FakeLLM(
@@ -260,6 +263,10 @@ describe.skipIf(!hasInfra)('M2 distributed topology (integration)', () => {
     await expect
       .poll(() => auditProbe.actions.filter((a) => a === 'tool/call').length, { timeout: 5000 })
       .toBeGreaterThanOrEqual(1);
+
+    // M5: tenant attribution traveled with the task (no-auth server ⇒ NIL).
+    expect(tenantProbe.length).toBeGreaterThanOrEqual(1);
+    expect(tenantProbe[0]).toBe('00000000-0000-0000-0000-000000000000');
 
     // Resume: reconnect with Last-Event-ID right after the first log event;
     // PG gap-fill + stream replay must deliver the tail again, in order.

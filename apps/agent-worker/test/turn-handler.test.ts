@@ -73,6 +73,7 @@ describe('createTurnHandler', () => {
       sessionId,
       prompt: 'hi',
       actor: 'u1',
+      tenantId: 't1',
       promptSeq: 1,
       policy: parsePermissionPolicy('workspace-write'),
     };
@@ -131,6 +132,7 @@ describe('createTurnHandler', () => {
       prompt: 'look at this',
       content,
       actor: 'u1',
+      tenantId: 't1',
       promptSeq: 1,
       policy: parsePermissionPolicy('workspace-write'),
     });

@@ -1,0 +1,45 @@
+{{- if .Values.networkPolicy.enabled }}
+# Egress allowlist (docs/design.md §12.5): default-DENY all egress. Allowed:
+# DNS, intra-namespace traffic, external datastores (networkPolicy.
+# datastoreCidrs), and explicit extraEgressCidrs. Outbound internet
+# (web_fetch/web_search) stays OFF unless its CIDRs are listed — fail-closed.
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: {{ include "trinity-harness.fullname" . }}-default-deny
+  labels:
+    {{- include "trinity-harness.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # All pods accept traffic from the ingress controller / same namespace.
+    - from:
+        - podSelector: {}
+  egress:
+    # Same-namespace traffic (server ↔ web ↔ gateway).
+    - to:
+        - podSelector: {}
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # External PostgreSQL / Redis.
+    {{- range .Values.networkPolicy.datastoreCidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+    {{- end }}
+    # Explicit allowlist entries (egress allowlist, off by default).
+    {{- range .Values.networkPolicy.extraEgressCidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+    {{- end }}
+{{- end }}

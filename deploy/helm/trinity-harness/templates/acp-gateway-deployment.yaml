@@ -1,0 +1,42 @@
+{{- if .Values.acpGateway.enabled }}
+# In-cluster acp-gateway (docs/design.md §4 cloud binding). Editors normally
+# spawn the gateway themselves as a LOCAL stdio process instead — this
+# Deployment only exists for the cloud topology.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trinity-harness.fullname" . }}-acp-gateway
+  labels:
+    app.kubernetes.io/name: acp-gateway
+    {{- include "trinity-harness.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.acpGateway.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: acp-gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: acp-gateway
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: acp-gateway
+          image: {{ include "trinity-harness.image" (dict "image" .Values.acpGateway.image "global" .Values.global) | quote }}
+          imagePullPolicy: IfNotPresent
+          {{- include "trinity-harness.envFrom" . | nindent 10 }}
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          {{- include "trinity-harness.securityContext" . | nindent 10 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

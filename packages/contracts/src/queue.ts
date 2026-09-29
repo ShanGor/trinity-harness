@@ -16,6 +16,8 @@ export interface TurnTask {
   content?: ContentBlock[] | undefined;
   /** Identity of the submitting user, persisted as the event-log actor. */
   actor: string;
+  /** M5: tenant attribution for usage recording + quota gating (§17). */
+  tenantId: string;
   /** M3: session seq of the user message that triggered this turn. */
   promptSeq: number;
   /** M3: session permission policy snapshot for this turn (fail-closed). */

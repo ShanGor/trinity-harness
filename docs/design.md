@@ -83,16 +83,22 @@ trinity-harness/
 │   ├── contracts/              # ★ 全局接口契约（所有模块边界的唯一定义处）
 │   ├── core/                   # 模块实现：loop、tools、session、llm、auth（token/password）…
 │   ├── redis/                  # Redis 适配层（EventBus/Stream/PubSub/BullMQ，M2）
+│   ├── otel/                   # OTel SDK 引导层（OTLP/Prometheus 导出，M5）
 │   ├── shared/                 # 工具函数、zod schema、事件类型
 │   └── db/                     # PostgreSQL 适配层（Drizzle schema/migrations、SessionStore/Identity/Audit 实现）
 ├── deploy/
-│   └── k8s/                    # K8s manifests / Helm
+│   ├── docker/                 # 各组件 Dockerfile + web nginx 配置（M5）
+│   └── helm/trinity-harness/   # Helm chart：HPA/PDB/Ingress/NetworkPolicy（M5）
+├── scripts/
+│   └── load-test.mjs           # 性能压测脚本（M5，§18 验收）
 └── docs/                       # 设计文档
 ```
 
 > M2 实现注记：§13 审计采用"独立 `audit` stream + `audit_log` 表 + 独立 consumer"路径（`apps/audit-consumer`），登录等无会话上下文的操作由此覆盖；`session_events` 内嵌 `audit/*` 事件类型未采用。
 >
 > M3 实现注记：§12 审批采用"Loop 内策略门（`PolicyToolRegistry` 装饰器）+ Redis Pub/Sub 审批通道（`sessappr:*`）+ `approvals` 表 + 事件日志 `approval/requested`/`approval/resolved`"组合；`session_events` 的 append-only 触发器为"被策略拒绝且从未运行的 user prompt"开了一个受控例外（仅允许删除会话尾部的 `message/user` 行，迁移 0003）。审批通道 fail-closed：无应答器/超时/取消一律拒绝。`acp-gateway` 使用官方 `@agentclientprotocol/sdk`（包名无连字符）走 stdio NDJSON，翻译到 server 的 `/acp` HTTP binding；`session/prompt` 由 server 持有至 turn 结束（ACP 语义），`session/request_permission` 经 `/acp/stream` 下发、经 REST respond 端点回传。
+>
+> M5 实现注记：§17 配额采用"`model_usage` 表（迁移 0004）+ `tenants.quota` jsonb + `UsagePort`/`QuotaAdminPort`（contracts）+ Loop 内 `beforeModelCall` 门（超窗/读失败均 fail-closed 拒绝，friendly error 经 `turn/end` detail 返回）"；usage chunk 按模型请求聚合成单条记录，best-effort 落库。窗口为日历窗（时/日/月 UTC）。§17 可观测性：core 只用 `@opentelemetry/api` 全局 tracer/meter（无 SDK 时为 no-op），`packages/otel` 在各 app composition root 按 `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_PROMETHEUS_PORT` 注册 NodeSDK；埋点 = turn/step/tool/approval 四个 span + token/工具成功率/审批延迟/turn 耗时/队列深度（worker 侧 ObservableGauge 直读 BullMQ counts）指标。§12.3 Sandbox 加固：`LocalSandbox` 默认 env 净化（minimal：只传 PATH/HOME/LANG/TZ/TMPDIR 等运维变量，`SANDBOX_ENV_MODE=inherit` 仅为本地兼容保留）；gVisor 以 K8s `runtimeClassName` 预留（`agentWorker.runtimeClassName`），Firecracker 预留同一端口。§16 部署：`deploy/docker/*.Dockerfile` + `deploy/helm/trinity-harness`（server HPA 2–20 + PDB、worker HPA 1–50、audit-consumer 2、acp-gateway 默认关、Ingress 关 SSE 缓冲、NetworkPolicy 默认拒绝出口 + allowlist 外发关断）；worker 队列深度 0→N 伸缩需 KEDA（HPA v2 不支持队列指标，见 docs/production-checklist.md）。server/worker/audit-consumer 均有 SIGTERM drain（BullMQ close 等待在途 turn）。
 
 **`packages/contracts` 是全设计的核心**：所有模块接口（端口）、事件类型、DTO schema 集中定义，模块之间只允许依赖它。
 
@@ -158,6 +164,7 @@ trinity-harness/
 | `Audit`                 | 全链路审计事件采集与查询                                    | `EventBus`                                                |
 | `Multimodal`            | 图片/文档解析、附件存储、内容分块                           | `BlobStore`                                               |
 | `Sandbox`               | 命令执行与文件系统隔离（先容器内，预留 gVisor/Firecracker） | —                                                         |
+| `Observability`         | OTel 埋点（api 全局）+ SDK 引导（OTLP/Prometheus 导出）     | `@opentelemetry/api`                                      |
 | `Identity & Tenant`     | 用户、租户、RBAC、配额                                      | PostgreSQL                                                |
 | `Event Bus`             | Redis Stream 封装：发布、消费组、重放                       | Redis                                                     |
 | `API Server`            | REST/SSE 网关、`/acp` HTTP binding、会话控制、配置          | 以上全部（通过 DI）                                       |

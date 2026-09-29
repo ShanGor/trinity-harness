@@ -1,0 +1,15 @@
+{{- if .Values.server.pdb.enabled }}
+# Rolling upgrades keep the API available (docs/design.md §16).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "trinity-harness.fullname" . }}-server
+  labels:
+    {{- include "trinity-harness.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.server.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: server
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

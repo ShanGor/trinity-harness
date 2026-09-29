@@ -17,13 +17,14 @@
   "dependencies": {
     "@trinity-harness/contracts": "*",
     "@trinity-harness/db": "*",
+    "@trinity-harness/otel": "*",
     "@trinity-harness/redis": "*",
     "@trinity-harness/shared": "*",
     "dotenv": "^18.0.4",
     "tsx": "^4.23.15"
   },
   "devDependencies": {
-    "pg": "^8.23.0",
-    "@types/pg": "^8.23.1"
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.0"
   }
 }

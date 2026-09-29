@@ -2,9 +2,9 @@
 
 Enterprise-grade, multi-user, browser ↔ server AI Agent platform — core scenario: software engineering agents (coding, debugging, refactoring, code review).
 
-> Status: **M4** (intelligence complete: LSP tools + diagnostics injection, context compaction, subagents, multimodal attachments with spill). Roadmap and architecture: [`docs/design.md`](docs/design.md). Progress: [`docs/project-progress.md`](docs/project-progress.md). Agent behavior rules: [`AGENTS.md`](AGENTS.md).
+> Status: **M5** (production: tenant token quotas, OTel observability, sandbox env scrubbing, Docker images + Helm chart with HPA/Ingress/NetworkPolicy, load test). Roadmap and architecture: [`docs/design.md`](docs/design.md). Progress: [`docs/project-progress.md`](docs/project-progress.md). Release gate: [`docs/production-checklist.md`](docs/production-checklist.md). Agent behavior rules: [`AGENTS.md`](AGENTS.md).
 
-## What works today (M4 = M3 + intelligence)
+## What works today (M5 = M4 + production hardening)
 
 - **Agent Loop** — turn/step driver with streaming LLM output, a parallel tool pool (`maxParallelTools`, `exclusive` tools), abort handling, and an event-sourced session log (everything replayable).
 - **PG event sourcing** — the loop persists into PostgreSQL `session_events` (append-only, hash-chained, monotonic seq, per-session advisory lock); the PG log is the single source of truth.
@@ -23,6 +23,11 @@ Enterprise-grade, multi-user, browser ↔ server AI Agent platform — core scen
 - **Human approval flow** — gated tool calls block the turn and push a `permission_request` to every connected UI; answers travel back over Redis Pub/Sub (fail-closed: no listener/timeout ⇒ rejected); request + outcome are committed to the event log (`approval/requested`, `approval/resolved`) and the `approvals` table, and audited.
 - **ACP HTTP binding** — `POST /acp` (JSON-RPC) + `GET /acp/stream` (SSE of JSON-RPC messages, seq ids) on the server; `session/prompt` holds until the turn ends (ACP semantics); `session/cancel`, `session/set_config_option`, `session/load` supported.
 - **acp-gateway** — stdio ACP process (`apps/acp-gateway`, official `@agentclientprotocol/sdk`) for Zed et al.; translates to the server's HTTP binding, bridges `session/request_permission` to the editor client.
+- **Token quotas (M5)** — the loop records per-request token usage into `model_usage` and gates every model call on the tenant quota (hour/day/month windows, fail-closed: over limit or a store error denies before tokens are spent, with a friendly `turn/end` message). Admins set limits via `PUT /api/admin/quota`; usage shows on `GET /api/usage`; changes are audited.
+- **Observability (M5)** — OTel spans (`trinity.turn/step/tool/approval`) + metrics (token consumption, tool success rate, approval latency, turn duration, BullMQ queue depth) via `@opentelemetry/api`; enable by setting `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP) or `OTEL_PROMETHEUS_PORT` (Prometheus `/metrics`) on server / agent-worker / audit-consumer.
+- **Sandbox hardening (M5)** — spawned shells/processes get a scrubbed env by default (`SANDBOX_ENV_MODE=minimal`): model API keys and server secrets never reach tool children. `inherit` exists for local convenience only.
+- **Kubernetes (M5)** — `deploy/docker/*.Dockerfile` images and the `deploy/helm/trinity-harness` chart: server HPA 2–20 + PDB, agent-worker HPA 1–50 (KEDA for queue-depth 0→N, see the checklist), hardened `securityContext`, default-deny egress NetworkPolicy with allowlist, gVisor `runtimeClassName` option for the worker, Ingress with SSE buffering disabled. Release gate: [`docs/production-checklist.md`](docs/production-checklist.md).
+- **Load test (M5)** — `pnpm load:test` (`scripts/load-test.mjs`): auth / prompt-enqueue / SSE-replay-fan-out phases with p50/p95/p99 and an error-rate gate, runnable against any deployed instance.
 
 ## Quick start
 
@@ -55,30 +60,33 @@ Open http://localhost:5173, sign in with the bootstrap admin (`ADMIN_EMAIL` / `A
 
 ## Configuration (`.env`)
 
-| Variable                          | Required                   | Default                                                                       | Purpose                                            |
-| --------------------------------- | -------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------- |
-| `DATABASE_URL`                    | for PG store / migrations  | `postgresql://trinity_harness:trinity_harness@localhost:5432/trinity_harness` | PostgreSQL connection                              |
-| `REDIS_URL`                       | for distributed mode (M2)  | —                                                                             | Redis 7+ connection (streams, Pub/Sub, BullMQ)     |
-| `TOKEN_SECRET`                    | when `DATABASE_URL` is set | —                                                                             | HMAC key for bearer tokens (min 16 chars)          |
-| `ADMIN_EMAIL`                     | no                         | `admin@trinity.local`                                                         | First-boot bootstrap admin email                   |
-| `ADMIN_PASSWORD`                  | first boot only            | —                                                                             | First-boot bootstrap admin password (min 8 chars)  |
-| `ANTHROPIC_API_KEY`               | for `anthropic/...` models | —                                                                             | Anthropic API key (server-side only)               |
-| `ANTHROPIC_BASE_URL`              | no                         | —                                                                             | Custom Anthropic-compatible endpoint               |
-| `OPENAI_API_KEY`                  | for `openai/...` models    | —                                                                             | OpenAI API key (server-side only)                  |
-| `OPENAI_BASE_URL`                 | no                         | —                                                                             | Custom OpenAI-compatible endpoint                  |
-| `MODEL`                           | no                         | `anthropic/claude-sonnet-4-20250514`                                          | Model in `provider/model-id` form                  |
-| `REASONING_BUDGET_TOKENS`         | no                         | —                                                                             | Anthropic extended-thinking budget (tokens)        |
-| `REASONING_EFFORT`                | no                         | —                                                                             | OpenAI reasoning effort (`low`/`medium`/`high`/…)  |
-| `PORT` / `HOST`                   | no                         | `3000` / `127.0.0.1`                                                          | Server listen address                              |
-| `WORKSPACE_ROOT`                  | no                         | cwd                                                                           | Directory the agent sandbox is rooted at           |
-| `SYSTEM_PROMPT`                   | no                         | `You are Trinity…`                                                            | System prompt for the loop                         |
-| `DEFAULT_PERMISSION_POLICY`       | no                         | `workspace-write`                                                             | M3: preset name or JSON policy for new sessions    |
-| `ACP_SERVER_URL` / `ACP_TOKEN`    | for acp-gateway            | `http://127.0.0.1:3000` / —                                                   | M3: server HTTP binding + bearer for the gateway   |
-| `CONTEXT_MAX_TOKENS`              | no                         | `160000`                                                                      | M4: projected-context budget before compaction     |
-| `CONTEXT_KEEP_TOKENS`             | no                         | `40000`                                                                       | M4: retained recent-context floor when compacting  |
-| `COMPACTION_MODEL`                | no                         | = `MODEL`                                                                     | M4: summarizer model                               |
-| `SPILL_THRESHOLD_BYTES`           | no                         | `50000`                                                                       | M4: tool results above this spill to the BlobStore |
-| `LSP_ENABLED` / `LSP_MAX_SERVERS` | no                         | `true` / `4`                                                                  | M4: language servers + per-process pool ceiling    |
+| Variable                          | Required                   | Default                                                                       | Purpose                                                                  |
+| --------------------------------- | -------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `DATABASE_URL`                    | for PG store / migrations  | `postgresql://trinity_harness:trinity_harness@localhost:5432/trinity_harness` | PostgreSQL connection                                                    |
+| `REDIS_URL`                       | for distributed mode (M2)  | —                                                                             | Redis 7+ connection (streams, Pub/Sub, BullMQ)                           |
+| `TOKEN_SECRET`                    | when `DATABASE_URL` is set | —                                                                             | HMAC key for bearer tokens (min 16 chars)                                |
+| `ADMIN_EMAIL`                     | no                         | `admin@trinity.local`                                                         | First-boot bootstrap admin email                                         |
+| `ADMIN_PASSWORD`                  | first boot only            | —                                                                             | First-boot bootstrap admin password (min 8 chars)                        |
+| `ANTHROPIC_API_KEY`               | for `anthropic/...` models | —                                                                             | Anthropic API key (server-side only)                                     |
+| `ANTHROPIC_BASE_URL`              | no                         | —                                                                             | Custom Anthropic-compatible endpoint                                     |
+| `OPENAI_API_KEY`                  | for `openai/...` models    | —                                                                             | OpenAI API key (server-side only)                                        |
+| `OPENAI_BASE_URL`                 | no                         | —                                                                             | Custom OpenAI-compatible endpoint                                        |
+| `MODEL`                           | no                         | `anthropic/claude-sonnet-4-20250514`                                          | Model in `provider/model-id` form                                        |
+| `REASONING_BUDGET_TOKENS`         | no                         | —                                                                             | Anthropic extended-thinking budget (tokens)                              |
+| `REASONING_EFFORT`                | no                         | —                                                                             | OpenAI reasoning effort (`low`/`medium`/`high`/…)                        |
+| `PORT` / `HOST`                   | no                         | `3000` / `127.0.0.1`                                                          | Server listen address                                                    |
+| `WORKSPACE_ROOT`                  | no                         | cwd                                                                           | Directory the agent sandbox is rooted at                                 |
+| `SYSTEM_PROMPT`                   | no                         | `You are Trinity…`                                                            | System prompt for the loop                                               |
+| `DEFAULT_PERMISSION_POLICY`       | no                         | `workspace-write`                                                             | M3: preset name or JSON policy for new sessions                          |
+| `ACP_SERVER_URL` / `ACP_TOKEN`    | for acp-gateway            | `http://127.0.0.1:3000` / —                                                   | M3: server HTTP binding + bearer for the gateway                         |
+| `CONTEXT_MAX_TOKENS`              | no                         | `160000`                                                                      | M4: projected-context budget before compaction                           |
+| `CONTEXT_KEEP_TOKENS`             | no                         | `40000`                                                                       | M4: retained recent-context floor when compacting                        |
+| `COMPACTION_MODEL`                | no                         | = `MODEL`                                                                     | M4: summarizer model                                                     |
+| `SPILL_THRESHOLD_BYTES`           | no                         | `50000`                                                                       | M4: tool results above this spill to the BlobStore                       |
+| `LSP_ENABLED` / `LSP_MAX_SERVERS` | no                         | `true` / `4`                                                                  | M4: language servers + per-process pool ceiling                          |
+| `SANDBOX_ENV_MODE`                | no                         | `minimal`                                                                     | M5: `minimal` scrubs secrets from tool children; `inherit` is local-only |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`     | no                         | —                                                                             | M5: OTLP/gRPC endpoint for traces + metrics                              |
+| `OTEL_PROMETHEUS_PORT`            | no                         | —                                                                             | M5: serve Prometheus `/metrics` on this port                             |
 
 Server modes (auto-selected in `apps/server/src/main.ts`): `DATABASE_URL` + `REDIS_URL` → **distributed** (BullMQ turns run on `agent-worker`; SSE relayed via Redis Streams); `DATABASE_URL` only → PG event log with the loop in-server; neither → M1 in-memory inline mode (tests/local fallback). `REDIS_URL` without `DATABASE_URL` is rejected (fail-closed: distributed mode needs the PG event log).
 
@@ -94,6 +102,25 @@ Secrets live server-side only: they are never sent to the frontend and never log
 | `pnpm test`                                          | Vitest — unit + integration (DB/Redis tests auto-skip if unreachable) |
 | `pnpm lint` / `pnpm typecheck` / `pnpm format:check` | Quality gates (all must pass)                                         |
 | `pnpm db:generate` / `pnpm db:migrate`               | Drizzle Kit migration workflow (`generate` → review SQL → `migrate`)  |
+| `pnpm load:test`                                     | M5 load test against a running server (see `scripts/load-test.mjs`)   |
+
+## Deploying (M5)
+
+```bash
+# Build images (from the repo root)
+docker build -f deploy/docker/Dockerfile.server -t trinity-harness/server:0.5.0 .
+docker build -f deploy/docker/Dockerfile.agent-worker -t trinity-harness/agent-worker:0.5.0 .
+docker build -f deploy/docker/Dockerfile.audit-consumer -t trinity-harness/audit-consumer:0.5.0 .
+docker build -f deploy/docker/Dockerfile.web -t trinity-harness/web:0.5.0 .
+
+# Install (external PostgreSQL 16+ / Redis 7+ required)
+helm upgrade --install trinity deploy/helm/trinity-harness \
+  --set secrets.databaseUrl=... --set secrets.redisUrl=... \
+  --set secrets.tokenSecret=... --set secrets.adminPassword=...
+```
+
+Walk [`docs/production-checklist.md`](docs/production-checklist.md) before going live
+(quota config, OTel endpoints, KEDA for queue-depth scaling, NetworkPolicy allowlists, gVisor).
 
 ## Architecture (M2)
 
@@ -113,4 +140,4 @@ Hard rules (see `AGENTS.md` §3): modules communicate **only** through `packages
 
 ## Roadmap
 
-M0 monorepo + PG foundation ✅ · M1 minimal loop ✅ · M2 PG event sourcing + Redis bus + BullMQ + auth/RBAC + audit ✅ · M3 ACP HTTP binding + acp-gateway + approvals + permission presets ✅ · **M4 LSP + compaction + subagents + multimodal ✅** · M5 production hardening · M6 extensibility — details in `docs/design.md` §18.
+M0 monorepo + PG foundation ✅ · M1 minimal loop ✅ · M2 PG event sourcing + Redis bus + BullMQ + auth/RBAC + audit ✅ · M3 ACP HTTP binding + acp-gateway + approvals + permission presets ✅ · M4 LSP + compaction + subagents + multimodal ✅ · **M5 quotas + OTel + sandbox hardening + Helm/Docker + load test ✅** · M6 extensibility — details in `docs/design.md` §18.

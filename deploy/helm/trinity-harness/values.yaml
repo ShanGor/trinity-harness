@@ -1,0 +1,133 @@
+# Default values for trinity-harness (docs/design.md §16).
+#
+# Topology: stateless server + agent-worker scale on HPA; PostgreSQL/Redis are
+# EXTERNAL (cloud DB / Elasticache per design §16) — connection secrets come
+# from `secrets.*`. The agent sandbox (LocalBlobStore/LSP/bash) uses a shared
+# workspace volume; the local-disk BlobStore adapter requires a RWX PVC when
+# server/worker run as multiple replicas (S3 adapter is the drop-in upgrade,
+# docs/project-progress.md M4 decision).
+
+global:
+  imageRegistry: ''
+  imagePullSecrets: []
+
+secrets:
+  # Required: external datastores + auth material (mounted via envFrom secret).
+  databaseUrl: '' # postgresql://user:pass@postgres.example.com:5432/trinity
+  redisUrl: '' # redis://default:pass@redis.example.com:6379
+  tokenSecret: '' # HMAC bearer-token key (min 16 chars)
+  adminEmail: 'admin@trinity.local'
+  adminPassword: '' # first-boot bootstrap admin (rotate after first login)
+  anthropicApiKey: ''
+  openaiApiKey: ''
+
+server:
+  image:
+    repository: trinity-harness/server
+    tag: '0.5.0'
+  replicas: 2
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { cpu: '2', memory: 1Gi }
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    minAvailable: 1
+  service:
+    port: 3000
+
+agentWorker:
+  image:
+    repository: trinity-harness/agent-worker
+    tag: '0.5.0'
+  replicas: 2
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { cpu: '4', memory: 4Gi }
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 50
+    targetCPUUtilizationPercentage: 75
+    # HPA v2 cannot scale on BullMQ queue depth. For queue-driven 0→N scaling
+    # install KEDA and point a ScaledObject at the `agent-turns` queue
+    # (docs/production-checklist.md § worker scaling).
+  # Sandbox hardening (docs/design.md §12.3): set to "gvisor" when the cluster
+  # provides the gVisor RuntimeClass — the reserved microVM upgrade path.
+  runtimeClassName: ''
+  lsp:
+    enabled: true
+    maxServers: 4
+
+auditConsumer:
+  image:
+    repository: trinity-harness/audit-consumer
+    tag: '0.5.0'
+  replicas: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: '1', memory: 512Mi }
+
+# The acp-gateway is normally spawned BY EDITORS as a local stdio process
+# (point Zed at the container entrypoint). The in-cluster Deployment is for
+# the cloud-binding topology (design.md §4) and is off by default.
+acpGateway:
+  enabled: false
+  image:
+    repository: trinity-harness/acp-gateway
+    tag: '0.5.0'
+  replicas: 2
+  acpServerUrl: 'http://server:3000'
+
+web:
+  enabled: true
+  image:
+    repository: trinity-harness/web
+    tag: '0.5.0'
+  replicas: 2
+
+# Shared workspace for the agent sandbox (bash/read-write/LSP/blob store).
+# RWX is required when server+worker run more than one replica each.
+workspace:
+  mountPath: /workspace
+  persistence:
+    enabled: false
+    storageClass: ''
+    size: 10Gi
+
+config:
+  model: 'anthropic/claude-sonnet-4-20250514'
+  systemPrompt: 'You are Trinity, a software engineering agent.'
+  defaultPermissionPolicy: 'workspace-write'
+  contextMaxTokens: 160000
+  contextKeepTokens: 40000
+  spillThresholdBytes: 50000
+  sandboxEnvMode: 'minimal' # 'inherit' only for local convenience (§12.3)
+  otelExporterOtlpEndpoint: '' # e.g. http://otel-collector.monitoring:4317
+  otelPrometheusPort: '' # e.g. 9464 → /metrics on each workload
+
+ingress:
+  enabled: true
+  className: 'nginx'
+  host: trinity.example.com
+  tls: []
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 25m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '86400'
+    nginx.ingress.kubernetes.io/proxy-send-timeout: '86400'
+    # SSE: no response buffering on the ACP/event streams (design.md §16).
+    nginx.ingress.kubernetes.io/proxy-buffering: 'off'
+    nginx.ingress.kubernetes.io/x-accel-buffering: 'no'
+
+# Egress allowlist (docs/design.md §12.5): default-DENY all egress; only DNS,
+# intra-namespace traffic, the external datastores and these CIDRs are allowed.
+# Outbound internet (web_fetch/web_search) stays OFF unless listed here.
+networkPolicy:
+  enabled: true
+  # postgres/redis CIDRs (leave empty when they resolve in-cluster):
+  datastoreCidrs: []
+  extraEgressCidrs: []

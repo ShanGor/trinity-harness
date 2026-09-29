@@ -167,6 +167,7 @@ describe.skipIf(!reachable)('Redis adapters (integration)', () => {
       sessionId: crypto.randomUUID(),
       prompt: 'hello',
       actor: 'u-9',
+      tenantId: 't-9',
       promptSeq: 2,
       policy: parsePermissionPolicy('workspace-write'),
     });

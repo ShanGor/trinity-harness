@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "trinity-harness.fullname" . }}-config
+  labels:
+    {{- include "trinity-harness.labels" . | nindent 4 }}
+data:
+  HOST: "0.0.0.0"
+  PORT: "3000"
+  WORKSPACE_ROOT: {{ .Values.workspace.mountPath | quote }}
+  MODEL: {{ .Values.config.model | quote }}
+  SYSTEM_PROMPT: {{ .Values.config.systemPrompt | quote }}
+  DEFAULT_PERMISSION_POLICY: {{ .Values.config.defaultPermissionPolicy | quote }}
+  CONTEXT_MAX_TOKENS: {{ .Values.config.contextMaxTokens | quote }}
+  CONTEXT_KEEP_TOKENS: {{ .Values.config.contextKeepTokens | quote }}
+  SPILL_THRESHOLD_BYTES: {{ .Values.config.spillThresholdBytes | quote }}
+  SANDBOX_ENV_MODE: {{ .Values.config.sandboxEnvMode | quote }}
+  LSP_ENABLED: {{ .Values.agentWorker.lsp.enabled | quote }}
+  LSP_MAX_SERVERS: {{ .Values.agentWorker.lsp.maxServers | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.otelExporterOtlpEndpoint | quote }}
+  OTEL_PROMETHEUS_PORT: {{ .Values.config.otelPrometheusPort | quote }}
+  ACP_SERVER_URL: {{ .Values.acpGateway.acpServerUrl | quote }}

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { config as loadDotenv } from 'dotenv';
 
 import { createDb, createPool, PgAuditStore } from '@trinity-harness/db';
+import { startTelemetry } from '@trinity-harness/otel';
 import { createRedis, isRedisReachable, RedisEventBus } from '@trinity-harness/redis';
 import { loadEnv } from '@trinity-harness/shared';
 
@@ -21,6 +22,11 @@ for (const candidate of [
 
 /** docs/design.md §13/§16: standalone Deployment consuming the audit stream. */
 async function main(): Promise<void> {
+  // M5 OTel (docs/design.md §17): no-op unless OTEL_* exporter env is set.
+  const telemetry = startTelemetry({});
+  if (telemetry) {
+    console.log('[audit-consumer] OTel SDK started');
+  }
   const env = loadEnv(process.env, { requireDatabaseUrl: true });
   const redisUrl = process.env['REDIS_URL'];
   if (!redisUrl) {
@@ -40,6 +46,7 @@ async function main(): Promise<void> {
 
   const shutdown = async (): Promise<void> => {
     consumer.dispose();
+    await telemetry?.shutdown();
     redis.disconnect();
     await pool.end();
     process.exit(0);

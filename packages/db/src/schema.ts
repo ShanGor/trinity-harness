@@ -43,6 +43,8 @@ export type NewSessionEventRow = typeof sessionEvents.$inferInsert;
 export const tenants = pgTable('tenants', {
   id: uuid('id').defaultRandom().primaryKey(),
   name: text('name').notNull(),
+  /** M5: per-tenant token quota (docs/design.md §17); null ⇒ unlimited. */
+  quota: jsonb('quota'),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
 });
 
@@ -126,5 +128,31 @@ export const approvals = pgTable(
   (t) => [
     primaryKey({ columns: [t.id] }),
     index('approvals_session_idx').on(t.sessionId, t.createdAt),
+  ],
+);
+
+/**
+ * Model token usage (docs/design.md §15 `model_usage`, §17 配额). Written by
+ * the Agent Loop per model request; aggregated per tenant over calendar
+ * windows for quota enforcement and cost reporting. Insert-only in practice
+ * (a retention job may prune old rows — unlike `session_events` this table
+ * is NOT append-only-critical, it is a metering projection).
+ */
+export const modelUsage = pgTable(
+  'model_usage',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    sessionId: uuid('session_id').notNull(),
+    model: text('model').notNull(),
+    inputTokens: bigint('input_tokens', { mode: 'bigint' }).notNull(),
+    outputTokens: bigint('output_tokens', { mode: 'bigint' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index('model_usage_tenant_created_idx').on(t.tenantId, t.createdAt),
+    index('model_usage_session_idx').on(t.sessionId),
   ],
 );

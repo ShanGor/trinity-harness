@@ -1,0 +1,17 @@
+{{- if .Values.workspace.persistence.enabled }}
+# Shared agent workspace (docs/design.md §10/§16). REQUIRED when server or
+# agent-worker run more than one replica each (local-disk BlobStore needs a
+# common filesystem; the S3 adapter is the drop-in replacement).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "trinity-harness.fullname" . }}-workspace
+  labels:
+    {{- include "trinity-harness.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: {{ .Values.workspace.persistence.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.workspace.persistence.size | quote }}
+{{- end }}

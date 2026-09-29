@@ -14,12 +14,14 @@ import type {
   LoopEvent,
   PasswordHasher,
   PermissionPolicy,
+  QuotaAdminPort,
   SessionEvent,
   SessionEventReader,
   SessionMeta,
   SessionMetaStore,
   SessionStore,
   TokenService,
+  UsagePort,
   UserStore,
 } from '@trinity-harness/contracts';
 import { serverEventSchema } from '@trinity-harness/shared';
@@ -28,7 +30,7 @@ import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
-import { parsePermissionPolicy } from '@trinity-harness/contracts';
+import { parsePermissionPolicy, tenantQuotaSchema, windowStart } from '@trinity-harness/contracts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -448,6 +450,14 @@ export interface ServerDeps {
   defaultPolicy?: PermissionPolicy;
   /** M4: attachment + spill storage (docs/design.md §10). */
   blobs?: BlobStore;
+  /**
+   * M5: token metering read side (docs/design.md §17). Powers /api/usage and
+   * the admin quota endpoints; the loop-side recording/gate runs wherever
+   * the Loop runs (agent-worker in distributed mode, this process inline).
+   */
+  usage?: UsagePort;
+  /** M5: tenant quota administration (admin-only REST endpoint). */
+  quotaAdmin?: QuotaAdminPort;
 }
 
 export interface BuildServerOptions {
@@ -712,6 +722,74 @@ export async function buildServer(
         return { records: page.records, total: page.total };
       });
     }
+
+    // ---- M5: usage & quota (docs/design.md §17) ------------------------------
+
+    if (deps.usage) {
+      /** Per-window token usage + configured limits for one tenant. */
+      const usageSummary = async (tenantId: string) => {
+        const now = new Date();
+        const [quota, hour, day, month] = await Promise.all([
+          deps.usage!.quotaOf(tenantId),
+          deps.usage!.usageSince(tenantId, windowStart('hour', now)),
+          deps.usage!.usageSince(tenantId, windowStart('day', now)),
+          deps.usage!.usageSince(tenantId, windowStart('month', now)),
+        ]);
+        return {
+          windows: {
+            hour: { used: hour, limit: quota.hourlyTokens ?? null },
+            day: { used: day, limit: quota.dailyTokens ?? null },
+            month: { used: month, limit: quota.monthlyTokens ?? null },
+          },
+          quota,
+        };
+      };
+
+      app.get('/api/usage', async (req) => {
+        const identity = req.identity!;
+        return usageSummary(identity.tenantId);
+      });
+
+      app.get('/api/admin/usage', async (req, reply) => {
+        const identity = req.identity!;
+        if (identity.role !== 'admin') {
+          return reply.code(403).send({ error: 'admin role required' });
+        }
+        return usageSummary(identity.tenantId);
+      });
+
+      if (deps.quotaAdmin) {
+        app.put('/api/admin/quota', async (req, reply) => {
+          const identity = req.identity!;
+          if (identity.role !== 'admin') {
+            emitAudit({
+              id: crypto.randomUUID(),
+              at: new Date().toISOString(),
+              tenantId: identity.tenantId,
+              userId: identity.userId,
+              action: 'tenant/quota',
+              result: 'denied',
+            });
+            return reply.code(403).send({ error: 'admin role required' });
+          }
+          const body = tenantQuotaSchema.safeParse(req.body ?? {});
+          if (!body.success) {
+            return reply.code(400).send({ error: 'invalid body', issues: body.error.issues });
+          }
+          await deps.quotaAdmin!.setQuota(identity.tenantId, body.data);
+          emitAudit({
+            id: crypto.randomUUID(),
+            at: new Date().toISOString(),
+            tenantId: identity.tenantId,
+            userId: identity.userId,
+            action: 'tenant/quota',
+            result: 'ok',
+            detail: body.data,
+          });
+          return { ok: true, quota: body.data };
+        });
+      }
+    }
   }
 
   // ---- Sessions --------------------------------------------------------------
@@ -837,6 +915,7 @@ export async function buildServer(
           ? { content: promptContent(body.data.text, body.data.attachments) }
           : {}),
         actor: identity?.userId ?? 'anonymous',
+        tenantId: identity?.tenantId ?? granted.meta?.tenantId ?? NIL_TENANT,
         promptSeq: appended.from,
         policy: policyFor(granted.meta),
       });
@@ -865,6 +944,7 @@ export async function buildServer(
     void loop
       .run(sessionId, body.data.text, sink, {
         actor: identity?.userId ?? 'anonymous',
+        tenantId: identity?.tenantId,
         policy: policyFor(granted.meta),
         promptSeq: appended.from,
         ...(body.data.attachments !== undefined
@@ -1519,6 +1599,7 @@ export async function buildServer(
               prompt: text,
               ...(content !== null ? { content } : {}),
               actor: identity?.userId ?? 'anonymous',
+              tenantId: identity?.tenantId ?? granted.meta?.tenantId ?? NIL_TENANT,
               promptSeq: appended.from,
               policy: policyFor(granted.meta),
             });
@@ -1528,6 +1609,7 @@ export async function buildServer(
               .createLoop(granted.sessionId)
               .run(granted.sessionId, text, sink, {
                 actor: identity?.userId ?? 'anonymous',
+                tenantId: identity?.tenantId,
                 policy: policyFor(granted.meta),
                 promptSeq: appended.from,
                 ...(content !== null ? { content } : {}),

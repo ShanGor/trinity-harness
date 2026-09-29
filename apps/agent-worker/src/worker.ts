@@ -62,6 +62,7 @@ export function createTurnHandler(
 
     await deps.createLoop(task.sessionId).run(task.sessionId, task.prompt, sink, {
       actor: task.actor,
+      tenantId: task.tenantId,
       signal,
       // M3: permission policy + prompt seq travel with the task (fail-closed
       // snapshot taken by the server when the prompt was accepted).

@@ -3,7 +3,32 @@
 > Companion to `docs/project-plan.md`. Update this file as work lands.
 > Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` deferred
 
-## Current milestone: M5 — Production (next)
+## Current milestone: M6 — Extensibility (next)
+
+## M5 — Production (complete)
+
+| Date       | Item                                                                                                                                                                                                                                                                                                            | Status | Notes                                                                                                         |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------- |
+| 2026-09-29 | contracts：`UsagePort`（record/usageSince/quotaOf）+ `QuotaAdminPort` + `TenantQuota`（时/日/月窗，缺省不限量）+ `windowStart` 纯函数；`TurnTask.tenantId`、`RunTurnOptions.tenantId`                                                                                                                           | [x]    | 配额/计量类型集中在 usage.ts，zod 校验 quota 字段                                                             |
+| 2026-09-29 | db：迁移 0004（`model_usage` 表 + `tenants.quota` jsonb）+ `PgUsageStore`（窗口聚合 sum、quotaOf 走 tenants 行、setQuota rowCount 校验）                                                                                                                                                                        | [x]    | PG 集成测试 2 个（窗口截断、租户隔离、quota 往返）                                                            |
+| 2026-09-29 | core：Loop `beforeModelCall` 配额门（checkQuota：hour→day→month 顺序检查；超限/读失败均拒绝，friendly detail 经 turn/end 返回，零 token 花费）+ usage chunk 聚合按请求 `record`（best-effort）；配额单测 6 个                                                                                                   | [x]    | 无 tenantId（M1 内存模式）⇒ 不进门                                                                            |
+| 2026-09-29 | server：`GET /api/usage`（本人租户）+ `GET /api/admin/usage` + `PUT /api/admin/quota`（admin-only，审计 `tenant/quota`）；REST/ACP enqueue 与 inline run 全路径携带 tenantId；m5-usage 测试 3 个 + 分布式 e2e tenantId 断言                                                                                     | [x]    | inline/pg-inline/distributed 三种模式都接通                                                                   |
+| 2026-09-29 | OTel：core 经 `@opentelemetry/api` 全局 tracer/meter 埋点（turn/step/tool/approval 四个 span + `trinity.llm.tokens`/`trinity.tools.calls`/`trinity.approval.duration_ms`/`trinity.turn.*` 指标；session id 不进指标属性）；新包 `packages/otel`（NodeSDK + OTLP trace/metric + Prometheus reader）              | [x]    | 无 SDK 注册时全部 no-op（测试零影响）；SDK 2.x 的 NodeSDK 在 `@opentelemetry/sdk-node`（不在 sdk-trace-node） |
+| 2026-09-29 | worker：ObservableGauge `trinity.queue.jobs` 直读 BullMQ counts（按采集回调，无轮询）+ `RedisTurnQueue.counts()`；server/worker/audit-consumer 三个 main 接入 startTelemetry（env 门控）+ SIGTERM drain（BullMQ close 等在途 turn；server app.close）                                                           | [x]    | 优雅停机真机验证：SIGTERM 后进程干净退出                                                                      |
+| 2026-09-29 | Sandbox 加固：`LocalSandbox` env 净化（默认 `minimal`：仅 PATH/HOME/LANG/TZ/TMPDIR/USER/SHELL + TRINITY_WORKSPACE；密钥不再进 tool 子进程；`SANDBOX_ENV_MODE=inherit` 仅本地兼容）；真机 pyright/tsserver 在 minimal env 下全通                                                                                 | [x]    | 安全基线提升：ANThropic key/TOKEN_SECRET/DATABASE_URL 不再泄漏给 bash/LSP 子进程；测试 3 个                   |
+| 2026-09-29 | deploy/docker：5 个 Dockerfile（server/agent-worker/audit-consumer/acp-gateway 同构 workspace 镜像 + web 双阶段 nginx）+ nginx SSE 反代配置 + 根 `.dockerignore` + `packageManager: pnpm@11.22.0`（corepack 可复现）                                                                                            | [x]    | 应用走 tsx 直跑 TS 源码，镜像含 workspace 安装                                                                |
+| 2026-09-29 | deploy/helm/trinity-harness：chart 0.5.0（server HPA 2–20 + PDB + Service、worker HPA 1–50 + `runtimeClassName`（gVisor 预留）+ 600s terminationGracePeriod、audit-consumer×2、acp-gateway 默认关、web nginx、Ingress 关 SSE 缓冲、NetworkPolicy 默认拒绝出口 + egress allowlist 关断、可选 RWX workspace PVC） | [x]    | `helm lint` 0 failed；`helm template` 15 资源全渲染（含 gvisor/PVC 开关）                                     |
+| 2026-09-29 | 性能压测 `scripts/load-test.mjs`（`pnpm load:test`）：auth / session+prompt enqueue / SSE replay fan-out 三阶段 + p50/p95/p99 + 错误率门禁（≤1%）；真机（本地 PG+Redis，distributed server）通过：auth ~3.5k rps、create+prompt ~1.1k rps、50 路 SSE 重放 wall ~45ms、0 错误                                    | [x]    | 踩坑：SSE 帧以 `id:` 开头（非 `data:`）；replay 首个数据帧是 committed user message（session/created 不上线） |
+| 2026-09-29 | `docs/production-checklist.md`（8 节发布验收清单，M5 acceptance gate）；design.md §3 目录树 + M5 实现注记 + §5.1 Observability 行；AGENTS.md/README 状态同步                                                                                                                                                    | [x]    | —                                                                                                             |
+
+### Verification (2026-09-29, M5)
+
+- `pnpm typecheck` — pass（全部 workspace 项目，含新 `packages/otel`）
+- `pnpm test` — 163/163 pass（35 files；分布式 e2e 对本地 PG+Redis 实跑，一次并行竞争 flake 后重跑全绿）
+- `pnpm lint` / `pnpm format:check` — pass（Helm 模板为 Go template，加入 `.prettierignore`）
+- npm 兼容 gate：干净拷贝 `npm install --dry-run` pass（745 包）
+- `helm lint` 0 failed + `helm template` 15 资源全渲染（含 gvisor/PVC/acpGateway 开关）— pass
+- 真机：压测脚本对 distributed server（本地 PG+Redis）三阶段通过，0 错误（auth ~3.5k rps、create+prompt ~1.1k rps、50 路 SSE 重放 wall ~45ms）；server SIGTERM 优雅停机验证；Docker 守护进程本机不可用，镜像构建未实跑
 
 ## M4 — Intelligence (complete)
 
@@ -170,6 +195,10 @@
 | 2026-09-29 | M4：PDF 文本抽取选 `pdf-parse@2`（纯 TS、ESM、零原生依赖）；它会 **detach 传入的 ArrayBuffer**，调用方必须传副本                                                                                                                      | 踩坑记录：detached buffer 导致"存进 blob 的 PDF 与原件不等"的诡异测试失败                                                                                             |
 | 2026-09-29 | M4：BlobStore M4 用本地文件系统（server/worker 共享 workspace 磁盘，`.trinity/blobs`），S3/MinIO 适配器实现同一端口即可替换；blob 下载鉴权依赖 key 不可猜测，per-session ACL 属 M5+                                                   | 单节点拓扑够用；K8s 多副本需换对象存储                                                                                                                                |
 | 2026-09-29 | M4 真机：`lsp_rename` 必须解析 `documentChanges`（真服务器默认返回 LSP 3.16+ shape，legacy `changes` 只是兼容）；pyright `workspace/symbol` 恒空 → `symbols()` 增加 documentSymbol 树兜底；服务器→客户端请求必须回 `result:null` 应答 | 三条均由真 pyright/tsserver 暴露，fake server 测不出；最后一条是 JSON-RPC 2.0 规范要求                                                                                |
+| 2026-09-29 | M5：`pnpm add <workspace-pkg>` 默认把依赖写成 `workspace:^`（pnpm 11 save-workspace-protocol），违反 design §3 禁令且使 npm 兼容 gate 报 EUNSUPPORTEDPROTOCOL —— 内部依赖一律手改回 `*` 再 `pnpm install`                             | 踩坑记录：pnpm add 内部包后必须检查 package.json                                                                                                                      |     |
+| 2026-09-29 | M5：配额窗口用日历窗（时/日/月，UTC 整点/零点/1 号）而非滚动窗——`windowStart` 纯函数实现，与 `usageSince` 聚合语义一一对应；超限判定用 `used >= limit`（含等号，limit 即"本窗最多可用"）                                              | 等号语义被 m5-usage 测试锁定（used=150/limit=150 拒绝）                                                                                                               |
+| 2026-09-29 | M5：OTel JS SDK 2.x 把 `NodeSDK` 移到 `@opentelemetry/sdk-node` 包（`sdk-trace-node` 只含 trace provider）；core 只依赖 `@opentelemetry/api`（无 SDK 时全局 noop，测试零成本），SDK 注册集中在 `packages/otel`，app 按 env 门控       | 埋点（api）与导出（sdk）分离，符合 contracts 端口精神                                                                                                                 |
+| 2026-09-29 | M5：K8s 队列深度（0→N）伸缩 HPA v2 做不到（无队列指标），chart 用 CPU HPA 1–50 + values 注释指向 KEDA ScaledObject；gVisor 以 `runtimeClassName` 值注入 worker pod，Firecracker 预留同一路径                                          | design §16 worker 0–50 的落地折法，checklist 有操作步骤                                                                                                               |
 
 ## Blockers
 

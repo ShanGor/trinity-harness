@@ -29,6 +29,7 @@ import {
   PgAuditStore,
   PgSessionMetaStore,
   PgSessionStore,
+  PgUsageStore,
   PgUserStore,
 } from '@trinity-harness/db';
 import {
@@ -45,6 +46,7 @@ import {
 } from '@trinity-harness/redis';
 import { parsePermissionPolicy } from '@trinity-harness/contracts';
 import type { SessionStore } from '@trinity-harness/contracts';
+import { startTelemetry } from '@trinity-harness/otel';
 
 import { loadServerEnv } from './env.js';
 import { buildServer } from './server.js';
@@ -58,8 +60,16 @@ import { buildServer } from './server.js';
  * - neither:                M1 in-memory inline mode (tests/local fallback).
  */
 async function main(): Promise<void> {
+  // M5 OTel (docs/design.md §17): no-op unless OTEL_EXPORTER_OTLP_ENDPOINT /
+  // OTEL_PROMETHEUS_PORT is set.
+  const telemetry = startTelemetry({});
+  if (telemetry) {
+    console.log('[server] OTel SDK started');
+  }
   const env = loadServerEnv();
-  const sandbox = new LocalSandbox(env.WORKSPACE_ROOT);
+  // M5: sandbox env scrubbing (docs/design.md §12.3 hardening) — spawned
+  // shells get a minimal env; server secrets never leak into tool children.
+  const sandbox = new LocalSandbox(env.WORKSPACE_ROOT, { envMode: env.SANDBOX_ENV_MODE });
   const registry = new CoreToolRegistry(sandbox);
   for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
     registry.register(tool);
@@ -95,6 +105,9 @@ async function main(): Promise<void> {
     workspaceRoot: env.WORKSPACE_ROOT,
     spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
     resolveBlob,
+    // M5: quota gate + usage recording for inline-mode turns (distributed
+    // turns carry the same assembly on the agent-worker).
+    usage,
   });
   if (env.LSP_ENABLED) {
     lsp = new LspService({
@@ -135,11 +148,14 @@ async function main(): Promise<void> {
   let approvalStore: PgApprovalStore | undefined;
   let turnCancel: RedisTurnCancelPublisher | undefined;
   let defaultPolicy: ReturnType<typeof parsePermissionPolicy> | undefined;
+  let usage: PgUsageStore | undefined;
 
   if (databaseUrl) {
     const pool = createPool(databaseUrl);
     const db = createDb(pool);
     store = new PgSessionStore(db);
+    // M5: token metering read side (docs/design.md §17).
+    usage = new PgUsageStore(db);
 
     if (env.REDIS_URL) {
       const redis = createRedis(env.REDIS_URL);
@@ -211,6 +227,8 @@ async function main(): Promise<void> {
       turns: turnCancel ? { cancel: (sid) => turnCancel!.cancel(sid) } : undefined,
       defaultPolicy,
       blobs: blobStore,
+      usage,
+      quotaAdmin: usage,
     },
     { logger: true },
   );
@@ -220,6 +238,15 @@ async function main(): Promise<void> {
     `trinity-harness server listening on http://${env.HOST}:${env.PORT} ` +
       `(mode: ${queue ? 'distributed' : databaseUrl ? 'pg-inline' : 'memory-inline'})`,
   );
+
+  // M5 graceful drain (docs/design.md §16): stop accepting, drain in-flight.
+  const shutdown = async (): Promise<void> => {
+    await app.close();
+    await telemetry?.shutdown();
+    process.exit(0);
+  };
+  process.on('SIGINT', () => void shutdown());
+  process.on('SIGTERM', () => void shutdown());
 }
 
 main().catch((err) => {

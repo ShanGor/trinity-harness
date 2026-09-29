@@ -31,6 +31,12 @@ const workerEnvSchema = z.object({
   /** M4: language-server integration (docs/design.md §9). */
   LSP_ENABLED: z.coerce.boolean().default(true),
   LSP_MAX_SERVERS: z.coerce.number().int().positive().default(4),
+  /**
+   * M5 sandbox hardening (docs/design.md §12.3): 'minimal' (default) scrubs
+   * secrets from the env of spawned shells/processes; 'inherit' is a local-
+   * convenience legacy mode only.
+   */
+  SANDBOX_ENV_MODE: z.enum(['minimal', 'inherit']).default('minimal'),
 });
 
 export type WorkerEnv = z.infer<typeof workerEnvSchema>;

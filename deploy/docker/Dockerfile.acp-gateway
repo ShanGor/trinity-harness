@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# trinity-harness acp-gateway (docs/design.md §11.1): stdio ACP process for
+# editors (Zed et al.) translating to the server's /acp HTTP binding.
+# NOTE: editors usually spawn this image's entrypoint directly as a stdio
+# process — no port is exposed.
+FROM node:22-slim AS deps
+WORKDIR /repo
+RUN corepack enable
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages ./packages
+COPY apps ./apps
+RUN pnpm install --frozen-lockfile
+
+FROM node:22-slim
+WORKDIR /repo
+ENV NODE_ENV=production
+COPY --from=deps /repo /repo
+USER node
+CMD ["pnpm", "--filter", "@trinity-harness/acp-gateway", "start"]

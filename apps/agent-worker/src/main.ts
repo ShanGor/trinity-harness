@@ -25,6 +25,7 @@ import {
   PgApprovalStore,
   PgSessionMetaStore,
   PgSessionStore,
+  PgUsageStore,
 } from '@trinity-harness/db';
 import {
   BusAuditEmitter,
@@ -36,7 +37,11 @@ import {
   RedisLiveEventPublisher,
   RedisSessionEventPublisher,
   RedisTurnCancelSubscriber,
+  RedisTurnQueue,
+  TURN_QUEUE_NAME,
 } from '@trinity-harness/redis';
+import { startTelemetry } from '@trinity-harness/otel';
+import { metrics } from '@opentelemetry/api';
 
 import { loadWorkerEnv } from './env.js';
 import { createTurnHandler } from './worker.js';
@@ -49,6 +54,12 @@ import { createTurnHandler } from './worker.js';
  * the subagent tool (docs/design.md §7/§8/§9).
  */
 async function main(): Promise<void> {
+  // M5 OTel (docs/design.md §17): no-op unless OTEL_EXPORTER_OTLP_ENDPOINT /
+  // OTEL_PROMETHEUS_PORT is set.
+  const telemetry = startTelemetry({});
+  if (telemetry) {
+    console.log('[agent-worker] OTel SDK started');
+  }
   const env = loadWorkerEnv();
   const pool = createPool(env.DATABASE_URL);
   const db = createDb(pool);
@@ -60,7 +71,11 @@ async function main(): Promise<void> {
     new RedisSessionEventPublisher(redis),
   );
   const metas = new PgSessionMetaStore(db);
-  const sandbox = new LocalSandbox(env.WORKSPACE_ROOT);
+  // M5: token metering — the loop records usage and gates model calls on the
+  // tenant quota before every request (docs/design.md §17).
+  const usage = new PgUsageStore(db);
+  // M5: sandbox env scrubbing — worker secrets never reach tool children.
+  const sandbox = new LocalSandbox(env.WORKSPACE_ROOT, { envMode: env.SANDBOX_ENV_MODE });
   const registry = new CoreToolRegistry(sandbox);
   for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
     registry.register(tool);
@@ -161,6 +176,8 @@ async function main(): Promise<void> {
         spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
         resolveBlob,
         augmentSystem,
+        // M5: usage recording + tenant quota gate (docs/design.md §17).
+        usage,
       }),
     live: new RedisLiveEventPublisher(redis),
     audit: new BusAuditEmitter(bus),
@@ -169,15 +186,41 @@ async function main(): Promise<void> {
   const worker = createTurnWorker({ url: env.REDIS_URL }, (task, _job, signal) =>
     handleTurn(task, signal),
   );
+
+  // M5: queue-depth metric (docs/design.md §17). The ObservableGauge callback
+  // fires per metric collection — event-driven, no polling loop (AGENTS §4.2).
+  const queueProbe = new RedisTurnQueue({ url: env.REDIS_URL });
+  metrics
+    .getMeter('trinity-harness/worker')
+    .createObservableGauge('trinity.queue.jobs', {
+      description: 'BullMQ turn-queue job counts by state',
+    })
+    .addCallback(async (observable) => {
+      try {
+        const counts = await queueProbe.counts();
+        for (const [state, n] of Object.entries(counts)) {
+          observable.observe(n, {
+            'trinity.queue': TURN_QUEUE_NAME,
+            'trinity.queue_state': state,
+          });
+        }
+      } catch {
+        // Metrics must never break the worker; a failed read yields no data.
+      }
+    });
   // M3 session/cancel: abort the turn when it is running on THIS replica.
   const cancels = new RedisTurnCancelSubscriber(redis);
   const cancelSub = cancels.subscribe((sessionId) => worker.cancel(sessionId));
   console.log('[agent-worker] consuming turns from BullMQ');
 
   const shutdown = async (): Promise<void> => {
+    // M5 drain: BullMQ close() stops claiming NEW jobs and waits for the
+    // in-flight turn to finish (docs/design.md §16 缩容前 drain).
     cancelSub.dispose();
     await worker.close();
+    await queueProbe.close();
     if (lsp) await lsp.dispose();
+    await telemetry?.shutdown();
     redis.disconnect();
     await pool.end();
     process.exit(0);

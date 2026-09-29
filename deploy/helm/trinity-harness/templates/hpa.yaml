@@ -1,0 +1,48 @@
+{{- if .Values.server.hpa.enabled }}
+# docs/design.md §16: server HPA 2–20 (CPU).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "trinity-harness.fullname" . }}-server
+  labels:
+    {{- include "trinity-harness.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "trinity-harness.fullname" . }}-server
+  minReplicas: {{ .Values.server.hpa.minReplicas }}
+  maxReplicas: {{ .Values.server.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.server.hpa.targetCPUUtilizationPercentage }}
+{{- end }}
+---
+{{- if .Values.agentWorker.hpa.enabled }}
+# Worker HPA (CPU). Queue-depth (0→N) scaling requires KEDA — see
+# docs/production-checklist.md; values.agentWorker.hpa notes the ScaledObject.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "trinity-harness.fullname" . }}-agent-worker
+  labels:
+    {{- include "trinity-harness.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "trinity-harness.fullname" . }}-agent-worker
+  minReplicas: {{ .Values.agentWorker.hpa.minReplicas }}
+  maxReplicas: {{ .Values.agentWorker.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.agentWorker.hpa.targetCPUUtilizationPercentage }}
+{{- end }}

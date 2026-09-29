@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trinity-harness.fullname" . }}-audit-consumer
+  labels:
+    app.kubernetes.io/name: audit-consumer
+    {{- include "trinity-harness.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.auditConsumer.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: audit-consumer
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: audit-consumer
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: audit-consumer
+          image: {{ include "trinity-harness.image" (dict "image" .Values.auditConsumer.image "global" .Values.global) | quote }}
+          imagePullPolicy: IfNotPresent
+          {{- include "trinity-harness.envFrom" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.auditConsumer.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          {{- include "trinity-harness.securityContext" . | nindent 10 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}

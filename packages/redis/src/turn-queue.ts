@@ -32,6 +32,21 @@ export class RedisTurnQueue implements AgentTaskQueue {
     await this.queue.add('turn', task, { jobId: crypto.randomUUID() });
   }
 
+  /**
+   * M5 queue-depth metric feed (docs/design.md §17): BullMQ job counts, used
+   * by an ObservableGauge callback (event-driven per scrape — no polling).
+   */
+  async counts(): Promise<Record<string, number>> {
+    const raw = await this.queue.getJobCounts(
+      'waiting',
+      'active',
+      'delayed',
+      'failed',
+      'completed',
+    );
+    return Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, Number(v)]));
+  }
+
   async close(): Promise<void> {
     await this.queue.close();
   }

@@ -15,9 +15,11 @@
     "start": "tsx src/main.ts"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
     "@trinity-harness/contracts": "*",
     "@trinity-harness/core": "*",
     "@trinity-harness/db": "*",
+    "@trinity-harness/otel": "*",
     "@trinity-harness/redis": "*",
     "@trinity-harness/shared": "*",
     "dotenv": "^18.0.4",

@@ -19,6 +19,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.65",
     "@ai-sdk/openai": "^4.0.78",
+    "@opentelemetry/api": "^1.9.1",
     "@trinity-harness/contracts": "*",
     "@trinity-harness/shared": "*",
     "ai": "^7.0.116",

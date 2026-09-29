@@ -54,6 +54,12 @@ export interface RunTurnOptions {
    * docs/design.md §10).
    */
   content?: ContentBlock[] | undefined;
+  /**
+   * M5: tenant attribution for usage recording + quota gating (docs/design.md
+   * §17). Required for the quota gate to run; without it the turn is
+   * unlimited (M1 in-memory mode has no tenants).
+   */
+  tenantId?: string | undefined;
 }
 
 export interface TurnOutcome {

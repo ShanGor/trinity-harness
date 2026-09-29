@@ -7,16 +7,28 @@ import type {
   EventSink,
   LLMPort,
   LLMRequest,
+  QuotaWindow,
   RunTurnOptions,
   SessionStore,
+  StreamChunk,
   ToolCall,
   ToolRegistry,
   ToolResult,
   TurnOutcome,
+  UsagePort,
 } from '@trinity-harness/contracts';
+import { windowStart } from '@trinity-harness/contracts';
 
 import type { ContextManager } from '../context/context-manager.js';
 import { PolicyToolRegistry } from '../policy-tool-registry.js';
+import {
+  approvalDuration,
+  tokenCounter,
+  toolCounter,
+  tracer,
+  turnDuration,
+  turnSteps,
+} from '../telemetry.js';
 import { toModelMessages } from './to-model-messages.js';
 
 const DEFAULT_MAX_STEPS = 32;
@@ -67,6 +79,13 @@ export interface AgentLoopOptions {
    * BlobStore; fail-closed when absent).
    */
   resolveBlob?: ((uri: string) => Promise<Uint8Array>) | undefined;
+  /**
+   * M5: token metering + tenant quota gate (docs/design.md §17). Checked
+   * before every model request (fail-closed: store failure or an exceeded
+   * quota ends the turn with a friendly error); usage chunks are recorded
+   * per completed model request (best-effort, never breaks the turn).
+   */
+  usage?: UsagePort | undefined;
 }
 
 function meta(): { eventId: string; at: string } {
@@ -113,332 +132,463 @@ export class CoreAgentLoop implements AgentLoop {
     const signal = runOpts?.signal;
     const { store, tools, llm } = this.opts;
     const actor = runOpts?.actor;
+    const tenantId = runOpts?.tenantId;
     const appendOpts = actor !== undefined ? { actor } : undefined;
     const ctx = { sessionId, workspaceRoot: this.opts.workspaceRoot, signal };
-    // M3: policy gating (docs/design.md §12). No policy ⇒ M2 behavior.
-    const gate = runOpts?.policy ? new PolicyToolRegistry(tools, runOpts.policy) : null;
-
-    const throwIfAborted = (): void => {
-      if (signal?.aborted) {
-        throw new DOMException('aborted', 'AbortError');
-      }
-    };
-
+    // M5 OTel: one span per turn/step/tool/approval (design.md §17). No-op
+    // without a registered SDK (@opentelemetry/api global fallthrough).
+    const turnSpan = tracer.startSpan('trinity.turn', {
+      attributes: {
+        'trinity.session_id': sessionId,
+        'trinity.model': this.opts.model,
+        ...(tenantId !== undefined ? { 'trinity.tenant_id': tenantId } : {}),
+      },
+    });
+    const turnStartedAt = Date.now();
     let steps = 0;
     let reason: TurnOutcome['reason'] = 'completed';
     let detail: string | undefined;
-
-    // The user message: committed by the CALLER when it passes `promptSeq`
-    // (distributed + inline HTTP paths both commit before enqueueing so the
-    // exact seq is known, docs/design.md §11.3); appended here otherwise.
-    // M4: `runOpts.content` (multimodal blocks) replaces the plain-text body.
-    const userContent: ContentBlock[] =
-      runOpts?.content !== undefined && runOpts.content.length > 0
-        ? runOpts.content
-        : [{ kind: 'text', text: prompt }];
-    const promptPreview =
-      userContent.find((b) => b.kind === 'text')?.text ??
-      userContent
-        .map((b) =>
-          b.kind === 'image' || b.kind === 'file' ? `[${b.kind}: ${b.uri}]` : '[content block]',
-        )
-        .join(' ');
-    const appendedUser =
-      runOpts?.promptSeq === undefined
-        ? await store.append(
-            sessionId,
-            [
-              {
-                ...meta(),
-                type: 'message/user',
-                surfaceOp: 'append',
-                content: userContent,
-              },
-            ],
-            appendOpts,
-          )
-        : null;
-    const promptSeq = runOpts?.promptSeq ?? appendedUser!.from;
-
-    // Prompt gate (docs/design.md §12): the user message is treated like a
-    // tool call. Denied ⇒ the row is removed again (never-ran prompts leave
-    // no trace, see SessionStore.remove) and the turn ends immediately.
-    if (
-      gate &&
-      gate.decide({ id: `prompt-${promptSeq}`, name: 'prompt', args: promptPreview }) !== 'allowed'
-    ) {
-      const promptCall: ToolCall = {
-        id: `prompt-${promptSeq}`,
-        name: 'prompt',
-        args: promptPreview,
-      };
-      const outcome = await this.gateCall(
-        sessionId,
-        promptCall,
-        promptPreview,
-        sink,
-        appendOpts,
-        signal,
-      );
-      if (outcome === 'rejected') {
-        await store.remove?.(sessionId, promptSeq);
-        reason = 'error';
-        detail = 'prompt rejected by permission policy';
-      }
-    }
-
     try {
-      // `promptGated` ⇒ skip the model loop entirely; turn/end still lands.
-      while (reason === 'completed') {
-        throwIfAborted();
-        // Reached only when the previous step ended with tool calls: the cap
-        // counts completed model requests, so a turn finishing exactly on the
-        // limit still reports 'completed'.
-        if (steps >= this.maxSteps) {
-          reason = 'error';
-          detail = `step limit (${this.maxSteps}) reached`;
-          break;
+      // M3: policy gating (docs/design.md §12). No policy ⇒ M2 behavior.
+      const gate = runOpts?.policy ? new PolicyToolRegistry(tools, runOpts.policy) : null;
+
+      const throwIfAborted = (): void => {
+        if (signal?.aborted) {
+          throw new DOMException('aborted', 'AbortError');
         }
-        steps += 1;
+      };
 
-        // M4 context pressure: compact BEFORE the request so history entering
-        // a new turn is bounded, and again between steps after tool waves
-        // (docs/design.md §6.1 "上下文压力/溢出 → 触发 compaction"). No-op
-        // when under budget.
-        if (this.opts.context) {
-          await this.opts.context.compact(sessionId, { signal, appendOpts, sink });
-        }
-
-        const history = await store.load(sessionId);
-        // M4: per-step system augmentation (LSP diagnostics injection, §9).
-        const augmented = await this.opts.augmentSystem?.(sessionId);
-        const system =
-          this.opts.systemPrompt !== undefined || augmented !== undefined
-            ? [this.opts.systemPrompt, augmented].filter((s) => s !== undefined).join('\n\n')
-            : undefined;
-        const request: LLMRequest = {
-          model: this.opts.model,
-          system,
-          messages: toModelMessages(history),
-          tools: tools.schemas(),
-          signal,
-          ...(this.opts.resolveBlob !== undefined ? { resolveBlob: this.opts.resolveBlob } : {}),
-        };
-        const chunks = await llm.stream(request);
-
-        let text = '';
-        let reasoningText = '';
-        let reasoningSignature: string | undefined;
-        const toolCalls: ToolCall[] = [];
-        for await (const chunk of chunks) {
-          throwIfAborted();
-          if (chunk.kind === 'text-delta') {
-            text += chunk.text;
-            sink.emit({ type: 'text-delta', text: chunk.text });
-          } else if (chunk.kind === 'reasoning-delta') {
-            // Reasoning is persisted on the assistant event so subsequent
-            // steps replay it (MiniMax-M3 requires the last reasoning output).
-            if (chunk.signature !== undefined) {
-              reasoningSignature = chunk.signature;
-            }
-            if (chunk.text.length > 0) {
-              reasoningText += chunk.text;
-              sink.emit({ type: 'reasoning-delta', text: chunk.text });
-            }
-          } else if (chunk.kind === 'tool-call') {
-            toolCalls.push({ id: chunk.call.id, name: chunk.call.name, args: chunk.call.args });
-          } else if (chunk.kind === 'finish' && chunk.reason === 'error') {
-            throw new Error('LLM stream finished with an error');
-          }
-        }
-
-        if (text.length > 0 || reasoningText.length > 0) {
-          await store.append(
-            sessionId,
-            [
-              {
-                ...meta(),
-                type: 'message/assistant',
-                surfaceOp: 'append',
-                content: [
-                  ...(reasoningText.length > 0
-                    ? [
-                        {
-                          kind: 'reasoning' as const,
-                          text: reasoningText,
-                          ...(reasoningSignature !== undefined
-                            ? { signature: reasoningSignature }
-                            : {}),
-                        },
-                      ]
-                    : []),
-                  ...(text.length > 0 ? [{ kind: 'text' as const, text }] : []),
-                ],
-              },
-            ],
-            appendOpts,
-          );
-          if (text.length > 0) {
-            sink.emit({ type: 'message/assistant', content: text });
-          }
-        }
-
-        if (toolCalls.length === 0) {
-          break; // model is done — turn complete
-        }
-
-        // Tool scheduling (design.md §6.3): consecutive parallel-class calls
-        // run in a rolling pool; an 'exclusive' call forms a wave of its own.
-        // tool/call and tool/result events are ALWAYS committed in strict
-        // model-output order so replay stays deterministic.
-        const waves: ToolCall[][] = [];
-        let pending: ToolCall[] = [];
-        for (const call of toolCalls) {
-          if (tools.concurrencyOf(call.name) === 'exclusive') {
-            if (pending.length > 0) {
-              waves.push(pending);
-              pending = [];
-            }
-            waves.push([call]);
-          } else {
-            pending.push(call);
-          }
-        }
-        if (pending.length > 0) {
-          waves.push(pending);
-        }
-
-        for (const wave of waves) {
-          throwIfAborted();
-          await store.append(
-            sessionId,
-            wave.map((call) => ({
-              ...meta(),
-              type: 'tool/call' as const,
-              callId: call.id,
-              name: call.name,
-              args: call.args,
-            })),
-            appendOpts,
-          );
-          for (const call of wave) {
-            sink.emit({ type: 'tool/call', call: { ...call, args: call.args } });
-          }
-
-          // M3 permission gate (docs/design.md §12.2): 'denied' and rejected
-          // 'ask' calls are resolved inline (isError results, model order
-          // preserved); only allowed calls reach the execution pool.
-          const presolved = new Map<string, ToolResult>();
-          const executable: ToolCall[] = [];
-          for (const call of wave) {
-            const decision = gate?.decide(call) ?? 'allowed';
-            if (decision === 'denied') {
-              presolved.set(call.id, {
-                value: {
-                  message: `tool '${call.name}' is denied by the session permission policy`,
+      // The user message: committed by the CALLER when it passes `promptSeq`
+      // (distributed + inline HTTP paths both commit before enqueueing so the
+      // exact seq is known, docs/design.md §11.3); appended here otherwise.
+      // M4: `runOpts.content` (multimodal blocks) replaces the plain-text body.
+      const userContent: ContentBlock[] =
+        runOpts?.content !== undefined && runOpts.content.length > 0
+          ? runOpts.content
+          : [{ kind: 'text', text: prompt }];
+      const promptPreview =
+        userContent.find((b) => b.kind === 'text')?.text ??
+        userContent
+          .map((b) =>
+            b.kind === 'image' || b.kind === 'file' ? `[${b.kind}: ${b.uri}]` : '[content block]',
+          )
+          .join(' ');
+      const appendedUser =
+        runOpts?.promptSeq === undefined
+          ? await store.append(
+              sessionId,
+              [
+                {
+                  ...meta(),
+                  type: 'message/user',
+                  surfaceOp: 'append',
+                  content: userContent,
                 },
-                isError: true,
-              });
-            } else if (decision === 'ask') {
-              const outcome = await this.gateCall(
+              ],
+              appendOpts,
+            )
+          : null;
+      const promptSeq = runOpts?.promptSeq ?? appendedUser!.from;
+
+      // Prompt gate (docs/design.md §12): the user message is treated like a
+      // tool call. Denied ⇒ the row is removed again (never-ran prompts leave
+      // no trace, see SessionStore.remove) and the turn ends immediately.
+      if (
+        gate &&
+        gate.decide({ id: `prompt-${promptSeq}`, name: 'prompt', args: promptPreview }) !==
+          'allowed'
+      ) {
+        const promptCall: ToolCall = {
+          id: `prompt-${promptSeq}`,
+          name: 'prompt',
+          args: promptPreview,
+        };
+        const outcome = await this.gateCall(
+          sessionId,
+          promptCall,
+          promptPreview,
+          sink,
+          appendOpts,
+          signal,
+        );
+        if (outcome === 'rejected') {
+          await store.remove?.(sessionId, promptSeq);
+          reason = 'error';
+          detail = 'prompt rejected by permission policy';
+        }
+      }
+
+      try {
+        // `promptGated` ⇒ skip the model loop entirely; turn/end still lands.
+        while (reason === 'completed') {
+          throwIfAborted();
+          // Reached only when the previous step ended with tool calls: the cap
+          // counts completed model requests, so a turn finishing exactly on the
+          // limit still reports 'completed'.
+          if (steps >= this.maxSteps) {
+            reason = 'error';
+            detail = `step limit (${this.maxSteps}) reached`;
+            break;
+          }
+          steps += 1;
+
+          // M4 context pressure: compact BEFORE the request so history entering
+          // a new turn is bounded, and again between steps after tool waves
+          // (docs/design.md §6.1 "上下文压力/溢出 → 触发 compaction"). No-op
+          // when under budget.
+          if (this.opts.context) {
+            await this.opts.context.compact(sessionId, { signal, appendOpts, sink });
+          }
+
+          const history = await store.load(sessionId);
+          // M4: per-step system augmentation (LSP diagnostics injection, §9).
+          const augmented = await this.opts.augmentSystem?.(sessionId);
+          const system =
+            this.opts.systemPrompt !== undefined || augmented !== undefined
+              ? [this.opts.systemPrompt, augmented].filter((s) => s !== undefined).join('\n\n')
+              : undefined;
+          const request: LLMRequest = {
+            model: this.opts.model,
+            system,
+            messages: toModelMessages(history),
+            tools: tools.schemas(),
+            signal,
+            ...(this.opts.resolveBlob !== undefined ? { resolveBlob: this.opts.resolveBlob } : {}),
+          };
+
+          // M5 quota gate (docs/design.md §17 "beforeModelCall 拦截点实时判定"):
+          // deny BEFORE spending tokens. Fail-closed: a quota-store failure
+          // denies too (AGENTS.md §3.4).
+          if (this.opts.usage && tenantId) {
+            const denied = await this.checkQuota(tenantId);
+            if (denied) {
+              reason = 'error';
+              detail = denied;
+              break;
+            }
+          }
+
+          const stepSpan = tracer.startSpan('trinity.step', {
+            attributes: { 'trinity.step': steps, 'trinity.model': this.opts.model },
+          });
+          let chunks: AsyncIterable<StreamChunk>;
+          try {
+            chunks = await llm.stream(request);
+          } catch (err) {
+            stepSpan.recordException(err as Error);
+            stepSpan.setStatus({ code: 2, message: errorMessage(err) });
+            stepSpan.end();
+            throw err;
+          }
+
+          let text = '';
+          let reasoningText = '';
+          let reasoningSignature: string | undefined;
+          let inputTokens = 0;
+          let outputTokens = 0;
+          const toolCalls: ToolCall[] = [];
+          try {
+            for await (const chunk of chunks) {
+              throwIfAborted();
+              if (chunk.kind === 'usage') {
+                inputTokens += chunk.inputTokens;
+                outputTokens += chunk.outputTokens;
+              } else if (chunk.kind === 'text-delta') {
+                text += chunk.text;
+                sink.emit({ type: 'text-delta', text: chunk.text });
+              } else if (chunk.kind === 'reasoning-delta') {
+                // Reasoning is persisted on the assistant event so subsequent
+                // steps replay it (MiniMax-M3 requires the last reasoning output).
+                if (chunk.signature !== undefined) {
+                  reasoningSignature = chunk.signature;
+                }
+                if (chunk.text.length > 0) {
+                  reasoningText += chunk.text;
+                  sink.emit({ type: 'reasoning-delta', text: chunk.text });
+                }
+              } else if (chunk.kind === 'tool-call') {
+                toolCalls.push({ id: chunk.call.id, name: chunk.call.name, args: chunk.call.args });
+              } else if (chunk.kind === 'finish' && chunk.reason === 'error') {
+                throw new Error('LLM stream finished with an error');
+              }
+            }
+          } catch (err) {
+            stepSpan.recordException(err as Error);
+            stepSpan.setStatus({ code: 2, message: errorMessage(err) });
+            throw err;
+          } finally {
+            stepSpan.end();
+          }
+
+          // M5 metering: persist this request's token usage + OTel token
+          // metrics (best-effort — metering must never break the turn,
+          // docs/design.md §17).
+          if (inputTokens > 0 || outputTokens > 0) {
+            const tokenAttrs = {
+              'trinity.model': this.opts.model,
+              ...(tenantId !== undefined ? { 'trinity.tenant_id': tenantId } : {}),
+            };
+            tokenCounter.add(inputTokens, { ...tokenAttrs, 'trinity.token_kind': 'input' });
+            tokenCounter.add(outputTokens, { ...tokenAttrs, 'trinity.token_kind': 'output' });
+          }
+          if (this.opts.usage && tenantId && (inputTokens > 0 || outputTokens > 0)) {
+            try {
+              await this.opts.usage.record({
+                tenantId,
                 sessionId,
-                call,
-                preview(call.args),
-                sink,
-                appendOpts,
-                signal,
-              );
-              if (outcome === 'rejected') {
+                model: this.opts.model,
+                inputTokens,
+                outputTokens,
+              });
+            } catch (err) {
+              console.error('[CoreAgentLoop] usage record failed', err);
+            }
+          }
+
+          if (text.length > 0 || reasoningText.length > 0) {
+            await store.append(
+              sessionId,
+              [
+                {
+                  ...meta(),
+                  type: 'message/assistant',
+                  surfaceOp: 'append',
+                  content: [
+                    ...(reasoningText.length > 0
+                      ? [
+                          {
+                            kind: 'reasoning' as const,
+                            text: reasoningText,
+                            ...(reasoningSignature !== undefined
+                              ? { signature: reasoningSignature }
+                              : {}),
+                          },
+                        ]
+                      : []),
+                    ...(text.length > 0 ? [{ kind: 'text' as const, text }] : []),
+                  ],
+                },
+              ],
+              appendOpts,
+            );
+            if (text.length > 0) {
+              sink.emit({ type: 'message/assistant', content: text });
+            }
+          }
+
+          if (toolCalls.length === 0) {
+            break; // model is done — turn complete
+          }
+
+          // Tool scheduling (design.md §6.3): consecutive parallel-class calls
+          // run in a rolling pool; an 'exclusive' call forms a wave of its own.
+          // tool/call and tool/result events are ALWAYS committed in strict
+          // model-output order so replay stays deterministic.
+          const waves: ToolCall[][] = [];
+          let pending: ToolCall[] = [];
+          for (const call of toolCalls) {
+            if (tools.concurrencyOf(call.name) === 'exclusive') {
+              if (pending.length > 0) {
+                waves.push(pending);
+                pending = [];
+              }
+              waves.push([call]);
+            } else {
+              pending.push(call);
+            }
+          }
+          if (pending.length > 0) {
+            waves.push(pending);
+          }
+
+          for (const wave of waves) {
+            throwIfAborted();
+            await store.append(
+              sessionId,
+              wave.map((call) => ({
+                ...meta(),
+                type: 'tool/call' as const,
+                callId: call.id,
+                name: call.name,
+                args: call.args,
+              })),
+              appendOpts,
+            );
+            for (const call of wave) {
+              sink.emit({ type: 'tool/call', call: { ...call, args: call.args } });
+            }
+
+            // M3 permission gate (docs/design.md §12.2): 'denied' and rejected
+            // 'ask' calls are resolved inline (isError results, model order
+            // preserved); only allowed calls reach the execution pool.
+            const presolved = new Map<string, ToolResult>();
+            const executable: ToolCall[] = [];
+            for (const call of wave) {
+              const decision = gate?.decide(call) ?? 'allowed';
+              if (decision === 'denied') {
                 presolved.set(call.id, {
-                  value: { message: `tool '${call.name}' was rejected by the user` },
+                  value: {
+                    message: `tool '${call.name}' is denied by the session permission policy`,
+                  },
                   isError: true,
                 });
+              } else if (decision === 'ask') {
+                const outcome = await this.gateCall(
+                  sessionId,
+                  call,
+                  preview(call.args),
+                  sink,
+                  appendOpts,
+                  signal,
+                );
+                if (outcome === 'rejected') {
+                  presolved.set(call.id, {
+                    value: { message: `tool '${call.name}' was rejected by the user` },
+                    isError: true,
+                  });
+                } else {
+                  executable.push(call);
+                }
               } else {
                 executable.push(call);
               }
-            } else {
-              executable.push(call);
             }
-          }
 
-          const executed = new Map<string, ToolResult>();
-          if (executable.length > 0) {
-            const pooled = await this.runWave(
-              executable,
-              (call) => tools.execute(call, ctx),
-              throwIfAborted,
+            const executed = new Map<string, ToolResult>();
+            if (executable.length > 0) {
+              const pooled = await this.runWave(
+                executable,
+                (call) => this.executeTool(call, ctx, tools),
+                throwIfAborted,
+              );
+              for (const [i, call] of executable.entries()) {
+                executed.set(call.id, pooled[i]!);
+              }
+            }
+
+            const results = wave.map((call) => presolved.get(call.id) ?? executed.get(call.id)!);
+
+            // M4 spill (docs/design.md §7): oversized results are stored in the
+            // BlobStore and only a reference + preview hits the append-only log.
+            const stored = await Promise.all(
+              wave.map(async (call, i) => {
+                const result = results[i]!;
+                return this.spillIfLarge(sessionId, call, result);
+              }),
             );
-            for (const [i, call] of executable.entries()) {
-              executed.set(call.id, pooled[i]!);
+
+            await store.append(
+              sessionId,
+              wave.map((call, i) => {
+                const result = stored[i]!;
+                return {
+                  ...meta(),
+                  type: 'tool/result' as const,
+                  callId: call.id,
+                  value: result.value,
+                  isError: result.isError,
+                };
+              }),
+              appendOpts,
+            );
+            for (const [i, call] of wave.entries()) {
+              sink.emit({
+                type: 'tool/result',
+                callId: call.id,
+                name: call.name,
+                result: stored[i]!,
+              });
             }
           }
 
-          const results = wave.map((call) => presolved.get(call.id) ?? executed.get(call.id)!);
-
-          // M4 spill (docs/design.md §7): oversized results are stored in the
-          // BlobStore and only a reference + preview hits the append-only log.
-          const stored = await Promise.all(
-            wave.map(async (call, i) => {
-              const result = results[i]!;
-              return this.spillIfLarge(sessionId, call, result);
-            }),
-          );
-
-          await store.append(
-            sessionId,
-            wave.map((call, i) => {
-              const result = stored[i]!;
-              return {
-                ...meta(),
-                type: 'tool/result' as const,
-                callId: call.id,
-                value: result.value,
-                isError: result.isError,
-              };
-            }),
-            appendOpts,
-          );
-          for (const [i, call] of wave.entries()) {
-            sink.emit({
-              type: 'tool/result',
-              callId: call.id,
-              name: call.name,
-              result: stored[i]!,
-            });
+          // M4 context pressure: compact between steps so the NEXT request sees
+          // a bounded surface (docs/design.md §6.1 "上下文压力/溢出 → 触发
+          // compaction"). No-op when under budget.
+          if (this.opts.context) {
+            await this.opts.context.compact(sessionId, { signal, appendOpts, sink });
           }
         }
-
-        // M4 context pressure: compact between steps so the NEXT request sees
-        // a bounded surface (docs/design.md §6.1 "上下文压力/溢出 → 触发
-        // compaction"). No-op when under budget.
-        if (this.opts.context) {
-          await this.opts.context.compact(sessionId, { signal, appendOpts, sink });
+      } catch (err) {
+        if (isAbortError(err)) {
+          reason = 'aborted';
+        } else {
+          reason = 'error';
+          detail = errorMessage(err);
         }
       }
+
+      await store.append(
+        sessionId,
+        [
+          {
+            ...meta(),
+            type: 'turn/end',
+            reason,
+            ...(detail !== undefined ? { detail } : {}),
+          },
+        ],
+        appendOpts,
+      );
+      sink.emit({ type: 'turn/end', reason, ...(detail !== undefined ? { detail } : {}) });
+
+      return { reason, steps };
+    } finally {
+      // M5 OTel turn metrics (design.md §17): outcome + cost of the turn.
+      turnSpan.setAttributes({
+        'trinity.turn_steps': steps,
+        'trinity.turn_reason': reason,
+      });
+      if (reason === 'error') {
+        turnSpan.setStatus({ code: 2, message: detail ?? 'turn error' });
+      }
+      turnSpan.end();
+      turnDuration.record(Date.now() - turnStartedAt, {
+        'trinity.model': this.opts.model,
+        'trinity.turn_reason': reason,
+      });
+      turnSteps.record(steps);
+    }
+  }
+
+  /**
+   * M5 quota check across the configured calendar windows (hour/day/month,
+   * docs/design.md §17). Returns a user-facing denial message, or null when
+   * the tenant is within every configured limit (and when no limit is
+   * configured at all). Fail-closed: a store error denies the request.
+   */
+  private async checkQuota(tenantId: string): Promise<string | null> {
+    const usage = this.opts.usage!;
+    const labels: [QuotaWindow, keyof Awaited<ReturnType<UsagePort['quotaOf']>>][] = [
+      ['hour', 'hourlyTokens'],
+      ['day', 'dailyTokens'],
+      ['month', 'monthlyTokens'],
+    ];
+    let quota: Awaited<ReturnType<UsagePort['quotaOf']>>;
+    try {
+      quota = await usage.quotaOf(tenantId);
     } catch (err) {
-      if (isAbortError(err)) {
-        reason = 'aborted';
-      } else {
-        reason = 'error';
-        detail = errorMessage(err);
+      console.error('[CoreAgentLoop] quota read failed (denying)', err);
+      return 'model quota temporarily unavailable (fail-closed); try again later';
+    }
+    const now = new Date();
+    for (const [window, field] of labels) {
+      const limit = quota[field];
+      if (limit === undefined) continue;
+      let used: number;
+      try {
+        used = await usage.usageSince(tenantId, windowStart(window, now));
+      } catch (err) {
+        console.error('[CoreAgentLoop] quota usage read failed (denying)', err);
+        return 'model quota temporarily unavailable (fail-closed); try again later';
+      }
+      if (used >= limit) {
+        return (
+          `model quota exceeded for this ${window} (used ${used.toLocaleString()} of ` +
+          `${limit.toLocaleString()} tokens). Contact your administrator to raise the quota.`
+        );
       }
     }
-
-    await store.append(
-      sessionId,
-      [
-        {
-          ...meta(),
-          type: 'turn/end',
-          reason,
-          ...(detail !== undefined ? { detail } : {}),
-        },
-      ],
-      appendOpts,
-    );
-    sink.emit({ type: 'turn/end', reason, ...(detail !== undefined ? { detail } : {}) });
-
-    return { reason, steps };
+    return null;
   }
 
   /**
@@ -497,6 +647,8 @@ export class CoreAgentLoop implements AgentLoop {
   ): Promise<'allowed' | 'rejected'> {
     const requester = this.opts.approvals;
     const approvalId = crypto.randomUUID();
+    // M5 OTel: approval latency (docs/design.md §17 审批延迟).
+    const approvalStartedAt = Date.now();
 
     // Durable trail (secondary to the event log; best-effort by design).
     try {
@@ -591,7 +743,46 @@ export class CoreAgentLoop implements AgentLoop {
       console.error('[CoreAgentLoop] approval trail resolve failed', err);
     }
     sink.emit({ type: 'approval-resolved', approvalId, callId: call.id, outcome, decidedBy });
+    approvalDuration.record(Date.now() - approvalStartedAt, {
+      'trinity.tool': call.name,
+      'trinity.approval_outcome': outcome,
+    });
     return outcome;
+  }
+
+  /**
+   * One tool execution inside its own OTel span + outcome counter
+   * (docs/design.md §17: 工具成功率). Errors stay ToolResults (isError) at
+   * the registry layer; here we only observe.
+   */
+  private async executeTool(
+    call: ToolCall,
+    ctx: { sessionId: string; workspaceRoot: string; signal?: AbortSignal },
+    tools: ToolRegistry,
+  ): Promise<ToolResult> {
+    const span = tracer.startSpan('trinity.tool', {
+      attributes: { 'trinity.tool': call.name },
+    });
+    const startedAt = Date.now();
+    try {
+      const result = await tools.execute(call, ctx);
+      toolCounter.add(1, {
+        'trinity.tool': call.name,
+        'trinity.tool_status': result.isError ? 'error' : 'ok',
+      });
+      if (result.isError) {
+        span.setStatus({ code: 2, message: 'tool returned isError' });
+      }
+      return result;
+    } catch (err) {
+      toolCounter.add(1, { 'trinity.tool': call.name, 'trinity.tool_status': 'error' });
+      span.recordException(err as Error);
+      span.setStatus({ code: 2, message: errorMessage(err) });
+      throw err;
+    } finally {
+      span.setAttribute('trinity.tool_duration_ms', Date.now() - startedAt);
+      span.end();
+    }
   }
 
   /**
