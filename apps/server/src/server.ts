@@ -25,7 +25,11 @@ import type {
   UsagePort,
   UserStore,
 } from '@trinity-harness/contracts';
-import { serverEventSchema } from '@trinity-harness/shared';
+import {
+  personalFoldersQuerySchema,
+  serverEventSchema,
+  workspaceSelectionSchema,
+} from '@trinity-harness/shared';
 import type { ServerEvent } from '@trinity-harness/shared';
 import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -34,7 +38,7 @@ import { z } from 'zod';
 
 import { parsePermissionPolicy, tenantQuotaSchema, windowStart } from '@trinity-harness/contracts';
 
-import { workspaceDirFor } from './workspace.js';
+import { listPersonalFolders, personalWorkspaceDir, workspaceDirFor } from './workspace.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -56,12 +60,7 @@ const createSessionSchema = z.object({
    * team the creator belongs to (`$WORKSPACE_ROOT/<team_id>`). The directory
    * becomes the session sandbox root.
    */
-  workspace: z
-    .object({
-      scope: z.enum(['personal', 'team']),
-      teamId: z.uuid().optional(),
-    })
-    .optional(),
+  workspace: workspaceSelectionSchema.optional(),
 });
 
 const postMessageSchema = z.object({
@@ -916,6 +915,22 @@ export async function buildServer(
 
   // ---- Sessions --------------------------------------------------------------
 
+  app.get('/api/workspaces/personal', async (req, reply) => {
+    if (!req.identity) return reply.code(401).send({ error: 'unauthorized' });
+    const query = personalFoldersQuerySchema.safeParse(req.query);
+    if (!query.success) return reply.code(400).send({ error: 'invalid folder path' });
+    try {
+      const folders = await listPersonalFolders(
+        deps.workspaceRoot,
+        req.identity.userId,
+        query.data.path ?? '',
+      );
+      return { folders };
+    } catch {
+      return reply.code(400).send({ error: 'invalid folder path' });
+    }
+  });
+
   app.post('/api/sessions', async (req, reply) => {
     const body = createSessionSchema.safeParse(req.body);
     if (!body.success) {
@@ -943,15 +958,16 @@ export async function buildServer(
     const scopeOwnerId = identity?.userId ?? 'anonymous';
     let scopeId: string | undefined;
     if (scope === 'team') {
-      if (!ws?.teamId || !deps.teams || !identity) {
+      const teamId = ws?.scope === 'team' ? ws.teamId : undefined;
+      if (!teamId || !deps.teams || !identity) {
         return reply.code(400).send({ error: 'team workspace requires a teamId' });
       }
-      const team = await deps.teams.get(ws.teamId);
+      const team = await deps.teams.get(teamId);
       // Fail-closed: unknown team, other tenant, or non-member ⇒ denied.
       if (!team || team.tenantId !== identity.tenantId) {
         return reply.code(403).send({ error: 'not a member of this team' });
       }
-      const member = await deps.teams.isMember(ws.teamId, identity.userId);
+      const member = await deps.teams.isMember(teamId, identity.userId);
       if (!member) {
         emitAudit({
           id: crypto.randomUUID(),
@@ -959,16 +975,29 @@ export async function buildServer(
           tenantId: identity.tenantId,
           userId: identity.userId,
           action: 'session/created',
-          target: `team:${ws.teamId}`,
+          target: `team:${teamId}`,
           result: 'denied',
         });
         return reply.code(403).send({ error: 'not a member of this team' });
       }
       scopeId = team.id;
     }
-    const workspaceDir = workspaceDirFor(deps.workspaceRoot, scope, scopeId ?? scopeOwnerId);
-    // The sandbox root must exist before tools run against it.
-    await mkdir(workspaceDir, { recursive: true });
+    let workspaceDir: string;
+    if (scope === 'personal' && identity) {
+      try {
+        workspaceDir = await personalWorkspaceDir(
+          deps.workspaceRoot,
+          identity.userId,
+          ws?.scope === 'personal' ? (ws.path ?? '') : '',
+        );
+      } catch {
+        return reply.code(400).send({ error: 'invalid personal workspace folder' });
+      }
+    } else {
+      workspaceDir = workspaceDirFor(deps.workspaceRoot, scope, scopeId ?? scopeOwnerId);
+      // The sandbox root must exist before tools run against it.
+      await mkdir(workspaceDir, { recursive: true });
+    }
 
     if (auth) {
       // Ownership row first; the event log references it by id.

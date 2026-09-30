@@ -79,7 +79,11 @@ function workspaceValue(ws: WorkspaceSelection): string {
 }
 
 function workspaceLabel(s: SessionSummary, teams: TeamView[]): string {
-  if (s.scope !== 'team') return 'personal';
+  if (s.scope !== 'team') {
+    const marker = `/${s.userId}/`;
+    const index = s.workspaceUri.lastIndexOf(marker);
+    return index < 0 ? 'personal' : `personal / ${s.workspaceUri.slice(index + marker.length)}`;
+  }
   return teams.find((t) => t.teamId === s.scopeId)?.name ?? 'team';
 }
 
@@ -114,10 +118,39 @@ export default function App() {
   const [approval, setApproval] = useState<PendingApproval | null>(null);
   const [policy, setPolicy] = useState<string>('workspace-write');
   const [teamsOpen, setTeamsOpen] = useState(false);
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [browsePath, setBrowsePath] = useState('');
+  const [folders, setFolders] = useState<string[]>([]);
+  const [foldersLoading, setFoldersLoading] = useState(false);
   /** M4: attachments staged for the next prompt (uploaded on selection). */
   const [staged, setStaged] = useState<(AttachmentView & { name: string })[]>([]);
   const sessionRef = useRef<string | null>(null);
   const streamRef = useRef<{ close(): void } | null>(null);
+
+  useEffect(() => {
+    if (!folderPickerOpen) return;
+    let active = true;
+    setFoldersLoading(true);
+    void client
+      .listPersonalFolders(browsePath)
+      .then(
+        (names) => {
+          if (active) setFolders(names);
+        },
+        (error: unknown) => {
+          if (active) {
+            setFolders([]);
+            message.error(error instanceof Error ? error.message : String(error));
+          }
+        },
+      )
+      .finally(() => {
+        if (active) setFoldersLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [browsePath, folderPickerOpen, message]);
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -679,6 +712,18 @@ export default function App() {
                 style={{ minWidth: 200 }}
                 title="Workspace for the next session"
               />
+              {workspace.scope === 'personal' && (
+                <Button
+                  size="small"
+                  disabled={busy || !!sessionRef.current}
+                  onClick={() => {
+                    setBrowsePath(workspace.path ?? '');
+                    setFolderPickerOpen(true);
+                  }}
+                >
+                  {workspace.path ? `📁 ${workspace.path}` : '📁 Personal root'}
+                </Button>
+              )}
               <Button size="small" onClick={() => setTeamsOpen(true)}>
                 Teams…
               </Button>
@@ -707,6 +752,43 @@ export default function App() {
             onApprove={() => void onApprove('allowed')}
             onReject={() => void onApprove('rejected')}
           />
+          <Modal
+            open={folderPickerOpen}
+            title="Choose personal workspace folder"
+            onCancel={() => setFolderPickerOpen(false)}
+            onOk={() => {
+              setWorkspace(
+                browsePath ? { scope: 'personal', path: browsePath } : { scope: 'personal' },
+              );
+              setFolderPickerOpen(false);
+            }}
+            okText="Use this folder"
+            okButtonProps={{ disabled: foldersLoading }}
+          >
+            <Typography.Paragraph>Your root / {browsePath || '(root)'}</Typography.Paragraph>
+            <Button
+              size="small"
+              disabled={!browsePath || foldersLoading}
+              onClick={() => setBrowsePath(browsePath.split('/').slice(0, -1).join('/'))}
+            >
+              ↑ Parent folder
+            </Button>
+            <List
+              loading={foldersLoading}
+              dataSource={folders}
+              locale={{ emptyText: 'No subfolders' }}
+              renderItem={(folder) => (
+                <List.Item>
+                  <Button
+                    type="link"
+                    onClick={() => setBrowsePath(browsePath ? `${browsePath}/${folder}` : folder)}
+                  >
+                    📁 {folder}
+                  </Button>
+                </List.Item>
+              )}
+            />
+          </Modal>
           <TeamsModal
             open={teamsOpen}
             onClose={() => setTeamsOpen(false)}

@@ -507,7 +507,7 @@ model_usage(id, tenant_id, session_id, model, input_tokens, output_tokens, cost,
 api_keys / credentials(id, tenant_id, kind, ciphertext, created_at)
 ```
 
-**每会话工作区（workspace scope）**：每个会话绑定一个沙箱目录 —— 个人空间 `$WORKSPACE_ROOT/<user_id>`（`scope='personal'`）或团队空间 `$WORKSPACE_ROOT/<team_id>`（`scope='team'`，`scope_id` 指向 `teams`）。team 是租户内的用户组（M:N，创建者为 owner），一个用户可属多个 team。会话创建时 fail-closed 校验团队成员身份并 `mkdir` 该目录；Loop/Sandbox 按会话的 `workspace_uri` 构建（server inline 与 agent-worker 均按 root 缓存 sandbox + registry），sandbox 的路径逃逸校验即用户/团队之间的隔离边界。团队会话对全体团队成员可见（`listForIdentity`：自己的会话 ∪ 我所属 team 的会话；admin 见全租户）。团队管理 API：`GET/POST /api/teams`、`POST /api/teams/:id/members`（owner 或 admin）。
+**每会话工作区（workspace scope）**：个人空间的允许根目录是 `$WORKSPACE_ROOT/<user_id>`。用户创建会话时可以选择该根目录，或通过 `GET /api/workspaces/personal?path=<相对路径>` 逐级浏览并选择其中已有的任意子目录；`POST /api/sessions` 的 `workspace: { scope: 'personal', path?: string }` 把选中的目录绑定为会话的 `workspace_uri`，省略 `path` 即选择用户根目录。路径必须是根目录内的相对目录，拒绝 `..`、绝对路径、不存在的目录及符号链接，不能跨用户访问。团队空间仍为 `$WORKSPACE_ROOT/<team_id>`（`scope='team'`，`scope_id` 指向 `teams`）。team 是租户内的用户组（M:N，创建者为 owner），一个用户可属多个 team。会话创建时 fail-closed 校验团队成员身份并 `mkdir` 该目录；Loop/Sandbox 按会话的 `workspace_uri` 构建（server inline 与 agent-worker 均按 root 缓存 sandbox + registry），sandbox 的路径逃逸校验即用户/团队之间的隔离边界。团队会话对全体团队成员可见（`listForIdentity`：自己的会话 ∪ 我所属 team 的会话；admin 见全租户）。团队管理 API：`GET/POST /api/teams`、`POST /api/teams/:id/members`（owner 或 admin）。
 
 **历史会话操作**：无标题会话（如先上传附件）在首个 prompt 到达时原子写入标题。`GET /api/sessions/:id/export` 返回鉴权后的 JSON 对话投影（包含内容块引用）；`DELETE /api/sessions/:id` 仅限所有者或租户 admin，先取消 turn、追加 `session/closed` 事件，再设置 `closed_at`。关闭后列表与读取 API 均不再展示该会话，事件日志保留以满足审计与回放要求。worker 拒绝运行已关闭会话的排队任务。团队成员可读团队会话，但不可删除其他成员创建的会话。实时 Pub/Sub 只发增量文本；已提交事件只通过 PG/Redis Stream 分发，SSE 客户端按 seq 去重。
 

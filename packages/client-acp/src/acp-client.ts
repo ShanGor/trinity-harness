@@ -1,12 +1,11 @@
-import { serverEventSchema } from '@trinity-harness/shared';
-import type { ServerEvent, SurfaceMessage } from '@trinity-harness/shared';
+import { personalFoldersResponseSchema, serverEventSchema } from '@trinity-harness/shared';
+import type { ServerEvent, SurfaceMessage, WorkspaceSelection } from '@trinity-harness/shared';
+
+export type { WorkspaceSelection } from '@trinity-harness/shared';
 
 export interface EventStreamHandle {
   close(): void;
 }
-
-/** Workspace scope for a new session (docs/design.md §15). */
-export type WorkspaceSelection = { scope: 'personal' } | { scope: 'team'; teamId: string };
 
 export interface SessionSummary {
   sessionId: string;
@@ -115,6 +114,17 @@ export class AcpClient {
     }
     const body = (await res.json()) as { sessions: SessionSummary[] };
     return body.sessions;
+  }
+
+  /** Immediate child folders below the authenticated user's personal root. */
+  async listPersonalFolders(path = ''): Promise<string[]> {
+    const query = new URLSearchParams({ path });
+    const res = await fetch(`${this.baseUrl}/api/workspaces/personal?${query}`, {
+      headers: this.authHeaders(),
+    });
+    if (!res.ok) throw new Error(`listPersonalFolders failed: ${res.status}`);
+    const body = personalFoldersResponseSchema.parse(await res.json());
+    return body.folders;
   }
 
   async exportSession(sessionId: string): Promise<Blob> {

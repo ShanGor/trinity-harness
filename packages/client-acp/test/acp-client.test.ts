@@ -31,6 +31,33 @@ function fakeFetch(routes: Record<string, (init?: RequestInit) => Response>) {
 }
 
 describe('AcpClient', () => {
+  it('sends a selected personal folder and browses its children', async () => {
+    const { impl } = fakeFetch({
+      'POST http://x/api/sessions': (init) => {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          workspace: { scope: 'personal', path: 'projects/api' },
+        });
+        return new Response(JSON.stringify({ sessionId: 'abc' }), { status: 201 });
+      },
+      'GET http://x/api/workspaces/personal?path=projects%2Fapi': () =>
+        new Response(JSON.stringify({ folders: ['src'] })),
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = impl;
+    try {
+      const client = new AcpClient({ baseUrl: 'http://x' });
+      expect(
+        await client.createSession(undefined, undefined, {
+          scope: 'personal',
+          path: 'projects/api',
+        }),
+      ).toBe('abc');
+      expect(await client.listPersonalFolders('projects/api')).toEqual(['src']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it('creates sessions, sends prompts and fetches history', async () => {
     const { impl } = fakeFetch({
       'POST http://x/api/sessions': () =>

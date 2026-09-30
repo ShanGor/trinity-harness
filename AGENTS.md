@@ -14,6 +14,7 @@ An enterprise-grade, multi-user, browser ↔ server AI Agent platform (core scen
   - ⚠️ `ref/` is gitignored and **read-only reference material. Do not import from it or copy large chunks of code into this repository as committed code** (mind their LICENSEs).
   - Follow the workflow in `docs/design.md` §20 to upgrade reference versions.
 - The project is currently past **M5** (M4 + per-tenant token quota on `UsagePort` + `model_usage`/`tenants.quota`, OTel instrumentation via `@opentelemetry/api` with the `packages/otel` SDK bootstrap, sandbox env scrubbing, `deploy/docker` images + `deploy/helm/trinity-harness` chart with HPA/PDB/Ingress/NetworkPolicy, and `scripts/load-test.mjs`); M0–M4 are complete. See `docs/project-progress.md` and the M5 release gate `docs/production-checklist.md`.
+- A personal workspace's allowed root is `$WORKSPACE_ROOT/<user_id>`. A session may select that root or an existing subfolder beneath it; the selected directory becomes the session sandbox root. See `docs/design.md` §15.
 
 ---
 

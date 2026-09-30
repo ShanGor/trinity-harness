@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -21,7 +21,7 @@ import {
 import { FakeLLM, FakeSandbox, textChunks } from '@trinity-harness/core/testing';
 
 import { buildServer } from '../src/index.js';
-import { workspaceDirFor } from '../src/workspace.js';
+import { personalFolderSegments, workspaceDirFor } from '../src/workspace.js';
 
 /** In-memory {@link TeamStore} double (apps may import implementations — §3.3). */
 class FakeTeamStore implements TeamStore {
@@ -198,6 +198,16 @@ describe('workspaceDirFor (pure)', () => {
   });
 });
 
+describe('personalFolderSegments (pure)', () => {
+  it('accepts the root and nested relative folders', () => {
+    expect(personalFolderSegments('')).toEqual([]);
+    expect(personalFolderSegments('projects/api')).toEqual(['projects', 'api']);
+  });
+  it.each(['/tmp', '../bob', 'a/../bob', 'a//b', 'a\\b', 'a/./b'])('rejects %s', (folder) => {
+    expect(() => personalFolderSegments(folder)).toThrow();
+  });
+});
+
 describe('teams & per-session workspaces', () => {
   let bundle: AppBundle;
   let baseUrl: string;
@@ -257,6 +267,55 @@ describe('teams & per-session workspaces', () => {
     const meta = await bundle.metas.get(sessionId);
     expect(meta?.scope).toBe('personal');
     expect(meta?.workspaceUri).toBe(path.join(bundle.workspaceRoot, alice));
+  });
+
+  it('lets a user browse and select their root or an existing nested folder', async () => {
+    const aliceToken = await login(baseUrl, 'alice@x.com');
+    await mkdir(path.join(bundle.workspaceRoot, alice, 'projects', 'api'), { recursive: true });
+    const rootSession = await authed(baseUrl, aliceToken, '/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ workspace: { scope: 'personal', path: '' } }),
+    });
+    expect(rootSession.status).toBe(201);
+    const { sessionId: rootSessionId } = (await rootSession.json()) as { sessionId: string };
+    expect((await bundle.metas.get(rootSessionId))?.workspaceUri).toBe(
+      path.join(bundle.workspaceRoot, alice),
+    );
+    const root = await authed(baseUrl, aliceToken, '/api/workspaces/personal');
+    expect(root.status).toBe(200);
+    expect((await root.json()) as { folders: string[] }).toEqual({ folders: ['projects'] });
+    const nested = await authed(baseUrl, aliceToken, '/api/workspaces/personal?path=projects');
+    expect((await nested.json()) as { folders: string[] }).toEqual({ folders: ['api'] });
+    const created = await authed(baseUrl, aliceToken, '/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ workspace: { scope: 'personal', path: 'projects/api' } }),
+    });
+    expect(created.status).toBe(201);
+    const { sessionId } = (await created.json()) as { sessionId: string };
+    expect((await bundle.metas.get(sessionId))?.workspaceUri).toBe(
+      path.join(bundle.workspaceRoot, alice, 'projects', 'api'),
+    );
+  });
+
+  it('rejects missing, escaped, and symlinked personal folders', async () => {
+    const aliceToken = await login(baseUrl, 'alice@x.com');
+    const bobToken = await login(baseUrl, 'bob@x.com');
+    await mkdir(path.join(bundle.workspaceRoot, bob), { recursive: true });
+    await symlink(
+      path.join(bundle.workspaceRoot, bob),
+      path.join(bundle.workspaceRoot, alice, 'other-user'),
+    );
+    for (const folder of ['missing', '../' + bob, 'other-user']) {
+      const res = await authed(baseUrl, aliceToken, '/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ workspace: { scope: 'personal', path: folder } }),
+      });
+      expect(res.status).toBe(400);
+    }
+    const hidden = await authed(baseUrl, aliceToken, '/api/workspaces/personal?path=other-user');
+    expect(hidden.status).toBe(400);
+    const bobList = await authed(baseUrl, bobToken, '/api/workspaces/personal');
+    expect((await bobList.json()) as { folders: string[] }).toEqual({ folders: [] });
   });
 
   it('team sessions: member gets the team dir; non-member is denied (fail-closed)', async () => {
