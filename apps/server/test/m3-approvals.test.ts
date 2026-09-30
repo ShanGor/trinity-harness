@@ -1,4 +1,7 @@
 import 'dotenv/config';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -37,6 +40,8 @@ import {
 } from '@trinity-harness/redis';
 
 import { buildServer } from '../src/index.js';
+
+const WS_DIR = mkdtempSync(path.join(tmpdir(), 'trinity-m3-'));
 
 /**
  * M3 distributed end-to-end (integration): the FULL approval pipeline over
@@ -153,7 +158,7 @@ describe.skipIf(!hasInfra)('M3 approvals over the distributed topology', () => {
     metas = new PgSessionMetaStore(db);
     app = await buildServer({
       store,
-      workspaceRoot: '/ws',
+      workspaceRoot: WS_DIR,
       queue,
       eventReader: new RedisSessionEventReader(redis, { blockMs: 500 }),
       liveEvents: new RedisLiveEventSubscriber(redis),
@@ -203,7 +208,7 @@ describe.skipIf(!hasInfra)('M3 approvals over the distributed topology', () => {
           model: 'fake/model',
           tools,
           store,
-          workspaceRoot: '/ws',
+          workspaceRoot: WS_DIR,
           approvals: new RedisApprovalRequester(redis),
           approvalStore,
         }).run(task.sessionId, task.prompt, sink, {
@@ -220,6 +225,7 @@ describe.skipIf(!hasInfra)('M3 approvals over the distributed topology', () => {
   }, 30000);
 
   afterAll(async () => {
+    rmSync(WS_DIR, { recursive: true, force: true });
     await app.close();
     await worker.close();
     await queue.close();

@@ -5,6 +5,33 @@ export interface EventStreamHandle {
   close(): void;
 }
 
+/** Workspace scope for a new session (docs/design.md §15). */
+export type WorkspaceSelection = { scope: 'personal' } | { scope: 'team'; teamId: string };
+
+export interface SessionSummary {
+  sessionId: string;
+  userId: string;
+  title: string;
+  createdAt: string;
+  workspaceUri: string;
+  scope: 'personal' | 'team';
+  scopeId?: string;
+}
+
+export interface TeamMemberView {
+  userId: string;
+  email: string;
+  role: 'owner' | 'member';
+  createdAt: string;
+}
+
+export interface TeamView {
+  teamId: string;
+  name: string;
+  createdAt: string;
+  members: TeamMemberView[];
+}
+
 export interface AcpClientOptions {
   /** Base URL of the server; '' makes requests same-origin. */
   baseUrl?: string;
@@ -60,11 +87,19 @@ export class AcpClient {
     return this.lastSeq.get(sessionId) ?? 0;
   }
 
-  async createSession(title?: string, policy?: string): Promise<string> {
+  async createSession(
+    title?: string,
+    policy?: string,
+    workspace?: WorkspaceSelection,
+  ): Promise<string> {
     const res = await fetch(`${this.baseUrl}/api/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...this.authHeaders() },
-      body: JSON.stringify({ ...(title ? { title } : {}), ...(policy ? { policy } : {}) }),
+      body: JSON.stringify({
+        ...(title ? { title } : {}),
+        ...(policy ? { policy } : {}),
+        ...(workspace ? { workspace } : {}),
+      }),
     });
     if (!res.ok) {
       throw new Error(`createSession failed: ${res.status}`);
@@ -73,15 +108,66 @@ export class AcpClient {
     return body.sessionId;
   }
 
-  async listSessions(): Promise<{ sessionId: string; title: string; createdAt: string }[]> {
+  async listSessions(): Promise<SessionSummary[]> {
     const res = await fetch(`${this.baseUrl}/api/sessions`, { headers: this.authHeaders() });
     if (!res.ok) {
       throw new Error(`listSessions failed: ${res.status}`);
     }
-    const body = (await res.json()) as {
-      sessions: { sessionId: string; title: string; createdAt: string }[];
-    };
+    const body = (await res.json()) as { sessions: SessionSummary[] };
     return body.sessions;
+  }
+
+  async exportSession(sessionId: string): Promise<Blob> {
+    const res = await fetch(`${this.baseUrl}/api/sessions/${sessionId}/export`, {
+      headers: this.authHeaders(),
+    });
+    if (!res.ok) throw new Error(`exportSession failed: ${res.status}`);
+    return res.blob();
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/api/sessions/${sessionId}`, {
+      method: 'DELETE',
+      headers: this.authHeaders(),
+    });
+    if (res.status !== 204) throw new Error(`deleteSession failed: ${res.status}`);
+    this.lastSeq.delete(sessionId);
+  }
+
+  /** Teams the current user belongs to (shared workspaces). */
+  async listTeams(): Promise<TeamView[]> {
+    const res = await fetch(`${this.baseUrl}/api/teams`, { headers: this.authHeaders() });
+    if (!res.ok) {
+      throw new Error(`listTeams failed: ${res.status}`);
+    }
+    const body = (await res.json()) as { teams: TeamView[] };
+    return body.teams;
+  }
+
+  /** Creates a team; the caller becomes its owner. */
+  async createTeam(name: string): Promise<{ teamId: string; name: string }> {
+    const res = await fetch(`${this.baseUrl}/api/teams`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...this.authHeaders() },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) {
+      throw new Error(`createTeam failed: ${res.status}`);
+    }
+    const body = (await res.json()) as { team: { id: string; name: string } };
+    return { teamId: body.team.id, name: body.team.name };
+  }
+
+  /** Adds a tenant user (by email) to a team; owner/admin only. */
+  async addTeamMember(teamId: string, email: string): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/api/teams/${teamId}/members`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...this.authHeaders() },
+      body: JSON.stringify({ email }),
+    });
+    if (!res.ok) {
+      throw new Error(`addTeamMember failed: ${res.status}`);
+    }
   }
 
   async getMessages(sessionId: string): Promise<SurfaceMessage[]> {
@@ -156,8 +242,12 @@ export class AcpClient {
       onSeq?: (seq: number) => void;
       onError?: (err: unknown) => void;
     },
+    opts?: {
+      /** Explicit start offset; overrides the remembered resume point. */ afterSeq?: number;
+    },
   ): EventStreamHandle {
-    const afterSeq = this.lastSeq.get(sessionId) ?? 0;
+    if (opts?.afterSeq !== undefined) this.lastSeq.set(sessionId, opts.afterSeq);
+    const afterSeq = opts?.afterSeq ?? this.lastSeq.get(sessionId) ?? 0;
     const url = `${this.baseUrl}/api/sessions/${sessionId}/events?afterSeq=${afterSeq}${this.tokenQuery()}`;
     const source = this.eventSourceFactory(url);
 
@@ -167,6 +257,7 @@ export class AcpClient {
         // Native Last-Event-ID handling: seq ids arrive out-of-band.
         const seq = Number(msg.lastEventId);
         if (Number.isInteger(seq) && seq > 0) {
+          if (seq <= this.getSeq(sessionId)) return;
           this.noteSeq(sessionId, seq);
           handlers.onSeq?.(seq);
         }

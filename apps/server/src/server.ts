@@ -20,6 +20,7 @@ import type {
   SessionMeta,
   SessionMetaStore,
   SessionStore,
+  TeamStore,
   TokenService,
   UsagePort,
   UserStore,
@@ -28,9 +29,12 @@ import { serverEventSchema } from '@trinity-harness/shared';
 import type { ServerEvent } from '@trinity-harness/shared';
 import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { mkdir } from 'node:fs/promises';
 import { z } from 'zod';
 
 import { parsePermissionPolicy, tenantQuotaSchema, windowStart } from '@trinity-harness/contracts';
+
+import { workspaceDirFor } from './workspace.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -47,6 +51,17 @@ const createSessionSchema = z.object({
   title: z.string().min(1).max(200).optional(),
   /** M3: permission preset name ('workspace-write' | 'read-only' | 'danger-full-access') or a JSON policy. */
   policy: z.string().min(1).max(4000).optional(),
+  /**
+   * Workspace scope: personal (default, `$WORKSPACE_ROOT/<user_id>`) or a
+   * team the creator belongs to (`$WORKSPACE_ROOT/<team_id>`). The directory
+   * becomes the session sandbox root.
+   */
+  workspace: z
+    .object({
+      scope: z.enum(['personal', 'team']),
+      teamId: z.uuid().optional(),
+    })
+    .optional(),
 });
 
 const postMessageSchema = z.object({
@@ -428,8 +443,8 @@ export interface ServerAuthDeps {
 export interface ServerDeps {
   store: SessionStore;
   workspaceRoot: string;
-  /** Inline mode (M1/tests): runs the Loop in this process. */
-  createLoop?: (sessionId: string) => AgentLoop;
+  /** Inline mode (M1/tests): runs the Loop in this process, sandboxed to the session workspace. */
+  createLoop?: (sessionId: string, workspaceRoot: string) => AgentLoop;
   /** Distributed mode (M2): enqueue turns for agent-worker. */
   queue?: AgentTaskQueue;
   /** Distributed SSE: durable session-event replay + live deltas. */
@@ -437,6 +452,8 @@ export interface ServerDeps {
   liveEvents?: LiveEventSubscriber;
   /** Present ⇒ all /api routes except health/auth require a bearer token. */
   auth?: ServerAuthDeps;
+  /** Team directory (docs/design.md §15); present ⇒ team workspaces enabled. */
+  teams?: TeamStore;
   audit?: AuditEmitter;
   /** Admin audit query endpoint (requires auth). */
   auditQuery?: AuditStore;
@@ -562,7 +579,17 @@ export async function buildServer(
       return { sessionId, meta: null };
     }
     const meta = await auth.metas.get(sessionId);
-    if (!meta || !identity || !canAccess(identity, meta)) {
+    const ownOrAdmin = meta && identity && canAccess(identity, meta);
+    const teamMember =
+      !ownOrAdmin &&
+      meta &&
+      identity &&
+      meta.tenantId === identity.tenantId &&
+      meta.scope === 'team' &&
+      meta.scopeId &&
+      deps.teams &&
+      (await deps.teams.isMember(meta.scopeId, identity.userId));
+    if (!meta || meta.closedAt || !identity || (!ownOrAdmin && !teamMember)) {
       emitAudit({
         id: crypto.randomUUID(),
         at: new Date().toISOString(),
@@ -595,6 +622,14 @@ export async function buildServer(
     }
     return deps.defaultPolicy ?? parsePermissionPolicy('workspace-write');
   };
+
+  /**
+   * Sandbox root for a session: the directory bound at creation
+   * (`$WORKSPACE_ROOT/<user_id>` or `<team_id>`). Meta-less sessions
+   * (M1 memory mode) fall back to the deployment root.
+   */
+  const workspaceRootFor = (meta: SessionMeta | null | undefined): string =>
+    meta?.workspaceUri ?? deps.workspaceRoot;
 
   app.get('/api/health', async () => ({ ok: true }));
 
@@ -696,11 +731,98 @@ export async function buildServer(
       return {
         sessions: metas.map((m) => ({
           sessionId: m.id,
+          userId: m.userId,
           title: m.title,
           createdAt: m.createdAt,
+          workspaceUri: m.workspaceUri,
+          scope: m.scope ?? 'personal',
+          ...(m.scopeId !== undefined ? { scopeId: m.scopeId } : {}),
         })),
       };
     });
+
+    // ---- Teams (shared workspaces, docs/design.md §15) -----------------------
+
+    if (deps.teams) {
+      app.get('/api/teams', async (req) => {
+        const identity = req.identity!;
+        const teams = await deps.teams!.listForUser(identity.userId);
+        const withMembers = await Promise.all(
+          teams.map(async (t) => ({
+            teamId: t.id,
+            name: t.name,
+            createdAt: t.createdAt,
+            members: await deps.teams!.listMembers(t.id),
+          })),
+        );
+        return { teams: withMembers };
+      });
+
+      app.post('/api/teams', async (req, reply) => {
+        const identity = req.identity!;
+        if (identity.role === 'viewer') {
+          return reply.code(403).send({ error: 'viewer role cannot create teams' });
+        }
+        const body = z.object({ name: z.string().min(1).max(200) }).safeParse(req.body);
+        if (!body.success) {
+          return reply.code(400).send({ error: 'invalid body', issues: body.error.issues });
+        }
+        const team = await deps.teams!.create({
+          tenantId: identity.tenantId,
+          name: body.data.name,
+          ownerId: identity.userId,
+        });
+        emitAudit({
+          id: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          tenantId: identity.tenantId,
+          userId: identity.userId,
+          action: 'team/created',
+          target: team.name,
+          result: 'ok',
+        });
+        return reply.code(201).send({ team });
+      });
+
+      const addMemberSchema = z.object({ email: z.string().email() });
+      app.post('/api/teams/:teamId/members', async (req, reply) => {
+        const identity = req.identity!;
+        const teamId = (req.params as Record<string, string>)['teamId'] ?? '';
+        const team = await deps.teams!.get(teamId);
+        if (!team || team.tenantId !== identity.tenantId) {
+          return reply.code(404).send({ error: 'team not found' });
+        }
+        // Only the team owner or a tenant admin may add members (fail-closed).
+        const canManage =
+          identity.role === 'admin' || (await deps.teams!.isOwner(teamId, identity.userId));
+        if (!canManage) {
+          return reply.code(403).send({ error: 'team owner or admin required' });
+        }
+        const body = addMemberSchema.safeParse(req.body);
+        if (!body.success) {
+          return reply.code(400).send({ error: 'invalid body', issues: body.error.issues });
+        }
+        const user = await auth.users.findByEmail(body.data.email);
+        if (!user || user.tenantId !== identity.tenantId) {
+          return reply.code(404).send({ error: 'user not found in this tenant' });
+        }
+        if (await deps.teams!.isMember(teamId, user.id)) {
+          return reply.code(409).send({ error: 'already a member' });
+        }
+        await deps.teams!.addMember(teamId, user.id, 'member');
+        emitAudit({
+          id: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          tenantId: identity.tenantId,
+          userId: identity.userId,
+          action: 'team/member-add',
+          target: team.name,
+          result: 'ok',
+          detail: { member: user.email },
+        });
+        return reply.code(201).send({ ok: true });
+      });
+    }
 
     if (deps.auditQuery) {
       app.get('/api/audit', async (req, reply) => {
@@ -812,6 +934,42 @@ export async function buildServer(
     }
     const sessionId = crypto.randomUUID();
     const identity = req.identity;
+
+    // Workspace scope: personal or team (fail-closed membership check, §12).
+    const ws = body.data.workspace;
+    const scope = ws?.scope ?? 'personal';
+    // Memory mode (no auth) has no user directory: everything lands in one
+    // shared fallback directory.
+    const scopeOwnerId = identity?.userId ?? 'anonymous';
+    let scopeId: string | undefined;
+    if (scope === 'team') {
+      if (!ws?.teamId || !deps.teams || !identity) {
+        return reply.code(400).send({ error: 'team workspace requires a teamId' });
+      }
+      const team = await deps.teams.get(ws.teamId);
+      // Fail-closed: unknown team, other tenant, or non-member ⇒ denied.
+      if (!team || team.tenantId !== identity.tenantId) {
+        return reply.code(403).send({ error: 'not a member of this team' });
+      }
+      const member = await deps.teams.isMember(ws.teamId, identity.userId);
+      if (!member) {
+        emitAudit({
+          id: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          tenantId: identity.tenantId,
+          userId: identity.userId,
+          action: 'session/created',
+          target: `team:${ws.teamId}`,
+          result: 'denied',
+        });
+        return reply.code(403).send({ error: 'not a member of this team' });
+      }
+      scopeId = team.id;
+    }
+    const workspaceDir = workspaceDirFor(deps.workspaceRoot, scope, scopeId ?? scopeOwnerId);
+    // The sandbox root must exist before tools run against it.
+    await mkdir(workspaceDir, { recursive: true });
+
     if (auth) {
       // Ownership row first; the event log references it by id.
       await auth.metas.create({
@@ -819,7 +977,9 @@ export async function buildServer(
         tenantId: identity!.tenantId,
         userId: identity!.userId,
         title: body.data.title ?? '',
-        workspaceUri: deps.workspaceRoot,
+        workspaceUri: workspaceDir,
+        scope,
+        ...(scopeId !== undefined ? { scopeId } : {}),
         ...(policyName !== undefined ? { policy: policyName } : {}),
       });
     }
@@ -830,7 +990,7 @@ export async function buildServer(
           type: 'session/created',
           eventId: crypto.randomUUID(),
           at: new Date().toISOString(),
-          workspaceUri: deps.workspaceRoot,
+          workspaceUri: workspaceDir,
         },
       ],
       { actor: identity?.userId ?? 'anonymous' },
@@ -859,6 +1019,56 @@ export async function buildServer(
     };
   });
 
+  app.get('/api/sessions/:sessionId/export', async (req, reply) => {
+    const sessionId = await sessionIdOf(req, reply);
+    if (!sessionId) return;
+    const granted = await authorizeSession(sessionId, req.identity, reply);
+    if (!granted) return;
+    const messages = await deps.store.projectMessages(granted.sessionId);
+    reply.header('content-disposition', `attachment; filename="session-${sessionId}.json"`);
+    reply.header('cache-control', 'no-store');
+    return {
+      sessionId,
+      title: granted.meta?.title ?? '',
+      createdAt: granted.meta?.createdAt ?? null,
+      messages,
+    };
+  });
+
+  app.delete('/api/sessions/:sessionId', async (req, reply) => {
+    const sessionId = await sessionIdOf(req, reply);
+    if (!sessionId) return;
+    const granted = await authorizeSession(sessionId, req.identity, reply);
+    if (!granted) return;
+    const identity = req.identity;
+    if (
+      !auth ||
+      !identity ||
+      identity.role === 'viewer' ||
+      !granted.meta ||
+      !canAccess(identity, granted.meta)
+    ) {
+      return reply.code(403).send({ error: 'session deletion requires a developer or admin' });
+    }
+    deps.turns?.cancel(sessionId);
+    await deps.store.append(
+      sessionId,
+      [{ type: 'session/closed', eventId: crypto.randomUUID(), at: new Date().toISOString() }],
+      { actor: identity.userId },
+    );
+    await auth.metas.close(sessionId);
+    emitAudit({
+      id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      tenantId: identity.tenantId,
+      userId: identity.userId,
+      sessionId,
+      action: 'session/closed',
+      result: 'ok',
+    });
+    return reply.code(204).send();
+  });
+
   app.post('/api/sessions/:sessionId/messages', async (req, reply) => {
     const sessionId = await sessionIdOf(req, reply);
     if (!sessionId) return;
@@ -881,6 +1091,7 @@ export async function buildServer(
       });
       return reply.code(403).send({ error: 'viewer role is read-only' });
     }
+    await auth?.metas.setTitleIfEmpty(sessionId, body.data.text.trim().slice(0, 200));
     emitAudit({
       id: crypto.randomUUID(),
       at: new Date().toISOString(),
@@ -939,7 +1150,7 @@ export async function buildServer(
       { actor: identity?.userId ?? 'anonymous' },
     );
     const sink = sinkFor(sessionId);
-    const loop = deps.createLoop(sessionId);
+    const loop = deps.createLoop(sessionId, workspaceRootFor(granted.meta));
     // Run detached: SSE subscribers observe progress; failures surface as events.
     void loop
       .run(sessionId, body.data.text, sink, {
@@ -1580,6 +1791,7 @@ export async function buildServer(
           }
 
           // Same pipeline as POST /api/sessions/:id/messages.
+          await auth?.metas.setTitleIfEmpty(granted.sessionId, text.trim().slice(0, 200));
           const appended = await deps.store.append(
             granted.sessionId,
             [
@@ -1606,7 +1818,7 @@ export async function buildServer(
           } else if (deps.createLoop) {
             const sink = sinkFor(granted.sessionId);
             void deps
-              .createLoop(granted.sessionId)
+              .createLoop(granted.sessionId, workspaceRootFor(granted.meta))
               .run(granted.sessionId, text, sink, {
                 actor: identity?.userId ?? 'anonymous',
                 tenantId: identity?.tenantId,

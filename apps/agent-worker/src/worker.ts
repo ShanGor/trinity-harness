@@ -17,7 +17,14 @@ import type {
 export interface TurnHandlerDeps {
   store: SessionStore;
   metas: SessionMetaStore;
-  createLoop: (sessionId: string) => AgentLoop;
+  /**
+   * Builds the Loop for a turn, sandboxed to the session's workspace root
+   * (`meta.workspaceUri`; sessions predate per-session workspaces ⇒ the
+   * deployment root).
+   */
+  createLoop: (sessionId: string, workspaceRoot: string) => AgentLoop;
+  /** Fallback workspace root when the session has no meta row. */
+  defaultWorkspaceRoot: string;
   live: LiveEventPublisher;
   audit: AuditEmitter;
 }
@@ -27,6 +34,7 @@ export function createTurnHandler(
 ): (task: TurnTask, signal?: AbortSignal) => Promise<void> {
   return async (task, signal) => {
     const meta = await deps.metas.get(task.sessionId);
+    if (meta?.closedAt) throw new Error('session closed');
     const auditContext = {
       tenantId: meta?.tenantId ?? '00000000-0000-0000-0000-000000000000',
       userId: meta?.userId ?? task.actor,
@@ -37,7 +45,9 @@ export function createTurnHandler(
       emit: (loopEvent) => {
         // Ephemeral deltas: connected UIs render them in real time; committed
         // state reaches clients through the event log / session stream.
-        deps.live.publish(task.sessionId, loopEvent);
+        if (loopEvent.type === 'text-delta' || loopEvent.type === 'reasoning-delta') {
+          deps.live.publish(task.sessionId, loopEvent);
+        }
         if (loopEvent.type === 'tool/call') {
           deps.audit.emit({
             id: crypto.randomUUID(),
@@ -60,16 +70,18 @@ export function createTurnHandler(
       },
     };
 
-    await deps.createLoop(task.sessionId).run(task.sessionId, task.prompt, sink, {
-      actor: task.actor,
-      tenantId: task.tenantId,
-      signal,
-      // M3: permission policy + prompt seq travel with the task (fail-closed
-      // snapshot taken by the server when the prompt was accepted).
-      policy: task.policy,
-      promptSeq: task.promptSeq,
-      // M4 multimodal: attachment content blocks ride with the task.
-      ...(task.content !== undefined ? { content: task.content } : {}),
-    });
+    await deps
+      .createLoop(task.sessionId, meta?.workspaceUri ?? deps.defaultWorkspaceRoot)
+      .run(task.sessionId, task.prompt, sink, {
+        actor: task.actor,
+        tenantId: task.tenantId,
+        signal,
+        // M3: permission policy + prompt seq travel with the task (fail-closed
+        // snapshot taken by the server when the prompt was accepted).
+        policy: task.policy,
+        promptSeq: task.promptSeq,
+        // M4 multimodal: attachment content blocks ride with the task.
+        ...(task.content !== undefined ? { content: task.content } : {}),
+      });
   };
 }

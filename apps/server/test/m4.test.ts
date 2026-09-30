@@ -38,7 +38,7 @@ describe('buildServer M4', () => {
     const blobDir = path.join(dir, 'blobs');
     app = await buildServer({
       store,
-      workspaceRoot: '/ws',
+      workspaceRoot: dir,
       blobs: new LocalBlobStore(blobDir),
       createLoop: () =>
         new CoreAgentLoop({
@@ -56,7 +56,7 @@ describe('buildServer M4', () => {
           model: 'fake/model',
           tools,
           store,
-          workspaceRoot: '/ws',
+          workspaceRoot: dir,
         }),
     });
     const address = await app.listen({ port: 0, host: '127.0.0.1' });

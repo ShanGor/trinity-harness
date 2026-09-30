@@ -5,9 +5,12 @@ import {
   App as AntdApp,
   Button,
   Collapse,
+  Dropdown,
   Flex,
   Form,
   Input,
+  Layout,
+  List,
   Modal,
   Select,
   Table,
@@ -17,39 +20,36 @@ import {
   Upload,
 } from 'antd';
 import { Bubble, Sender } from '@ant-design/x';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
-import { AcpClient } from '@trinity-harness/client-acp';
+import {
+  AcpClient,
+  type SessionSummary,
+  type TeamView,
+  type WorkspaceSelection,
+} from '@trinity-harness/client-acp';
+
+import {
+  mergeCommittedAssistantMessage,
+  mergeCommittedUserMessage,
+  type AttachmentView,
+  type ChatItem,
+  type ToolCallView,
+} from './chat-items';
 
 /**
  * M2 chat UI (docs/design.md §11.5): antd-x components consume the ACP-flavored
  * session/update events produced by the server — no private UI protocol. Auth:
  * bearer token from /api/auth/login, kept in sessionStorage; admin users get
- * an audit tab (docs/design.md §13).
+ * an audit tab (docs/design.md §13). M6: session history sidebar, per-user /
+ * per-team workspaces (docs/design.md §15), markdown rendering.
  */
 
 const TOKEN_KEY = 'trinity.token';
 
 type Role = 'admin' | 'developer' | 'viewer';
 type MeUser = { id: string; email: string; role: Role };
-
-type ToolCallView = {
-  toolCallId: string;
-  title: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
-  content?: string;
-};
-
-/** M4 multimodal: an attachment reference rendered from the blob store. */
-type AttachmentView = { kind: 'image' | 'file'; uri: string; mimeType?: string };
-
-type ChatItem = {
-  key: string;
-  role: 'user' | 'assistant';
-  content: string;
-  streaming: boolean;
-  tools: ToolCallView[];
-  attachments: AttachmentView[];
-};
 
 type AuditRow = {
   id: string;
@@ -73,6 +73,16 @@ const client = new AcpClient({
   token: () => sessionStorage.getItem(TOKEN_KEY),
 });
 
+/** Workspace selector value encoding: 'personal' or `team:<id>`. */
+function workspaceValue(ws: WorkspaceSelection): string {
+  return ws.scope === 'team' ? `team:${ws.teamId}` : 'personal';
+}
+
+function workspaceLabel(s: SessionSummary, teams: TeamView[]): string {
+  if (s.scope !== 'team') return 'personal';
+  return teams.find((t) => t.teamId === s.scopeId)?.name ?? 'team';
+}
+
 function upsertTool(item: ChatItem, update: SessionUpdate & { kind: 'tool_call' }): ChatItem {
   const existing = item.tools.find((t) => t.toolCallId === update.toolCallId);
   const next: ToolCallView = {
@@ -90,19 +100,40 @@ function upsertTool(item: ChatItem, update: SessionUpdate & { kind: 'tool_call' 
 }
 
 export default function App() {
-  const { message } = AntdApp.useApp();
+  const { message, modal } = AntdApp.useApp();
   const [user, setUser] = useState<MeUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [teams, setTeams] = useState<TeamView[]>([]);
+  /** Workspace for the NEXT session (existing sessions keep their own). */
+  const [workspace, setWorkspace] = useState<WorkspaceSelection>({ scope: 'personal' });
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState('');
   const [approval, setApproval] = useState<PendingApproval | null>(null);
   const [policy, setPolicy] = useState<string>('workspace-write');
+  const [teamsOpen, setTeamsOpen] = useState(false);
   /** M4: attachments staged for the next prompt (uploaded on selection). */
   const [staged, setStaged] = useState<(AttachmentView & { name: string })[]>([]);
   const sessionRef = useRef<string | null>(null);
   const streamRef = useRef<{ close(): void } | null>(null);
+
+  const refreshSessions = useCallback(async () => {
+    try {
+      setSessions(await client.listSessions());
+    } catch {
+      // Sidebar refresh is best-effort; the chat itself does not depend on it.
+    }
+  }, []);
+
+  const refreshTeams = useCallback(async () => {
+    try {
+      setTeams(await client.listTeams());
+    } catch {
+      // Team workspaces are optional (endpoint exists when the store does).
+    }
+  }, []);
 
   const applyToLastAssistant = useCallback((fn: (item: ChatItem) => ChatItem) => {
     setItems((prev) => {
@@ -122,42 +153,33 @@ export default function App() {
       }
       if (event.type === 'message/committed') {
         if (event.message.role === 'assistant') {
-          applyToLastAssistant((item) => ({
-            ...item,
-            content: event.message.content,
-            streaming: false,
-          }));
+          // Live: fill the optimistic placeholder. Replay: append a new item
+          // (see chat-items.ts — the placeholder only exists in the live flow).
+          setItems((prev) =>
+            mergeCommittedAssistantMessage(prev, event.message.content, () => crypto.randomUUID()),
+          );
         } else {
           // Replayed/relayed user message — skip if we already rendered it
-          // locally when the prompt was sent.
-          setItems((prev) => {
-            const last = prev[prev.length - 1];
-            if (
-              last?.role === 'user' &&
-              last.content === event.message.content &&
-              (event.message.attachments ?? []).length === 0
-            ) {
-              return prev;
-            }
-            return [
-              ...prev,
+          // locally when the prompt was sent (see chat-items.ts for why the
+          // match targets the most recent USER item, not the last item).
+          setItems((prev) =>
+            mergeCommittedUserMessage(
+              prev,
               {
-                key: crypto.randomUUID(),
-                role: 'user',
                 content: event.message.content,
-                streaming: false,
-                tools: [],
-                attachments: event.message.attachments ?? [],
+                attachments: event.message.attachments,
               },
-            ];
-          });
+              () => crypto.randomUUID(),
+            ),
+          );
         }
-        setBusy(false);
         return;
       }
       if (event.type === 'session/update' && event.update.kind === 'agent_message_chunk') {
         const { text } = event.update;
-        applyToLastAssistant((item) => ({ ...item, content: item.content + text }));
+        applyToLastAssistant((item) =>
+          item.streaming ? { ...item, content: item.content + text } : item,
+        );
         return;
       }
       if (event.type === 'session/update' && event.update.kind === 'tool_call') {
@@ -189,6 +211,21 @@ export default function App() {
       }
     },
     [applyToLastAssistant, message],
+  );
+
+  const openStream = useCallback(
+    (id: string, fromSeq?: number) => {
+      streamRef.current?.close();
+      streamRef.current = client.openEventStream(
+        id,
+        {
+          onEvent: handleEvent,
+          onError: (err) => message.warning(`event stream error (reconnecting): ${String(err)}`),
+        },
+        fromSeq !== undefined ? { afterSeq: fromSeq } : undefined,
+      );
+    },
+    [handleEvent, message],
   );
 
   const onApprove = useCallback(
@@ -229,13 +266,14 @@ export default function App() {
         if (res.ok) {
           const body = (await res.json()) as { user: MeUser };
           setUser(body.user);
+          await Promise.all([refreshSessions(), refreshTeams()]);
         } else {
           sessionStorage.removeItem(TOKEN_KEY);
         }
       })
       .catch(() => sessionStorage.removeItem(TOKEN_KEY))
       .finally(() => setAuthChecked(true));
-  }, []);
+  }, [refreshSessions, refreshTeams]);
 
   const onLogin = useCallback(
     async (values: { email: string; password: string }) => {
@@ -246,11 +284,12 @@ export default function App() {
         };
         sessionStorage.setItem(TOKEN_KEY, token);
         setUser(loggedIn);
+        await Promise.all([refreshSessions(), refreshTeams()]);
       } catch (err) {
         message.error(err instanceof Error ? err.message : String(err));
       }
     },
-    [message],
+    [message, refreshSessions, refreshTeams],
   );
 
   const logout = useCallback(() => {
@@ -258,21 +297,100 @@ export default function App() {
     streamRef.current?.close();
     setUser(null);
     setItems([]);
+    setSessions([]);
+    setTeams([]);
     setSessionId(null);
     sessionRef.current = null;
   }, []);
 
-  const ensureSession = useCallback(async (): Promise<string> => {
-    if (sessionRef.current) return sessionRef.current;
-    const id = await client.createSession(undefined, policy);
-    sessionRef.current = id;
-    setSessionId(id);
-    streamRef.current = client.openEventStream(id, {
-      onEvent: handleEvent,
-      onError: (err) => message.warning(`event stream error (reconnecting): ${String(err)}`),
-    });
-    return id;
-  }, [handleEvent, message, policy]);
+  /** Opens the event stream and marks the session active. */
+  const activateSession = useCallback(
+    (id: string, fromSeq?: number) => {
+      sessionRef.current = id;
+      setSessionId(id);
+      openStream(id, fromSeq);
+    },
+    [openStream],
+  );
+
+  const ensureSession = useCallback(
+    async (title?: string): Promise<string> => {
+      if (sessionRef.current) return sessionRef.current;
+      const id = await client.createSession(title, policy, workspace);
+      activateSession(id);
+      await refreshSessions();
+      return id;
+    },
+    [activateSession, policy, refreshSessions, workspace],
+  );
+
+  /** Sidebar click: switch to a past session and replay its log. */
+  const switchSession = useCallback(
+    (id: string) => {
+      if (id === sessionRef.current) return;
+      streamRef.current?.close();
+      setItems([]);
+      setApproval(null);
+      setStaged([]);
+      setBusy(false);
+      setInput('');
+      activateSession(id, 0);
+    },
+    [activateSession],
+  );
+
+  /** New chat: drop the session binding; the next prompt creates a fresh one. */
+  const newChat = useCallback(() => {
+    streamRef.current?.close();
+    setItems([]);
+    setApproval(null);
+    setStaged([]);
+    setBusy(false);
+    setInput('');
+    sessionRef.current = null;
+    setSessionId(null);
+  }, []);
+
+  const exportSession = useCallback(
+    async (id: string) => {
+      try {
+        const blob = await client.exportSession(id);
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `session-${id}.json`;
+        document.body.append(link);
+        link.click();
+        link.remove();
+        requestAnimationFrame(() => URL.revokeObjectURL(url));
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [message],
+  );
+
+  const confirmDeleteSession = useCallback(
+    (id: string) => {
+      modal.confirm({
+        title: 'Delete this session from history?',
+        content: 'The session will close and can no longer be opened.',
+        okText: 'Delete',
+        okButtonProps: { danger: true },
+        async onOk() {
+          try {
+            await client.deleteSession(id);
+            if (sessionRef.current === id) newChat();
+            await refreshSessions();
+          } catch (err) {
+            message.error(err instanceof Error ? err.message : String(err));
+            throw err;
+          }
+        },
+      });
+    },
+    [message, modal, newChat, refreshSessions],
+  );
 
   /** M4: upload a file right away and stage the blob reference. */
   const onStageFile = useCallback(
@@ -321,16 +439,20 @@ export default function App() {
         },
       ]);
       try {
-        const id = await ensureSession();
+        // First prompt of a session doubles as its sidebar title.
+        const id = await ensureSession(trimmed.slice(0, 60) || undefined);
         await client.sendPrompt(id, trimmed || '[see attachments]', mimeList);
+        await refreshSessions();
       } catch (err) {
         message.error(err instanceof Error ? err.message : String(err));
         setBusy(false);
         applyToLastAssistant((item) => ({ ...item, streaming: false }));
       }
     },
-    [applyToLastAssistant, busy, ensureSession, message, staged],
+    [applyToLastAssistant, busy, ensureSession, message, refreshSessions, staged],
   );
+
+  const activeTitle = sessions.find((s) => s.sessionId === sessionId)?.title;
 
   const bubbleItems = useMemo(
     () =>
@@ -338,49 +460,45 @@ export default function App() {
         key: item.key,
         role: item.role,
         content: item.content,
-        ...(item.role === 'assistant' || item.attachments.length > 0
-          ? {
-              messageRender: (content: string) => (
-                <div>
-                  {content.length > 0 && (
-                    <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>
-                      {content}
-                      {item.streaming ? '▋' : ''}
-                    </Typography.Paragraph>
-                  )}
-                  <AttachmentList attachments={item.attachments} />
-                  {item.tools.length > 0 && (
-                    <Collapse
-                      size="small"
-                      items={item.tools.map((tool) => ({
-                        key: tool.toolCallId,
-                        label: `${tool.status === 'in_progress' ? '⏳' : tool.status === 'failed' ? '❌' : '✅'} ${tool.title}`,
-                        children: (
-                          <Typography.Text code style={{ whiteSpace: 'pre-wrap' }}>
-                            {tool.content ?? ''}
-                          </Typography.Text>
-                        ),
-                      }))}
-                    />
-                  )}
-                </div>
-              ),
-            }
-          : {}),
+        messageRender: (content: string) =>
+          item.role === 'assistant' ? (
+            <AssistantContent item={item} content={content} />
+          ) : (
+            <div>
+              {content.length > 0 && (
+                <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>
+                  {content}
+                </Typography.Paragraph>
+              )}
+              <AttachmentList attachments={item.attachments} />
+            </div>
+          ),
       })),
     [items],
   );
 
   const chatPanel = (
-    <>
-      <Bubble.List
-        items={bubbleItems}
-        roles={{
-          user: { placement: 'end' as const },
-          assistant: { placement: 'start' as const },
-        }}
-        style={{ flex: 1, overflowY: 'auto', paddingBlock: 16 }}
-      />
+    <div className="chat-panel">
+      {items.length === 0 && (
+        <div className="empty-chat-state">
+          <img src="/branding/trinity-logo.png" alt="Trinity logo" />
+          <span className="eyebrow">TRINITY HARNESS</span>
+          <Typography.Title level={2}>What do you want to make progress on?</Typography.Title>
+          <Typography.Text>
+            Describe a coding task or attach an image or PDF to get started.
+          </Typography.Text>
+        </div>
+      )}
+      {items.length > 0 && (
+        <Bubble.List
+          className="chat-messages"
+          items={bubbleItems}
+          roles={{
+            user: { placement: 'end' as const },
+            assistant: { placement: 'start' as const },
+          }}
+        />
+      )}
       {staged.length > 0 && (
         <Flex gap={8} wrap style={{ marginBottom: 8 }}>
           {staged.map((att) => (
@@ -394,7 +512,7 @@ export default function App() {
           ))}
         </Flex>
       )}
-      <Flex gap={8} align="end" style={{ marginBottom: 16 }}>
+      <Flex gap={8} align="end" className="chat-composer">
         <Upload
           beforeUpload={(file) => {
             void onStageFile(file as unknown as File);
@@ -404,7 +522,7 @@ export default function App() {
           accept="image/png,image/jpeg,image/webp,image/gif,application/pdf"
           disabled={busy}
         >
-          <Button icon={<span>📎</span>} disabled={busy} aria-label="Attach image or PDF" />
+          <Button icon={<span>＋</span>} disabled={busy} aria-label="Attach image or PDF" />
         </Upload>
         <div style={{ flex: 1 }}>
           <Sender
@@ -415,11 +533,11 @@ export default function App() {
               void onSubmit(text);
             }}
             loading={busy}
-            placeholder="Describe a coding task… (attach images/PDFs with 📎)"
+            placeholder="Describe a coding task…"
           />
         </div>
       </Flex>
-    </>
+    </div>
   );
 
   const auditPanel = user?.role === 'admin' ? <AuditTable /> : null;
@@ -430,9 +548,12 @@ export default function App() {
 
   if (!user) {
     return (
-      <Flex justify="center" align="center" style={{ height: '100vh' }}>
-        <Form layout="vertical" style={{ width: 320 }} onFinish={onLogin}>
-          <Typography.Title level={4}>Trinity Harness — Sign in</Typography.Title>
+      <div className="login-screen">
+        <Form className="login-card" layout="vertical" onFinish={onLogin}>
+          <img className="login-logo" src="/branding/trinity-logo.png" alt="Trinity logo" />
+          <span className="eyebrow">AI WORKSPACE</span>
+          <Typography.Title level={2}>Welcome to Trinity</Typography.Title>
+          <Typography.Paragraph type="secondary">Sign in to your workspace</Typography.Paragraph>
           <Form.Item name="email" label="Email" rules={[{ required: true, type: 'email' }]}>
             <Input autoComplete="username" />
           </Form.Item>
@@ -443,73 +564,215 @@ export default function App() {
             Sign in
           </Button>
         </Form>
-      </Flex>
+      </div>
     );
   }
 
+  const workspaceOptions = [
+    { value: 'personal', label: `👤 Personal (${user.email})` },
+    ...teams.map((t) => ({ value: `team:${t.teamId}`, label: `👥 ${t.name}` })),
+  ];
+
   return (
-    <Flex
-      vertical
-      style={{
-        height: '100vh',
-        maxWidth: 860,
-        margin: '0 auto',
-        padding: '16px 16px 0',
-        boxSizing: 'border-box',
-      }}
-    >
-      <Flex justify="space-between" align="center">
-        <Typography.Title level={4} style={{ marginTop: 8 }}>
-          Trinity Harness{' '}
-          {sessionId ? (
-            <Typography.Text type="secondary">· {sessionId.slice(0, 8)}</Typography.Text>
-          ) : null}
-        </Typography.Title>
-        <Flex align="center" gap={12}>
-          <Select
+    <Layout className="trinity-shell">
+      <Layout.Sider width={300} theme="light" className="trinity-sider">
+        <div className="sider-brand">
+          <img src="/branding/trinity-logo.png" alt="Trinity logo" />
+          <div>
+            <strong>Trinity</strong>
+            <span>AI Workspace</span>
+          </div>
+        </div>
+        <Button className="new-chat-button" type="primary" onClick={newChat}>
+          ＋ New conversation
+        </Button>
+        <span className="sider-section-label">Recent conversations</span>
+        <div className="history-scroll">
+          <List
             size="small"
-            value={policy}
-            onChange={setPolicy}
-            disabled={busy || !!sessionRef.current}
-            options={[
-              { value: 'workspace-write', label: 'workspace-write + ask' },
-              { value: 'read-only', label: 'read-only' },
-              { value: 'danger-full-access', label: 'danger-full-access + never' },
-            ]}
-            style={{ width: 200 }}
+            dataSource={sessions}
+            locale={{ emptyText: 'No sessions yet' }}
+            renderItem={(s) => (
+              <List.Item
+                onClick={() => switchSession(s.sessionId)}
+                className={`history-item${s.sessionId === sessionId ? ' active' : ''}`}
+                actions={[
+                  <Dropdown
+                    key="actions"
+                    menu={{
+                      items: [
+                        { key: 'export', label: 'Export JSON' },
+                        {
+                          key: 'delete',
+                          label: 'Delete',
+                          danger: true,
+                          disabled:
+                            user.role === 'viewer' ||
+                            (user.role !== 'admin' && s.userId !== user.id),
+                        },
+                      ],
+                      onClick: ({ key, domEvent }) => {
+                        domEvent.stopPropagation();
+                        if (key === 'export') void exportSession(s.sessionId);
+                        if (key === 'delete') confirmDeleteSession(s.sessionId);
+                      },
+                    }}
+                  >
+                    <Button size="small" type="text" onClick={(event) => event.stopPropagation()}>
+                      ⋯
+                    </Button>
+                  </Dropdown>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={
+                    <Typography.Text
+                      ellipsis
+                      style={{ maxWidth: 200, fontWeight: s.sessionId === sessionId ? 600 : 400 }}
+                    >
+                      {s.title || '(untitled)'}
+                    </Typography.Text>
+                  }
+                  description={
+                    <Flex gap={8} align="center">
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {new Date(s.createdAt).toLocaleString()}
+                      </Typography.Text>
+                      <Tag style={{ fontSize: 11, lineHeight: '14px' }}>
+                        {workspaceLabel(s, teams)}
+                      </Tag>
+                    </Flex>
+                  }
+                />
+              </List.Item>
+            )}
           />
-          <Typography.Text type="secondary">
-            {user.email} ({user.role})
-          </Typography.Text>
-          <Button size="small" onClick={logout}>
-            Sign out
-          </Button>
+        </div>
+      </Layout.Sider>
+      <Layout.Content className="trinity-content">
+        <Flex vertical className="workspace-frame">
+          <Flex justify="space-between" align="center" wrap gap={8} className="workspace-header">
+            <div className="workspace-heading">
+              <span className="eyebrow">AI WORKSPACE</span>
+              <Typography.Title level={4}>
+                {sessionId ? 'Conversation' : 'New conversation'}{' '}
+                {sessionId ? (
+                  <Typography.Text type="secondary">
+                    · {activeTitle || sessionId.slice(0, 8)}
+                  </Typography.Text>
+                ) : null}
+              </Typography.Title>
+            </div>
+            <Flex align="center" gap={8} wrap className="workspace-controls">
+              <Select
+                size="small"
+                value={workspaceValue(workspace)}
+                onChange={(v) =>
+                  setWorkspace(
+                    v === 'personal'
+                      ? { scope: 'personal' }
+                      : { scope: 'team', teamId: v.slice(5) },
+                  )
+                }
+                disabled={busy || !!sessionRef.current}
+                options={workspaceOptions}
+                style={{ minWidth: 200 }}
+                title="Workspace for the next session"
+              />
+              <Button size="small" onClick={() => setTeamsOpen(true)}>
+                Teams…
+              </Button>
+              <Select
+                size="small"
+                value={policy}
+                onChange={setPolicy}
+                disabled={busy || !!sessionRef.current}
+                options={[
+                  { value: 'workspace-write', label: 'workspace-write + ask' },
+                  { value: 'read-only', label: 'read-only' },
+                  { value: 'danger-full-access', label: 'danger-full-access + never' },
+                ]}
+                style={{ width: 200 }}
+              />
+              <Typography.Text type="secondary" className="user-label">
+                {user.email} ({user.role})
+              </Typography.Text>
+              <Button size="small" onClick={logout}>
+                Sign out
+              </Button>
+            </Flex>
+          </Flex>
+          <ApprovalModal
+            approval={approval}
+            onApprove={() => void onApprove('allowed')}
+            onReject={() => void onApprove('rejected')}
+          />
+          <TeamsModal
+            open={teamsOpen}
+            onClose={() => setTeamsOpen(false)}
+            teams={teams}
+            onChanged={() => {
+              void refreshTeams();
+              void refreshSessions();
+            }}
+          />
+          <Flex justify="flex-end" className="turn-controls">
+            {busy ? (
+              <Button size="small" danger onClick={() => void onCancelTurn()}>
+                Cancel turn
+              </Button>
+            ) : null}
+          </Flex>
+          {auditPanel ? (
+            <Tabs
+              className="workspace-tabs"
+              items={[
+                { key: 'chat', label: 'Chat', children: chatPanel },
+                { key: 'audit', label: 'Audit', children: auditPanel },
+              ]}
+            />
+          ) : (
+            chatPanel
+          )}
         </Flex>
-      </Flex>
-      <ApprovalModal
-        approval={approval}
-        onApprove={() => void onApprove('allowed')}
-        onReject={() => void onApprove('rejected')}
-      />
-      <Flex justify="flex-end" style={{ marginBottom: 8 }}>
-        {busy ? (
-          <Button size="small" danger onClick={() => void onCancelTurn()}>
-            Cancel turn
-          </Button>
-        ) : null}
-      </Flex>
-      {auditPanel ? (
-        <Tabs
-          style={{ flex: 1, minHeight: 0 }}
-          items={[
-            { key: 'chat', label: 'Chat', children: chatPanel },
-            { key: 'audit', label: 'Audit', children: auditPanel },
-          ]}
-        />
-      ) : (
-        chatPanel
+      </Layout.Content>
+    </Layout>
+  );
+}
+
+/** Markdown-rendered assistant bubble: streaming deltas + tool calls below. */
+function AssistantContent({ item, content }: { item: ChatItem; content: string }) {
+  return (
+    <div>
+      {content.length > 0 && (
+        <div className="md" style={{ marginBottom: 8 }}>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
+            }}
+          >
+            {content}
+          </ReactMarkdown>
+          {item.streaming ? '▋' : ''}
+        </div>
       )}
-    </Flex>
+      <AttachmentList attachments={item.attachments} />
+      {item.tools.length > 0 && (
+        <Collapse
+          size="small"
+          items={item.tools.map((tool) => ({
+            key: tool.toolCallId,
+            label: `${tool.status === 'in_progress' ? '⏳' : tool.status === 'failed' ? '❌' : '✅'} ${tool.title}`,
+            children: (
+              <Typography.Text code style={{ whiteSpace: 'pre-wrap' }}>
+                {tool.content ?? ''}
+              </Typography.Text>
+            ),
+          }))}
+        />
+      )}
+    </div>
   );
 }
 
@@ -567,6 +830,94 @@ function ApprovalModal({
       >
         {approval?.argsPreview ?? ''}
       </Typography.Paragraph>
+    </Modal>
+  );
+}
+
+/** Team management: create teams, see members, add members by email. */
+function TeamsModal({
+  open,
+  onClose,
+  teams,
+  onChanged,
+}: {
+  open: boolean;
+  onClose: () => void;
+  teams: TeamView[];
+  onChanged: () => void;
+}) {
+  const { message } = AntdApp.useApp();
+  const [newTeam, setNewTeam] = useState('');
+  const [memberEmails, setMemberEmails] = useState<Record<string, string>>({});
+
+  const createTeam = async () => {
+    const name = newTeam.trim();
+    if (!name) return;
+    try {
+      await client.createTeam(name);
+      setNewTeam('');
+      onChanged();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const addMember = async (teamId: string) => {
+    const email = (memberEmails[teamId] ?? '').trim();
+    if (!email) return;
+    try {
+      await client.addTeamMember(teamId, email);
+      setMemberEmails((prev) => ({ ...prev, [teamId]: '' }));
+      onChanged();
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <Modal open={open} title="Teams & shared workspaces" footer={null} onCancel={onClose}>
+      <Flex vertical gap={12}>
+        <Flex gap={8}>
+          <Input
+            placeholder="New team name"
+            value={newTeam}
+            onChange={(e) => setNewTeam(e.target.value)}
+            onPressEnter={() => void createTeam()}
+          />
+          <Button type="primary" onClick={() => void createTeam()}>
+            Create
+          </Button>
+        </Flex>
+        {teams.length === 0 && (
+          <Typography.Text type="secondary">
+            No teams yet. Create one, then add members by email — its workspace is
+            <Typography.Text code> $WORKSPACE_ROOT/&lt;team_id&gt;</Typography.Text>.
+          </Typography.Text>
+        )}
+        {teams.map((t) => (
+          <div key={t.teamId}>
+            <Typography.Text strong>{t.name}</Typography.Text>
+            <div style={{ marginBlock: 4 }}>
+              {t.members.map((m) => (
+                <Tag key={m.userId}>
+                  {m.email} · {m.role}
+                </Tag>
+              ))}
+            </div>
+            <Flex gap={8}>
+              <Input
+                placeholder="member@example.com"
+                value={memberEmails[t.teamId] ?? ''}
+                onChange={(e) =>
+                  setMemberEmails((prev) => ({ ...prev, [t.teamId]: e.target.value }))
+                }
+                onPressEnter={() => void addMember(t.teamId)}
+              />
+              <Button onClick={() => void addMember(t.teamId)}>Add member</Button>
+            </Flex>
+          </div>
+        ))}
+      </Flex>
     </Modal>
   );
 }

@@ -1,4 +1,7 @@
 import 'dotenv/config';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -30,6 +33,8 @@ import {
 } from '@trinity-harness/redis';
 
 import { buildServer } from '../src/index.js';
+
+const WS_DIR = mkdtempSync(path.join(tmpdir(), 'trinity-dist-'));
 
 /**
  * M2 distributed end-to-end (integration): Fastify server (enqueue-only) +
@@ -118,6 +123,7 @@ describe.skipIf(!hasInfra)('M2 distributed topology (integration)', () => {
   const auditProbe: { actions: string[]; dispose(): void } = { actions: [], dispose: () => {} };
   // M5: the enqueued TurnTask must carry tenant attribution for usage/quota.
   const tenantProbe: string[] = [];
+  const testQueueName = `trinity-dist-test-${crypto.randomUUID()}`;
 
   beforeAll(async () => {
     const env = loadEnv(process.env, { requireDatabaseUrl: true });
@@ -127,13 +133,13 @@ describe.skipIf(!hasInfra)('M2 distributed topology (integration)', () => {
 
     pgStore = new PgSessionStore(db);
     const store = new PublishingSessionStore(pgStore, new RedisSessionEventPublisher(redis));
-    queue = new RedisTurnQueue({ url: redisUrl });
+    queue = new RedisTurnQueue({ url: redisUrl }, testQueueName);
     const live = new RedisLiveEventPublisher(redis);
     const audit = new BusAuditEmitter(new RedisEventBus(redis, { blockMs: 500 }));
 
     app = await buildServer({
       store,
-      workspaceRoot: '/ws',
+      workspaceRoot: WS_DIR,
       queue,
       eventReader: new RedisSessionEventReader(redis, { blockMs: 500 }),
       liveEvents: new RedisLiveEventSubscriber(redis),
@@ -141,39 +147,45 @@ describe.skipIf(!hasInfra)('M2 distributed topology (integration)', () => {
 
     // In-process worker consuming the same queue the server enqueues to.
     const sandbox = new FakeSandbox();
-    worker = createTurnWorker({ url: redisUrl }, async (task) => {
-      tenantProbe.push(task.tenantId);
-      const tools = new CoreToolRegistry(sandbox);
-      tools.register(writeFileTool);
-      const llm = new FakeLLM(
-        () => toolCallThenFinish('c1', 'write_file', { path: 'hi.txt', content: 'hello' }),
-        () => textChunks('File written.'),
-      );
-      const sink: EventSink = {
-        emit: (loopEvent) => {
-          live.publish(task.sessionId, loopEvent);
-          if (loopEvent.type === 'tool/call') {
-            audit.emit({
-              id: crypto.randomUUID(),
-              at: new Date().toISOString(),
-              tenantId: '00000000-0000-0000-0000-000000000000',
-              userId: task.actor,
-              sessionId: task.sessionId,
-              action: 'tool/call',
-              target: loopEvent.call.name,
-              result: 'ok',
-            });
-          }
-        },
-      };
-      await new CoreAgentLoop({
-        llm,
-        model: 'fake/model',
-        tools,
-        store,
-        workspaceRoot: '/ws',
-      }).run(task.sessionId, task.prompt, sink, { actor: task.actor });
-    });
+    worker = createTurnWorker(
+      { url: redisUrl },
+      async (task) => {
+        tenantProbe.push(task.tenantId);
+        const tools = new CoreToolRegistry(sandbox);
+        tools.register(writeFileTool);
+        const llm = new FakeLLM(
+          () => toolCallThenFinish('c1', 'write_file', { path: 'hi.txt', content: 'hello' }),
+          () => textChunks('File written.'),
+        );
+        const sink: EventSink = {
+          emit: (loopEvent) => {
+            if (loopEvent.type === 'text-delta' || loopEvent.type === 'reasoning-delta') {
+              live.publish(task.sessionId, loopEvent);
+            }
+            if (loopEvent.type === 'tool/call') {
+              audit.emit({
+                id: crypto.randomUUID(),
+                at: new Date().toISOString(),
+                tenantId: '00000000-0000-0000-0000-000000000000',
+                userId: task.actor,
+                sessionId: task.sessionId,
+                action: 'tool/call',
+                target: loopEvent.call.name,
+                result: 'ok',
+              });
+            }
+          },
+        };
+        await new CoreAgentLoop({
+          llm,
+          model: 'fake/model',
+          tools,
+          store,
+          workspaceRoot: WS_DIR,
+        }).run(task.sessionId, task.prompt, sink, { actor: task.actor });
+      },
+      testQueueName,
+    );
 
     // Independent consumer group on the audit stream (same mechanism the
     // audit-consumer Deployment uses).
@@ -195,6 +207,7 @@ describe.skipIf(!hasInfra)('M2 distributed topology (integration)', () => {
   }, 30000);
 
   afterAll(async () => {
+    rmSync(WS_DIR, { recursive: true, force: true });
     auditProbe.dispose();
     await app.close();
     await worker.close();
@@ -246,11 +259,11 @@ describe.skipIf(!hasInfra)('M2 distributed topology (integration)', () => {
     }
 
     // Tool lifecycle came through the durable stream; deltas via Pub/Sub.
+    sse.cancel();
     expect(kinds.has('update:tool_call:in_progress')).toBe(true);
     expect(kinds.has('update:tool_call:completed')).toBe(true);
     expect(kinds.has('committed:user')).toBe(true);
     expect(kinds.has('committed:assistant')).toBe(true);
-    sse.cancel();
 
     // Every log-derived event carries a strictly increasing seq id.
     const seqs = seen.filter((s) => s.id !== undefined).map((s) => s.id!);

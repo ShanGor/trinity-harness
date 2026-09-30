@@ -446,6 +446,7 @@ PG 是唯一事实源：即使 Redis Stream 被截断、SSE 连接中断，任�
 - 轻量 ACP client 库（`packages/client-acp`）：封装 `EventSource` 生命周期、重连退避、`Last-Event-ID` 管理、JSON-RPC request/response 配对（`id` → Promise）、缺口检测。
 - 状态管理：事件 reducer 将 `session/update` 折叠进 `createStore`/`zustand` store（消息 part 增量合并，delta 聚合）。
 - antd 组件与 ACP 消息类型一一对应：`session/update(tool_call)` → ToolCall 折叠面板；`request_permission` → 审批 Modal。
+- Web UI（apps/web）：左侧会话历史栏（`GET /api/sessions`，点击经 SSE `afterSeq=0` 重放日志还原会话）；工作区选择器（个人 / 我所属的团队，`POST /api/sessions` 的 `workspace` 字段）；assistant 消息以 Markdown 渲染（react-markdown + remark-gfm）。
 
 ---
 
@@ -496,13 +497,19 @@ PG 是唯一事实源：即使 Redis Stream 被截断、SSE 连接中断，任�
 ```
 users(id, email, password_hash, role, created_at)
 tenants(id, name, quota_jsonb)
-sessions(id, tenant_id, user_id, title, workspace_uri, policy, forked_from, created_at, closed_at)
+sessions(id, tenant_id, user_id, title, workspace_uri, scope, scope_id, policy, forked_from, created_at, closed_at)
+teams(id, tenant_id, name, created_at)
+team_members(team_id, user_id, role, created_at)   -- PK(team_id, user_id)；role: owner | member
 session_events(session_id, seq, type, payload jsonb, actor, prev_hash, created_at)  -- append-only
 audit_log(id, tenant_id, user_id, session_id, action, target, result, ip, detail jsonb, created_at)
 approvals(id, session_id, tool_call_id, request jsonb, outcome, decided_by, created_at, decided_at)
 model_usage(id, tenant_id, session_id, model, input_tokens, output_tokens, cost, created_at)
 api_keys / credentials(id, tenant_id, kind, ciphertext, created_at)
 ```
+
+**每会话工作区（workspace scope）**：每个会话绑定一个沙箱目录 —— 个人空间 `$WORKSPACE_ROOT/<user_id>`（`scope='personal'`）或团队空间 `$WORKSPACE_ROOT/<team_id>`（`scope='team'`，`scope_id` 指向 `teams`）。team 是租户内的用户组（M:N，创建者为 owner），一个用户可属多个 team。会话创建时 fail-closed 校验团队成员身份并 `mkdir` 该目录；Loop/Sandbox 按会话的 `workspace_uri` 构建（server inline 与 agent-worker 均按 root 缓存 sandbox + registry），sandbox 的路径逃逸校验即用户/团队之间的隔离边界。团队会话对全体团队成员可见（`listForIdentity`：自己的会话 ∪ 我所属 team 的会话；admin 见全租户）。团队管理 API：`GET/POST /api/teams`、`POST /api/teams/:id/members`（owner 或 admin）。
+
+**历史会话操作**：无标题会话（如先上传附件）在首个 prompt 到达时原子写入标题。`GET /api/sessions/:id/export` 返回鉴权后的 JSON 对话投影（包含内容块引用）；`DELETE /api/sessions/:id` 仅限所有者或租户 admin，先取消 turn、追加 `session/closed` 事件，再设置 `closed_at`。关闭后列表与读取 API 均不再展示该会话，事件日志保留以满足审计与回放要求。worker 拒绝运行已关闭会话的排队任务。团队成员可读团队会话，但不可删除其他成员创建的会话。实时 Pub/Sub 只发增量文本；已提交事件只通过 PG/Redis Stream 分发，SSE 客户端按 seq 去重。
 
 ---
 

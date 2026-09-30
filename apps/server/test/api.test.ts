@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
   CoreAgentLoop,
@@ -17,6 +20,8 @@ import type { ServerEvent } from '@trinity-harness/shared';
 
 import { buildServer } from '../src/index.js';
 
+const WS_DIR = mkdtempSync(path.join(tmpdir(), 'trinity-api-'));
+
 function makeApp() {
   const store = new MemorySessionStore();
   const sandbox = new FakeSandbox();
@@ -28,14 +33,14 @@ function makeApp() {
   tools.register(writeFileTool);
   return buildServer({
     store,
-    workspaceRoot: '/ws',
+    workspaceRoot: WS_DIR,
     createLoop: () =>
       new CoreAgentLoop({
         llm,
         model: 'fake/model',
         tools,
         store,
-        workspaceRoot: '/ws',
+        workspaceRoot: WS_DIR,
       }),
   });
 }
@@ -51,6 +56,7 @@ describe('buildServer', () => {
   });
 
   afterAll(async () => {
+    rmSync(WS_DIR, { recursive: true, force: true });
     await app.close();
   });
 

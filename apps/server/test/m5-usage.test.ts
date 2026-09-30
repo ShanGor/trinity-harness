@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import type {
   Identity,
@@ -22,6 +25,8 @@ import {
 import { FakeLLM, FakeSandbox, textChunks } from '@trinity-harness/core/testing';
 
 import { buildServer } from '../src/index.js';
+
+const WS_DIR = mkdtempSync(path.join(tmpdir(), 'trinity-m5-'));
 
 /** In-memory doubles (apps may import implementations — AGENTS.md §3.3). */
 
@@ -91,6 +96,8 @@ class FakeMetaStore implements SessionMetaStore {
     return [...this.metas.values()].filter((m) => m.tenantId === identity.tenantId);
   }
   async setPolicy(): Promise<void> {}
+  async setTitleIfEmpty(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
 /** In-memory UsagePort + QuotaAdminPort with real window aggregation. */
@@ -127,7 +134,7 @@ async function makeApp(usage: FakeUsage) {
   const app = await buildServer(
     {
       store,
-      workspaceRoot: '/ws',
+      workspaceRoot: WS_DIR,
       createLoop: () =>
         new CoreAgentLoop({
           llm: new FakeLLM(() => [
@@ -137,7 +144,7 @@ async function makeApp(usage: FakeUsage) {
           model: 'fake/model',
           tools: new CoreToolRegistry(new FakeSandbox()),
           store,
-          workspaceRoot: '/ws',
+          workspaceRoot: WS_DIR,
           usage,
         }),
       auth: {
@@ -192,6 +199,7 @@ describe('M5: usage & quota API + loop gate', () => {
   });
 
   afterAll(async () => {
+    rmSync(WS_DIR, { recursive: true, force: true });
     await app.close();
   });
 

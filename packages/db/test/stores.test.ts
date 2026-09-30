@@ -16,6 +16,7 @@ import {
   PgAuditStore,
   PgSessionMetaStore,
   PgSessionStore,
+  PgTeamStore,
   PgUserStore,
 } from '../src/index.js';
 
@@ -38,6 +39,7 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
   let pool: pg.Pool;
   let users: PgUserStore;
   let metas: PgSessionMetaStore;
+  let teams: PgTeamStore;
   let audit: PgAuditStore;
   let approvals: PgApprovalStore;
   let events: PgSessionStore;
@@ -57,6 +59,7 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
     const db = createDb(pool);
     users = new PgUserStore(db, fakeHasher);
     metas = new PgSessionMetaStore(db);
+    teams = new PgTeamStore(db);
     audit = new PgAuditStore(db);
     approvals = new PgApprovalStore(db);
     events = new PgSessionStore(db);
@@ -142,6 +145,133 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
     expect((await metas.get(id))!.policy).toBe('workspace-write');
     await metas.setPolicy(id, 'read-only');
     expect((await metas.get(id))!.policy).toBe('read-only');
+  });
+
+  it('sets only an empty title and closes a session while retaining events', async () => {
+    const owner = await users.createUser({
+      tenantId,
+      email: email(),
+      passwordHash: 'h',
+      role: 'developer',
+    });
+    const id = crypto.randomUUID();
+    await metas.create({
+      id,
+      tenantId,
+      userId: owner.id,
+      title: '',
+      workspaceUri: '/ws',
+    });
+    await events.append(id, [
+      {
+        type: 'session/created',
+        eventId: crypto.randomUUID(),
+        at: new Date().toISOString(),
+        workspaceUri: '/ws',
+      },
+    ]);
+    await metas.setTitleIfEmpty(id, 'first prompt');
+    await metas.setTitleIfEmpty(id, 'later prompt');
+    expect((await metas.get(id))?.title).toBe('first prompt');
+    await metas.close(id);
+    expect((await metas.get(id))?.closedAt).toBeDefined();
+    expect((await metas.listForIdentity(identityOf(owner))).map((m) => m.id)).not.toContain(id);
+    expect(await events.load(id)).toHaveLength(1);
+  });
+
+  it('teams: owner enrollment, membership checks, member listing with emails', async () => {
+    const owner = await users.createUser({
+      tenantId,
+      email: email(),
+      passwordHash: 'h',
+      role: 'developer',
+    });
+    const member = await users.createUser({
+      tenantId,
+      email: email(),
+      passwordHash: 'h',
+      role: 'developer',
+    });
+    const outsider = await users.createUser({
+      tenantId,
+      email: email(),
+      passwordHash: 'h',
+      role: 'developer',
+    });
+
+    const team = await teams.create({ tenantId, name: 'platform', ownerId: owner.id });
+    expect(await teams.isOwner(team.id, owner.id)).toBe(true);
+    expect(await teams.isMember(team.id, owner.id)).toBe(true);
+    expect(await teams.isMember(team.id, member.id)).toBe(false);
+
+    await teams.addMember(team.id, member.id, 'member');
+    expect(await teams.isMember(team.id, member.id)).toBe(true);
+    expect(await teams.isOwner(team.id, member.id)).toBe(false);
+
+    const listed = await teams.listMembers(team.id);
+    expect(listed.map((m) => m.email).sort()).toEqual([member.email, owner.email].sort());
+    expect(listed.find((m) => m.userId === outsider.id)).toBeUndefined();
+
+    // A user can belong to many teams; listings are per-user.
+    const second = await teams.create({ tenantId, name: 'other', ownerId: owner.id });
+    const forOwner = await teams.listForUser(owner.id);
+    expect(forOwner.map((t) => t.id).sort()).toEqual([team.id, second.id].sort());
+    expect((await teams.listForUser(member.id)).map((t) => t.id)).toEqual([team.id]);
+  });
+
+  it('team sessions are listed for every team member, not only the creator', async () => {
+    const owner = await users.createUser({
+      tenantId,
+      email: email(),
+      passwordHash: 'h',
+      role: 'developer',
+    });
+    const teammate = await users.createUser({
+      tenantId,
+      email: email(),
+      passwordHash: 'h',
+      role: 'developer',
+    });
+    const outsider = await users.createUser({
+      tenantId,
+      email: email(),
+      passwordHash: 'h',
+      role: 'developer',
+    });
+    const team = await teams.create({ tenantId, name: 'shared-space', ownerId: owner.id });
+    await teams.addMember(team.id, teammate.id, 'member');
+
+    const sessionId = crypto.randomUUID();
+    await metas.create({
+      id: sessionId,
+      tenantId,
+      userId: owner.id,
+      title: 'team-session',
+      workspaceUri: `/ws/${team.id}`,
+      scope: 'team',
+      scopeId: team.id,
+    });
+
+    const teammateList = await metas.listForIdentity(identityOf(teammate));
+    expect(teammateList.map((m) => m.id)).toContain(sessionId);
+
+    // The outsider sees neither the team session nor (by userId) anything else.
+    const outsiderList = await metas.listForIdentity(identityOf(outsider));
+    expect(outsiderList.map((m) => m.id)).not.toContain(sessionId);
+
+    // Personal sessions never leak to other users.
+    const personalId = crypto.randomUUID();
+    await metas.create({
+      id: personalId,
+      tenantId,
+      userId: owner.id,
+      title: 'private',
+      workspaceUri: `/ws/${owner.id}`,
+      scope: 'personal',
+    });
+    expect((await metas.listForIdentity(identityOf(teammate))).map((m) => m.id)).not.toContain(
+      personalId,
+    );
   });
 
   it('M3: approvals table records requests and first-writer-wins resolves', async () => {

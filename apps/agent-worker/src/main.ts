@@ -75,16 +75,83 @@ async function main(): Promise<void> {
   // tenant quota before every request (docs/design.md §17).
   const usage = new PgUsageStore(db);
   // M5: sandbox env scrubbing — worker secrets never reach tool children.
-  const sandbox = new LocalSandbox(env.WORKSPACE_ROOT, { envMode: env.SANDBOX_ENV_MODE });
-  const registry = new CoreToolRegistry(sandbox);
-  for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
-    registry.register(tool);
-  }
-
-  // M4: blob store backs spill + multimodal attachments. Local adapter shares
-  // the workspace disk (single-node topology; S3 adapter is drop-in, §10).
+  //
+  // Per-session workspaces (docs/design.md §15): every session is sandboxed
+  // to its own directory ($WORKSPACE_ROOT/<user_id> or <team_id>), so the
+  // sandbox + tool registries are built PER ROOT and cached — the sandbox's
+  // path-escape check is the isolation boundary between users/teams.
   const blobStore = new LocalBlobStore(path.join(env.WORKSPACE_ROOT, '.trinity', 'blobs'));
-  registry.register(createReadBlobTool(blobStore));
+  // M4: LSP service + tools (lazy per-workspace language servers, §9). Rooted
+  // at the deployment root so it can index every session subdirectory.
+  const globalSandbox = new LocalSandbox(env.WORKSPACE_ROOT, {
+    envMode: env.SANDBOX_ENV_MODE,
+  });
+  const lsp = env.LSP_ENABLED
+    ? new LspService({
+        sandbox: globalSandbox,
+        readText: async (abs) =>
+          (await globalSandbox.readFile(path.relative(env.WORKSPACE_ROOT, abs))).content,
+        maxServers: env.LSP_MAX_SERVERS,
+      })
+    : null;
+
+  const resolveBlob = async (uri: string): Promise<Uint8Array> => {
+    const bytes = await blobStore.get(uri);
+    if (bytes === null) throw new Error(`blob not found: ${uri}`);
+    return bytes;
+  };
+
+  interface RootAssembly {
+    sandbox: LocalSandbox;
+    registry: CoreToolRegistry;
+  }
+  const assemblies = new Map<string, RootAssembly>();
+  const assemblyFor = (root: string): RootAssembly => {
+    let assembly = assemblies.get(root);
+    if (assembly) return assembly;
+    const sandbox = new LocalSandbox(root, { envMode: env.SANDBOX_ENV_MODE });
+    const registry = new CoreToolRegistry(sandbox);
+    for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
+      registry.register(tool);
+    }
+    registry.register(createReadBlobTool(blobStore));
+    if (lsp) {
+      for (const tool of createLspTools(lsp)) {
+        registry.register(tool);
+      }
+    }
+    // M4: subagent — child loop with a fresh in-memory context (§8). The child
+    // registry reuses the base tools + read_blob, minus subagent (no recursion),
+    // sandboxed to the SAME root as the parent turn.
+    const childRegistry = new CoreToolRegistry(sandbox);
+    for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
+      childRegistry.register(tool);
+    }
+    childRegistry.register(createReadBlobTool(blobStore));
+    if (lsp) {
+      for (const tool of createLspTools(lsp)) {
+        childRegistry.register(tool);
+      }
+    }
+    registry.register(
+      createSubagentTool({
+        createLoop: () =>
+          new CoreAgentLoop({
+            llm,
+            model: env.MODEL,
+            systemPrompt: env.SYSTEM_PROMPT,
+            tools: childRegistry,
+            store: new MemorySessionStore(),
+            workspaceRoot: root,
+            maxSteps: 16,
+            resolveBlob,
+          }),
+      }),
+    );
+    assembly = { sandbox, registry };
+    assemblies.set(root, assembly);
+    return assembly;
+  };
 
   const llm = new AiSdkGateway(undefined, {
     reasoningBudgetTokens: env.REASONING_BUDGET_TOKENS,
@@ -100,59 +167,6 @@ async function main(): Promise<void> {
     keepTokens: env.CONTEXT_KEEP_TOKENS,
   });
 
-  // M4: LSP service + tools (lazy per-workspace language servers, §9).
-  const lsp = env.LSP_ENABLED
-    ? new LspService({
-        sandbox,
-        readText: async (abs) =>
-          (await sandbox.readFile(path.relative(env.WORKSPACE_ROOT, abs))).content,
-        maxServers: env.LSP_MAX_SERVERS,
-      })
-    : null;
-  if (lsp) {
-    for (const tool of createLspTools(lsp)) {
-      registry.register(tool);
-    }
-  }
-
-  // M4: subagent — child loop with a fresh in-memory context (§8). The child
-  // registry reuses the base tools + read_blob, minus subagent (no recursion).
-  const childRegistry = new CoreToolRegistry(sandbox);
-  for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
-    childRegistry.register(tool);
-  }
-  childRegistry.register(createReadBlobTool(blobStore));
-  if (lsp) {
-    for (const tool of createLspTools(lsp)) {
-      childRegistry.register(tool);
-    }
-  }
-  registry.register(
-    createSubagentTool({
-      createLoop: () =>
-        new CoreAgentLoop({
-          llm,
-          model: env.MODEL,
-          systemPrompt: env.SYSTEM_PROMPT,
-          tools: childRegistry,
-          store: new MemorySessionStore(),
-          workspaceRoot: env.WORKSPACE_ROOT,
-          maxSteps: 16,
-          resolveBlob: async (uri) => {
-            const bytes = await blobStore.get(uri);
-            if (bytes === null) throw new Error(`blob not found: ${uri}`);
-            return bytes;
-          },
-        }),
-    }),
-  );
-
-  const resolveBlob = async (uri: string): Promise<Uint8Array> => {
-    const bytes = await blobStore.get(uri);
-    if (bytes === null) throw new Error(`blob not found: ${uri}`);
-    return bytes;
-  };
-
   // M4: LSP diagnostics context injection (design.md §9) — shared helper,
   // failures degrade to no augmentation (never break a turn).
   const augmentSystem = lsp ? makeDiagnosticsAugment(lsp, () => store) : undefined;
@@ -160,14 +174,15 @@ async function main(): Promise<void> {
   const handleTurn = createTurnHandler({
     store,
     metas,
-    createLoop: () =>
+    defaultWorkspaceRoot: env.WORKSPACE_ROOT,
+    createLoop: (_sessionId, workspaceRoot) =>
       new CoreAgentLoop({
         llm,
         model: env.MODEL,
         systemPrompt: env.SYSTEM_PROMPT,
-        tools: registry,
+        tools: assemblyFor(workspaceRoot).registry,
         store,
-        workspaceRoot: env.WORKSPACE_ROOT,
+        workspaceRoot,
         // M3: fail-closed human approval channel + durable approval trail.
         approvals: new RedisApprovalRequester(redis),
         approvalStore: new PgApprovalStore(db),

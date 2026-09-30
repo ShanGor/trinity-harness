@@ -7,3 +7,4 @@ export * from './audit-store.js';
 export * from './approval-store.js';
 export * from './tenant-store.js';
 export * from './usage-store.js';
+export * from './team-store.js';

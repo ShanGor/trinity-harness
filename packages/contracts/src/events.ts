@@ -40,6 +40,11 @@ export const sessionCreatedEventSchema = z.object({
   forkedFrom: z.uuid().optional(),
 });
 
+export const sessionClosedEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('session/closed'),
+});
+
 export const turnStartEventSchema = z.object({
   ...baseFields,
   type: z.literal('turn/start'),
@@ -113,6 +118,7 @@ export const approvalResolvedEventSchema = z.object({
  */
 export const sessionEventSchema = z.discriminatedUnion('type', [
   sessionCreatedEventSchema,
+  sessionClosedEventSchema,
   turnStartEventSchema,
   turnEndEventSchema,
   userMessageEventSchema,

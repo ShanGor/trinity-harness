@@ -1,6 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App as AntdApp } from 'antd';
+import { App as AntdApp, ConfigProvider } from 'antd';
 
 import App from './App.js';
 
@@ -13,8 +13,19 @@ if (!container) {
 
 createRoot(container).render(
   <StrictMode>
-    <AntdApp style={{ height: '100%' }}>
-      <App />
-    </AntdApp>
+    <ConfigProvider
+      theme={{
+        token: {
+          colorPrimary: '#116149',
+          borderRadius: 12,
+          colorText: '#172133',
+          fontFamily: '"IBM Plex Sans", "Source Sans 3", "Avenir Next", "Segoe UI", sans-serif',
+        },
+      }}
+    >
+      <AntdApp style={{ height: '100%' }}>
+        <App />
+      </AntdApp>
+    </ConfigProvider>
   </StrictMode>,
 );

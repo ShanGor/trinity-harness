@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import { CoreAgentLoop, CoreToolRegistry, HmacTokenService } from '@trinity-harness/core';
 import {
@@ -20,6 +23,8 @@ import { MemorySessionStore } from '@trinity-harness/core';
 import type { SessionMetaStore } from '@trinity-harness/contracts';
 
 import { buildServer } from '../src/index.js';
+
+const WS_DIR = mkdtempSync(path.join(tmpdir(), 'trinity-auth-'));
 
 /** In-memory test doubles (apps may import implementations — AGENTS.md §3.3). */
 
@@ -84,6 +89,7 @@ class FakeMetaStore implements SessionMetaStore {
   async listForIdentity(identity: Identity): Promise<SessionMeta[]> {
     return [...this.metas.values()].filter(
       (m) =>
+        !m.closedAt &&
         m.tenantId === identity.tenantId &&
         (identity.role === 'admin' || m.userId === identity.userId),
     );
@@ -91,6 +97,14 @@ class FakeMetaStore implements SessionMetaStore {
   async setPolicy(sessionId: string, policy: string): Promise<void> {
     const meta = this.metas.get(sessionId);
     if (meta) this.metas.set(sessionId, { ...meta, policy });
+  }
+  async setTitleIfEmpty(sessionId: string, title: string): Promise<void> {
+    const meta = this.metas.get(sessionId);
+    if (meta && !meta.title) this.metas.set(sessionId, { ...meta, title });
+  }
+  async close(sessionId: string): Promise<void> {
+    const meta = this.metas.get(sessionId);
+    if (meta) this.metas.set(sessionId, { ...meta, closedAt: new Date().toISOString() });
   }
 }
 
@@ -112,7 +126,7 @@ async function makeApp() {
   const app = await buildServer(
     {
       store,
-      workspaceRoot: '/ws',
+      workspaceRoot: WS_DIR,
       createLoop: () =>
         new CoreAgentLoop({
           // Fresh scripts per loop: concurrent turns never share a script queue.
@@ -123,7 +137,7 @@ async function makeApp() {
           model: 'fake/model',
           tools: new CoreToolRegistry(sandbox),
           store,
-          workspaceRoot: '/ws',
+          workspaceRoot: WS_DIR,
         }),
       auth: { tokens: new HmacTokenService('test-secret-0123456789abcdef'), users, metas, hasher },
       audit,
@@ -185,6 +199,7 @@ describe('M2 auth / tenants / RBAC', () => {
   });
 
   afterAll(async () => {
+    rmSync(WS_DIR, { recursive: true, force: true });
     await bundle.app.close();
   });
 
@@ -292,6 +307,14 @@ describe('M2 auth / tenants / RBAC', () => {
         })
       ).status,
     ).toBe(403);
+    expect(
+      (
+        await authed(baseUrl, viewerToken, `/api/sessions/${viewerSessionId}`, {
+          method: 'DELETE',
+          body: '{}',
+        })
+      ).status,
+    ).toBe(403);
     // dev's own listing contains it; dev2's does not.
     const list1 = (await (await authed(baseUrl, devToken, '/api/sessions')).json()) as {
       sessions: { sessionId: string }[];
@@ -301,6 +324,80 @@ describe('M2 auth / tenants / RBAC', () => {
       sessions: { sessionId: string }[];
     };
     expect(list2.sessions.map((s) => s.sessionId)).not.toContain(sessionId);
+  });
+
+  it('titles upload-first sessions, exports their transcript, and closes them without deleting the log', async () => {
+    const email = `history-${crypto.randomUUID()}@example.com`;
+    const owner = await bundle.users.createUser({
+      tenantId: 't1',
+      email,
+      passwordHash: `h:${passwordOf()}`,
+      role: 'developer',
+    });
+    const token = (await login(baseUrl, email, passwordOf())).token!;
+    const created = await authed(baseUrl, token, '/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    const { sessionId } = (await created.json()) as { sessionId: string };
+    expect((await bundle.metas.get(sessionId))?.title).toBe('');
+
+    const posted = await authed(baseUrl, token, `/api/sessions/${sessionId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ text: 'First task title' }),
+    });
+    expect(posted.status).toBe(202);
+    expect((await bundle.metas.get(sessionId))?.title).toBe('First task title');
+    const exported = await authed(baseUrl, token, `/api/sessions/${sessionId}/export`);
+    expect(exported.status).toBe(200);
+    expect(exported.headers.get('content-disposition')).toContain(`session-${sessionId}.json`);
+    const transcript = (await exported.json()) as {
+      title: string;
+      messages: { role: string; content: { text?: string }[] }[];
+    };
+    expect(transcript.title).toBe('First task title');
+    expect(transcript.messages[0]).toMatchObject({
+      role: 'user',
+      content: [{ kind: 'text', text: 'First task title' }],
+    });
+
+    const outsiderEmail = `history-outsider-${crypto.randomUUID()}@example.com`;
+    await bundle.users.createUser({
+      tenantId: 't1',
+      email: outsiderEmail,
+      passwordHash: `h:${passwordOf()}`,
+      role: 'developer',
+    });
+    const outsiderToken = (await login(baseUrl, outsiderEmail, passwordOf())).token!;
+    expect((await authed(baseUrl, outsiderToken, `/api/sessions/${sessionId}/export`)).status).toBe(
+      404,
+    );
+    expect(
+      (
+        await authed(baseUrl, outsiderToken, `/api/sessions/${sessionId}`, {
+          method: 'DELETE',
+          body: '{}',
+        })
+      ).status,
+    ).toBe(404);
+
+    const deleted = await authed(baseUrl, token, `/api/sessions/${sessionId}`, {
+      method: 'DELETE',
+      body: '{}',
+    });
+    expect(deleted.status).toBe(204);
+    expect((await bundle.metas.get(sessionId))?.closedAt).toBeDefined();
+    const listed = (await (await authed(baseUrl, token, '/api/sessions')).json()) as {
+      sessions: { sessionId: string }[];
+    };
+    expect(listed.sessions.map((s) => s.sessionId)).not.toContain(sessionId);
+    expect((await authed(baseUrl, token, `/api/sessions/${sessionId}/export`)).status).toBe(404);
+    expect((await bundle.store.load(sessionId)).length).toBeGreaterThan(1);
+    expect((await bundle.store.load(sessionId)).at(-1)?.type).toBe('session/closed');
+    expect(
+      bundle.audit.records.some((r) => r.sessionId === sessionId && r.action === 'session/closed'),
+    ).toBe(true);
+    void owner;
   });
 
   it('multi-user concurrency: simultaneous turns stay isolated and audited', async () => {

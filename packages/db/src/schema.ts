@@ -65,18 +65,65 @@ export const users = pgTable(
 );
 
 /** Session ownership/metadata; the event log lives in session_events. */
-export const sessions = pgTable('sessions', {
-  id: uuid('id').defaultRandom().primaryKey(),
-  tenantId: uuid('tenant_id').notNull(),
-  userId: uuid('user_id').notNull(),
-  title: text('title').notNull().default(''),
-  workspaceUri: text('workspace_uri').notNull(),
-  /** M3: permission policy (preset name or JSON policy; default at insert). */
-  policy: text('policy'),
-  forkedFrom: uuid('forked_from'),
-  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
-  closedAt: timestamp('closed_at', { withTimezone: true, mode: 'string' }),
-});
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    title: text('title').notNull().default(''),
+    workspaceUri: text('workspace_uri').notNull(),
+    /**
+     * Workspace scope (docs/design.md §15): 'personal' → the creator's
+     * directory, 'team' → a team directory the creator is a member of.
+     */
+    scope: text('scope').notNull().default('personal'),
+    /** Team id when scope === 'team'. */
+    scopeId: uuid('scope_id'),
+    /** M3: permission policy (preset name or JSON policy; default at insert). */
+    policy: text('policy'),
+    forkedFrom: uuid('forked_from'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    closedAt: timestamp('closed_at', { withTimezone: true, mode: 'string' }),
+  },
+  (t) => [index('sessions_scope_idx').on(t.scope, t.scopeId)],
+);
+
+/**
+ * Teams: tenant-scoped groups sharing one workspace directory
+ * (`$WORKSPACE_ROOT/<team_id>`). A user may belong to many teams.
+ */
+export const teams = pgTable(
+  'teams',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    name: text('name').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index('teams_tenant_idx').on(t.tenantId)],
+);
+
+/** Team membership (M:N users ↔ teams). The creator joins as 'owner'. */
+export const teamMembers = pgTable(
+  'team_members',
+  {
+    teamId: uuid('team_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    role: text('role').notNull().default('member'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.teamId, t.userId] }),
+    index('team_members_user_idx').on(t.userId),
+  ],
+);
 
 /**
  * Audit projection written by the audit consumer (docs/design.md §13).

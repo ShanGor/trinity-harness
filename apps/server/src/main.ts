@@ -29,6 +29,7 @@ import {
   PgAuditStore,
   PgSessionMetaStore,
   PgSessionStore,
+  PgTeamStore,
   PgUsageStore,
   PgUserStore,
 } from '@trinity-harness/db';
@@ -69,16 +70,44 @@ async function main(): Promise<void> {
   const env = loadServerEnv();
   // M5: sandbox env scrubbing (docs/design.md §12.3 hardening) — spawned
   // shells get a minimal env; server secrets never leak into tool children.
-  const sandbox = new LocalSandbox(env.WORKSPACE_ROOT, { envMode: env.SANDBOX_ENV_MODE });
-  const registry = new CoreToolRegistry(sandbox);
-  for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
-    registry.register(tool);
+  //
+  // Per-session workspaces (docs/design.md §15): every session is sandboxed
+  // to its own directory ($WORKSPACE_ROOT/<user_id> or <team_id>), so the
+  // sandbox + tool registry are built PER ROOT and cached — the sandbox's
+  // path-escape check is the isolation boundary between users/teams.
+  interface RootAssembly {
+    sandbox: LocalSandbox;
+    registry: CoreToolRegistry;
   }
+  const assemblies = new Map<string, RootAssembly>();
+  const assemblyFor = (root: string): RootAssembly => {
+    let assembly = assemblies.get(root);
+    if (!assembly) {
+      const sandbox = new LocalSandbox(root, { envMode: env.SANDBOX_ENV_MODE });
+      const registry = new CoreToolRegistry(sandbox);
+      for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
+        registry.register(tool);
+      }
+      registry.register(createReadBlobTool(blobStore));
+      if (lsp) {
+        for (const tool of createLspTools(lsp)) {
+          registry.register(tool);
+        }
+      }
+      assembly = { sandbox, registry };
+      assemblies.set(root, assembly);
+    }
+    return assembly;
+  };
+  // Global-root assembly serves LSP (language servers index the whole tree;
+  // session dirs are subdirectories of it).
+  const globalSandbox = new LocalSandbox(env.WORKSPACE_ROOT, {
+    envMode: env.SANDBOX_ENV_MODE,
+  });
 
   // M4: blob store backs attachments (upload endpoint) and spilled results.
   // Shares the workspace disk with the agent-worker (single-node topology).
   const blobStore = new LocalBlobStore(path.join(env.WORKSPACE_ROOT, '.trinity', 'blobs'));
-  registry.register(createReadBlobTool(blobStore));
 
   const databaseUrl = process.env['DATABASE_URL'];
   let store: SessionStore = new MemorySessionStore();
@@ -96,13 +125,13 @@ async function main(): Promise<void> {
     if (bytes === null) throw new Error(`blob not found: ${uri}`);
     return bytes;
   };
-  const m4LoopExtras = (): ConstructorParameters<typeof CoreAgentLoop>[0] => ({
+  const m4LoopExtras = (workspaceRoot: string): ConstructorParameters<typeof CoreAgentLoop>[0] => ({
     llm,
     model: env.MODEL,
     systemPrompt: env.SYSTEM_PROMPT,
-    tools: registry,
+    tools: assemblyFor(workspaceRoot).registry,
     store,
-    workspaceRoot: env.WORKSPACE_ROOT,
+    workspaceRoot,
     spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
     resolveBlob,
     // M5: quota gate + usage recording for inline-mode turns (distributed
@@ -111,17 +140,17 @@ async function main(): Promise<void> {
   });
   if (env.LSP_ENABLED) {
     lsp = new LspService({
-      sandbox,
+      sandbox: globalSandbox,
       readText: async (abs) =>
-        (await sandbox.readFile(path.relative(env.WORKSPACE_ROOT, abs))).content,
+        (await globalSandbox.readFile(path.relative(env.WORKSPACE_ROOT, abs))).content,
       maxServers: env.LSP_MAX_SERVERS,
     });
-    for (const tool of createLspTools(lsp)) {
-      registry.register(tool);
-    }
   }
 
-  let createLoop: (() => CoreAgentLoop) | undefined = () => {
+  let createLoop: ((sessionId: string, workspaceRoot: string) => CoreAgentLoop) | undefined = (
+    _sessionId,
+    workspaceRoot,
+  ) => {
     context ??= new ContextManager({
       llm,
       model: env.COMPACTION_MODEL ?? env.MODEL,
@@ -130,7 +159,7 @@ async function main(): Promise<void> {
       keepTokens: env.CONTEXT_KEEP_TOKENS,
     });
     return new CoreAgentLoop({
-      ...m4LoopExtras(),
+      ...m4LoopExtras(workspaceRoot),
       context,
       // Inline mode keeps turns in-process; diagnostics injection mirrors the
       // worker assembly (docs/design.md §9).
@@ -149,6 +178,7 @@ async function main(): Promise<void> {
   let turnCancel: RedisTurnCancelPublisher | undefined;
   let defaultPolicy: ReturnType<typeof parsePermissionPolicy> | undefined;
   let usage: PgUsageStore | undefined;
+  let teams: PgTeamStore | undefined;
 
   if (databaseUrl) {
     const pool = createPool(databaseUrl);
@@ -184,6 +214,7 @@ async function main(): Promise<void> {
     const hasher = new ScryptPasswordHasher();
     const users = new PgUserStore(db, hasher);
     const metas = new PgSessionMetaStore(db);
+    teams = new PgTeamStore(db);
 
     // First-boot bootstrap: provision the default tenant + admin exactly once.
     if ((await countUsers(db)) === 0) {
@@ -220,6 +251,7 @@ async function main(): Promise<void> {
       eventReader,
       liveEvents,
       auth,
+      teams,
       audit,
       auditQuery,
       approvals,

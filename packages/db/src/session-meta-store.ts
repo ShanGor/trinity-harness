@@ -4,10 +4,10 @@ import type {
   SessionMeta,
   SessionMetaStore,
 } from '@trinity-harness/contracts';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 
 import type { Db } from './client.js';
-import { sessions } from './schema.js';
+import { sessions, teamMembers } from './schema.js';
 
 /** Default per-session permission policy (docs/design.md §12.1). */
 export const DEFAULT_SESSION_POLICY = 'workspace-write';
@@ -23,6 +23,8 @@ function toMeta(row: typeof sessions.$inferSelect): SessionMeta {
     userId: row.userId,
     title: row.title,
     workspaceUri: row.workspaceUri,
+    scope: (row.scope as 'personal' | 'team') ?? 'personal',
+    ...(row.scopeId !== null ? { scopeId: row.scopeId } : {}),
     ...(row.policy !== null ? { policy: row.policy } : {}),
     createdAt: new Date(row.createdAt).toISOString(),
   };
@@ -43,6 +45,8 @@ export class PgSessionMetaStore implements SessionMetaStore {
       userId: meta.userId,
       title: meta.title,
       workspaceUri: meta.workspaceUri,
+      scope: meta.scope ?? 'personal',
+      scopeId: meta.scopeId ?? null,
       policy: meta.policy ?? DEFAULT_SESSION_POLICY,
       forkedFrom: meta.forkedFrom,
       closedAt: meta.closedAt ?? null,
@@ -55,10 +59,22 @@ export class PgSessionMetaStore implements SessionMetaStore {
   }
 
   async listForIdentity(identity: Identity): Promise<SessionMeta[]> {
-    const where =
+    // Team sessions are visible to every member of the team (shared space);
+    // everything else is own-sessions-only. Admin sees the whole tenant.
+    const myTeamIds = this.db
+      .select({ teamId: teamMembers.teamId })
+      .from(teamMembers)
+      .where(eq(teamMembers.userId, identity.userId));
+    const where = and(
+      eq(sessions.tenantId, identity.tenantId),
+      isNull(sessions.closedAt),
       identity.role === 'admin'
-        ? eq(sessions.tenantId, identity.tenantId)
-        : and(eq(sessions.tenantId, identity.tenantId), eq(sessions.userId, identity.userId));
+        ? undefined
+        : or(
+            eq(sessions.userId, identity.userId),
+            and(eq(sessions.scope, 'team'), inArray(sessions.scopeId, myTeamIds)),
+          ),
+    );
     const rows = await this.db
       .select()
       .from(sessions)
@@ -72,5 +88,19 @@ export class PgSessionMetaStore implements SessionMetaStore {
       .update(sessions)
       .set({ policy: policyText(policy) })
       .where(eq(sessions.id, sessionId));
+  }
+
+  async setTitleIfEmpty(sessionId: string, title: string): Promise<void> {
+    await this.db
+      .update(sessions)
+      .set({ title })
+      .where(and(eq(sessions.id, sessionId), eq(sessions.title, ''), isNull(sessions.closedAt)));
+  }
+
+  async close(sessionId: string): Promise<void> {
+    await this.db
+      .update(sessions)
+      .set({ closedAt: new Date().toISOString() })
+      .where(and(eq(sessions.id, sessionId), isNull(sessions.closedAt)));
   }
 }

@@ -4,12 +4,12 @@ import type { EventSourceLike } from '../src/index.js';
 import { AcpClient } from '../src/index.js';
 
 class FakeEventSource implements EventSourceLike {
-  onmessage: ((msg: { data: unknown }) => void) | null = null;
+  onmessage: ((msg: { data: unknown; lastEventId?: string }) => void) | null = null;
   onerror: ((err: unknown) => void) | null = null;
   closed = false;
   constructor(readonly url: string) {}
-  emit(data: unknown): void {
-    this.onmessage?.({ data: JSON.stringify(data) });
+  emit(data: unknown, seq?: number): void {
+    this.onmessage?.({ data: JSON.stringify(data), ...(seq ? { lastEventId: String(seq) } : {}) });
   }
   close(): void {
     this.closed = true;
@@ -92,5 +92,53 @@ describe('AcpClient', () => {
 
     handle.close();
     expect(fake.closed).toBe(true);
+  });
+
+  it('drops repeated committed events by sequence and resets for deliberate history replay', () => {
+    let fake!: FakeEventSource;
+    const client = new AcpClient({
+      eventSourceFactory: (url) => (fake = new FakeEventSource(url)),
+    });
+    const received: unknown[] = [];
+    const event = {
+      type: 'message/committed',
+      sessionId: 'abc',
+      message: { role: 'assistant', content: 'once' },
+    };
+    const handle = client.openEventStream('abc', { onEvent: (value) => received.push(value) });
+    fake.emit(event, 4);
+    fake.emit(event, 4);
+    expect(received).toHaveLength(1);
+    handle.close();
+
+    const replay = client.openEventStream(
+      'abc',
+      { onEvent: (value) => received.push(value) },
+      { afterSeq: 0 },
+    );
+    fake.emit(event, 4);
+    expect(received).toHaveLength(2);
+    replay.close();
+  });
+
+  it('uses authenticated export and delete endpoints', async () => {
+    const { impl, calls } = fakeFetch({
+      'GET http://x/api/sessions/abc/export': () =>
+        new Response('{"messages":[]}', { status: 200 }),
+      'DELETE http://x/api/sessions/abc': () => new Response(null, { status: 204 }),
+    });
+    const client = new AcpClient({ baseUrl: 'http://x', token: 'secret' });
+    const original = globalThis.fetch;
+    globalThis.fetch = impl;
+    try {
+      expect(await (await client.exportSession('abc')).text()).toBe('{"messages":[]}');
+      await client.deleteSession('abc');
+      expect(calls).toEqual([
+        'GET http://x/api/sessions/abc/export',
+        'DELETE http://x/api/sessions/abc',
+      ]);
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });

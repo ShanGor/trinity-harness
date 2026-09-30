@@ -35,6 +35,13 @@ export const sessionMetaSchema = z.object({
   userId: z.uuid(),
   title: z.string().max(200),
   workspaceUri: z.string().min(1),
+  /**
+   * Workspace scope: 'personal' → `$WORKSPACE_ROOT/<userId>`, 'team' →
+   * `$WORKSPACE_ROOT/<scopeId>` (docs/design.md §15; sandboxed per session).
+   */
+  scope: z.enum(['personal', 'team']).optional(),
+  /** Team id when scope === 'team'. */
+  scopeId: z.uuid().optional(),
   /** M3: per-session permission policy (preset name or JSON policy). */
   policy: z.string().max(4000).optional(),
   forkedFrom: z.uuid().optional(),
@@ -78,6 +85,10 @@ export interface SessionMetaStore {
   get(sessionId: string): Promise<SessionMeta | null>;
   /** Own sessions for developer/viewer; whole tenant for admin. */
   listForIdentity(identity: Identity): Promise<SessionMeta[]>;
+  /** Fill the title from the first prompt when a session began with an upload. */
+  setTitleIfEmpty(sessionId: string, title: string): Promise<void>;
+  /** Hide a session from history and deny future access; preserve its event log. */
+  close(sessionId: string): Promise<void>;
   /** M3: update the permission policy (session/set_config_option). */
   setPolicy(sessionId: string, policy: PermissionPolicy | string): Promise<void>;
 }
