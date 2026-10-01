@@ -30,6 +30,8 @@ import {
   type WorkspaceSelection,
 } from '@trinity-harness/client-acp';
 
+import { HistorySidebar, HistoryDivider } from './history-sidebar';
+
 import {
   mergeCommittedAssistantMessage,
   mergeCommittedUserMessage,
@@ -107,6 +109,8 @@ export default function App() {
   const { message, modal } = AntdApp.useApp();
   const [user, setUser] = useState<MeUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [historyWidthRatio, setHistoryWidthRatio] = useState(0.22);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -608,7 +612,7 @@ export default function App() {
 
   return (
     <Layout className="trinity-shell">
-      <Layout.Sider width={300} theme="light" className="trinity-sider">
+      <HistorySidebar collapsed={historyCollapsed} widthRatio={historyWidthRatio}>
         <div className="sider-brand">
           <img src="/branding/trinity-logo.png" alt="Trinity logo" />
           <div>
@@ -681,13 +685,31 @@ export default function App() {
             )}
           />
         </div>
-      </Layout.Sider>
+      </HistorySidebar>
+      <HistoryDivider
+        collapsed={historyCollapsed}
+        widthRatio={historyWidthRatio}
+        onToggle={() => setHistoryCollapsed((collapsed) => !collapsed)}
+        onResize={(ratio) => {
+          setHistoryWidthRatio(ratio);
+          setHistoryCollapsed(false);
+        }}
+      />
       <Layout.Content className="trinity-content">
         <Flex vertical className="workspace-frame">
-          <Flex justify="space-between" align="center" wrap gap={8} className="workspace-header">
+          <Flex justify="space-between" align="center" gap={8} className="workspace-header">
+            {historyCollapsed && (
+              <Button
+                size="small"
+                onClick={newChat}
+                aria-label="New conversation"
+                title="New conversation"
+              >
+                ＋
+              </Button>
+            )}
             <div className="workspace-heading">
-              <span className="eyebrow">AI WORKSPACE</span>
-              <Typography.Title level={4}>
+              <Typography.Title level={4} title={activeTitle || sessionId || 'New conversation'}>
                 {sessionId ? 'Conversation' : 'New conversation'}{' '}
                 {sessionId ? (
                   <Typography.Text type="secondary">
@@ -709,7 +731,7 @@ export default function App() {
                 }
                 disabled={busy || !!sessionRef.current}
                 options={workspaceOptions}
-                style={{ minWidth: 200 }}
+                style={{ width: 160 }}
                 title="Workspace for the next session"
               />
               {workspace.scope === 'personal' && (
@@ -737,7 +759,7 @@ export default function App() {
                   { value: 'read-only', label: 'read-only' },
                   { value: 'danger-full-access', label: 'danger-full-access + never' },
                 ]}
-                style={{ width: 200 }}
+                style={{ width: 185 }}
               />
               <Typography.Text type="secondary" className="user-label">
                 {user.email} ({user.role})
