@@ -12,6 +12,7 @@
   "dependencies": {
     "@ant-design/x": "^1.6.1",
     "@trinity-harness/client-acp": "*",
+    "@trinity-harness/shared": "*",
     "antd": "^5.29.3",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

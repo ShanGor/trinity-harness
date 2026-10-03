@@ -5,6 +5,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    host: '0.0.0.0',
+    allowedHosts: ['sam-pc'],
     proxy: {
       // Browser talks only to the vite dev server; API calls are forwarded.
       '/api': 'http://127.0.0.1:3000',

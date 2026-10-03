@@ -104,3 +104,28 @@ describe('mergeCommittedAssistantMessage', () => {
     expect(merged[3]).toMatchObject({ role: 'assistant', content: 'turn two', streaming: false });
   });
 });
+
+describe('newItemKey', () => {
+  it('returns unique v7-shaped keys even without crypto.randomUUID (http LAN origins)', async () => {
+    const original = crypto.randomUUID;
+    // Plain-http LAN origins (e.g. http://sam-pc:5173) are not secure
+    // contexts, so crypto.randomUUID is absent there — simulate that.
+    // newId() only needs crypto.getRandomValues, which IS available.
+    delete (crypto as { randomUUID?: unknown }).randomUUID;
+    try {
+      const { newItemKey } = await import('../src/chat-items');
+      const keys = new Set(Array.from({ length: 200 }, () => newItemKey()));
+      expect(keys.size).toBe(200);
+      for (const k of keys) {
+        expect(k).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      }
+    } finally {
+      crypto.randomUUID = original;
+    }
+  });
+
+  it('produces v7 ids in secure contexts too', async () => {
+    const { newItemKey } = await import('../src/chat-items');
+    expect(newItemKey()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+});

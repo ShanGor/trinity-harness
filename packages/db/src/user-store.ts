@@ -1,5 +1,6 @@
 import type { Identity, PasswordHasher, Role, User, UserStore } from '@trinity-harness/contracts';
 import { asc, eq } from 'drizzle-orm';
+import { newId } from '@trinity-harness/shared';
 
 import type { Db } from './client.js';
 import { users } from './schema.js';
@@ -51,6 +52,7 @@ export class PgUserStore implements UserStore {
     const [row] = await this.db
       .insert(users)
       .values({
+        id: newId(),
         tenantId: input.tenantId,
         email: input.email,
         passwordHash: input.passwordHash,

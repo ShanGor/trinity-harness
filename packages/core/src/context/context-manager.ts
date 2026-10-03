@@ -6,6 +6,7 @@ import type {
   SessionStore,
 } from '@trinity-harness/contracts';
 import { compactionRanges, isCompacted } from '@trinity-harness/contracts';
+import { newId } from '@trinity-harness/shared';
 
 import { heuristicEstimator, type TokenEstimator } from './estimate-tokens.js';
 import { toModelMessages } from '../loop/to-model-messages.js';
@@ -152,7 +153,7 @@ export class ContextManager {
       sessionId,
       [
         {
-          eventId: crypto.randomUUID(),
+          eventId: newId(),
           at: new Date().toISOString(),
           type: 'compaction/summary',
           fromSeq,

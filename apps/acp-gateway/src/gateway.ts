@@ -1,6 +1,7 @@
 import { once } from 'node:events';
 
 import * as acp from '@agentclientprotocol/sdk';
+import { newId } from '@trinity-harness/shared';
 
 /**
  * acp-gateway (docs/design.md §11.1/§11.2): a stdio ↔ HTTP ACP proxy.
@@ -235,7 +236,7 @@ export function createAcpGateway(http: GatewayHttp): acp.AgentApp {
   };
 
   const rpcResult = async (method: string, params: unknown): Promise<unknown> => {
-    const res = (await http.rpc({ jsonrpc: '2.0', id: crypto.randomUUID(), method, params })) as {
+    const res = (await http.rpc({ jsonrpc: '2.0', id: newId(), method, params })) as {
       result?: unknown;
     };
     return res.result ?? {};

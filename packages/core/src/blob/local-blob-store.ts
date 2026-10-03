@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { BlobMeta, BlobStore } from '@trinity-harness/contracts';
 import { BLOB_URI_SCHEME, blobKeyOf } from '@trinity-harness/contracts';
+import { newId } from '@trinity-harness/shared';
 
 /**
  * Filesystem BlobStore adapter (M4, docs/design.md §10): stores blobs under
@@ -26,7 +26,7 @@ export class LocalBlobStore implements BlobStore {
     data: Uint8Array,
     opts: { mimeType: string },
   ): Promise<BlobMeta> {
-    const finalKey = key ?? randomUUID();
+    const finalKey = key ?? newId();
     const abs = this.abs(finalKey);
     await mkdir(path.dirname(abs), { recursive: true });
     await writeFile(abs, data);

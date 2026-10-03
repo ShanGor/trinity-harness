@@ -1,5 +1,7 @@
 import { eq } from 'drizzle-orm';
 
+import { newId } from '@trinity-harness/shared';
+
 import type { Db } from './client.js';
 import { tenants } from './schema.js';
 
@@ -11,7 +13,7 @@ export interface Tenant {
 
 /** Bootstrap helper: default tenant creation at server startup / seeding. */
 export async function createTenant(db: Db, name: string): Promise<Tenant> {
-  const [row] = await db.insert(tenants).values({ name }).returning();
+  const [row] = await db.insert(tenants).values({ id: newId(), name }).returning();
   if (!row) throw new Error('createTenant: no row returned');
   return { id: row.id, name: row.name, createdAt: new Date(row.createdAt).toISOString() };
 }

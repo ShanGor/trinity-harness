@@ -1,5 +1,6 @@
 import type { AgentLoop, PermissionPolicy, ToolDefinition } from '@trinity-harness/contracts';
 import { parsePermissionPolicy } from '@trinity-harness/contracts';
+import { newId } from '@trinity-harness/shared';
 import { z } from 'zod';
 
 import { defineTool } from './define-tool.js';
@@ -40,7 +41,7 @@ export function createSubagentTool(opts: SubagentToolOptions): ToolDefinition {
     }),
     timeoutMs: 600_000,
     execute: async (args, ctx): Promise<{ value: unknown; isError: boolean }> => {
-      const childId = crypto.randomUUID();
+      const childId = newId();
       // The child's Loop is created per call by the factory; the child store
       // lives inside it (fresh context = nothing replays into the parent).
       const loop: AgentLoop = opts.createLoop();

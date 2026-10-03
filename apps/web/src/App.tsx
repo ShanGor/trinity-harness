@@ -35,6 +35,7 @@ import { HistorySidebar, HistoryDivider } from './history-sidebar';
 import {
   mergeCommittedAssistantMessage,
   mergeCommittedUserMessage,
+  newItemKey,
   type AttachmentView,
   type ChatItem,
   type ToolCallView,
@@ -193,7 +194,7 @@ export default function App() {
           // Live: fill the optimistic placeholder. Replay: append a new item
           // (see chat-items.ts — the placeholder only exists in the live flow).
           setItems((prev) =>
-            mergeCommittedAssistantMessage(prev, event.message.content, () => crypto.randomUUID()),
+            mergeCommittedAssistantMessage(prev, event.message.content, newItemKey),
           );
         } else {
           // Replayed/relayed user message — skip if we already rendered it
@@ -206,7 +207,7 @@ export default function App() {
                 content: event.message.content,
                 attachments: event.message.attachments,
               },
-              () => crypto.randomUUID(),
+              newItemKey,
             ),
           );
         }
@@ -459,7 +460,7 @@ export default function App() {
       setItems((prev) => [
         ...prev,
         {
-          key: crypto.randomUUID(),
+          key: newItemKey(),
           role: 'user',
           content: trimmed || '[attachments]',
           streaming: false,
@@ -467,7 +468,7 @@ export default function App() {
           attachments: sent,
         },
         {
-          key: crypto.randomUUID(),
+          key: newItemKey(),
           role: 'assistant',
           content: '',
           streaming: true,

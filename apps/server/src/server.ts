@@ -26,6 +26,7 @@ import type {
   UserStore,
 } from '@trinity-harness/contracts';
 import {
+  newId,
   personalFoldersQuerySchema,
   serverEventSchema,
   workspaceSelectionSchema,
@@ -590,7 +591,7 @@ export async function buildServer(
       (await deps.teams.isMember(meta.scopeId, identity.userId));
     if (!meta || meta.closedAt || !identity || (!ownOrAdmin && !teamMember)) {
       emitAudit({
-        id: crypto.randomUUID(),
+        id: newId(),
         at: new Date().toISOString(),
         tenantId: identity?.tenantId ?? NIL_TENANT,
         userId: identity?.userId ?? 'anonymous',
@@ -643,7 +644,7 @@ export async function buildServer(
       const user = await auth.users.verifyCredentials(body.data.email, body.data.password);
       if (!user) {
         emitAudit({
-          id: crypto.randomUUID(),
+          id: newId(),
           at: new Date().toISOString(),
           tenantId: NIL_TENANT,
           userId: 'anonymous',
@@ -660,7 +661,7 @@ export async function buildServer(
         role: user.role,
       });
       emitAudit({
-        id: crypto.randomUUID(),
+        id: newId(),
         at: new Date().toISOString(),
         tenantId: user.tenantId,
         userId: user.id,
@@ -683,7 +684,7 @@ export async function buildServer(
       const identity = req.identity!;
       if (identity.role !== 'admin') {
         emitAudit({
-          id: crypto.randomUUID(),
+          id: newId(),
           at: new Date().toISOString(),
           tenantId: identity.tenantId,
           userId: identity.userId,
@@ -704,7 +705,7 @@ export async function buildServer(
         role: body.data.role,
       });
       emitAudit({
-        id: crypto.randomUUID(),
+        id: newId(),
         at: new Date().toISOString(),
         tenantId: identity.tenantId,
         userId: identity.userId,
@@ -772,7 +773,7 @@ export async function buildServer(
           ownerId: identity.userId,
         });
         emitAudit({
-          id: crypto.randomUUID(),
+          id: newId(),
           at: new Date().toISOString(),
           tenantId: identity.tenantId,
           userId: identity.userId,
@@ -810,7 +811,7 @@ export async function buildServer(
         }
         await deps.teams!.addMember(teamId, user.id, 'member');
         emitAudit({
-          id: crypto.randomUUID(),
+          id: newId(),
           at: new Date().toISOString(),
           tenantId: identity.tenantId,
           userId: identity.userId,
@@ -884,7 +885,7 @@ export async function buildServer(
           const identity = req.identity!;
           if (identity.role !== 'admin') {
             emitAudit({
-              id: crypto.randomUUID(),
+              id: newId(),
               at: new Date().toISOString(),
               tenantId: identity.tenantId,
               userId: identity.userId,
@@ -899,7 +900,7 @@ export async function buildServer(
           }
           await deps.quotaAdmin!.setQuota(identity.tenantId, body.data);
           emitAudit({
-            id: crypto.randomUUID(),
+            id: newId(),
             at: new Date().toISOString(),
             tenantId: identity.tenantId,
             userId: identity.userId,
@@ -947,7 +948,7 @@ export async function buildServer(
         return reply.code(400).send({ error: 'invalid permission policy' });
       }
     }
-    const sessionId = crypto.randomUUID();
+    const sessionId = newId();
     const identity = req.identity;
 
     // Workspace scope: personal or team (fail-closed membership check, §12).
@@ -970,7 +971,7 @@ export async function buildServer(
       const member = await deps.teams.isMember(teamId, identity.userId);
       if (!member) {
         emitAudit({
-          id: crypto.randomUUID(),
+          id: newId(),
           at: new Date().toISOString(),
           tenantId: identity.tenantId,
           userId: identity.userId,
@@ -1017,7 +1018,7 @@ export async function buildServer(
       [
         {
           type: 'session/created',
-          eventId: crypto.randomUUID(),
+          eventId: newId(),
           at: new Date().toISOString(),
           workspaceUri: workspaceDir,
         },
@@ -1025,7 +1026,7 @@ export async function buildServer(
       { actor: identity?.userId ?? 'anonymous' },
     );
     emitAudit({
-      id: crypto.randomUUID(),
+      id: newId(),
       at: new Date().toISOString(),
       tenantId: identity?.tenantId ?? NIL_TENANT,
       userId: identity?.userId ?? 'anonymous',
@@ -1082,12 +1083,12 @@ export async function buildServer(
     deps.turns?.cancel(sessionId);
     await deps.store.append(
       sessionId,
-      [{ type: 'session/closed', eventId: crypto.randomUUID(), at: new Date().toISOString() }],
+      [{ type: 'session/closed', eventId: newId(), at: new Date().toISOString() }],
       { actor: identity.userId },
     );
     await auth.metas.close(sessionId);
     emitAudit({
-      id: crypto.randomUUID(),
+      id: newId(),
       at: new Date().toISOString(),
       tenantId: identity.tenantId,
       userId: identity.userId,
@@ -1110,7 +1111,7 @@ export async function buildServer(
     const identity = req.identity;
     if (identity?.role === 'viewer') {
       emitAudit({
-        id: crypto.randomUUID(),
+        id: newId(),
         at: new Date().toISOString(),
         tenantId: identity.tenantId,
         userId: identity.userId,
@@ -1122,7 +1123,7 @@ export async function buildServer(
     }
     await auth?.metas.setTitleIfEmpty(sessionId, body.data.text.trim().slice(0, 200));
     emitAudit({
-      id: crypto.randomUUID(),
+      id: newId(),
       at: new Date().toISOString(),
       tenantId: identity?.tenantId ?? NIL_TENANT,
       userId: identity?.userId ?? 'anonymous',
@@ -1140,7 +1141,7 @@ export async function buildServer(
         [
           {
             type: 'message/user',
-            eventId: crypto.randomUUID(),
+            eventId: newId(),
             at: new Date().toISOString(),
             surfaceOp: 'append',
             content: promptContent(body.data.text, body.data.attachments),
@@ -1170,7 +1171,7 @@ export async function buildServer(
       [
         {
           type: 'message/user',
-          eventId: crypto.randomUUID(),
+          eventId: newId(),
           at: new Date().toISOString(),
           surfaceOp: 'append',
           content: promptContent(body.data.text, body.data.attachments),
@@ -1243,7 +1244,7 @@ export async function buildServer(
           mimeType: query.data.mime,
         });
         emitAudit({
-          id: crypto.randomUUID(),
+          id: newId(),
           at: new Date().toISOString(),
           tenantId: identity?.tenantId ?? NIL_TENANT,
           userId: identity?.userId ?? 'anonymous',
@@ -1315,7 +1316,7 @@ export async function buildServer(
       await auth.metas.setPolicy(granted.sessionId, body.data.policy);
     }
     emitAudit({
-      id: crypto.randomUUID(),
+      id: newId(),
       at: new Date().toISOString(),
       tenantId: identity?.tenantId ?? NIL_TENANT,
       userId: identity?.userId ?? 'anonymous',
@@ -1339,7 +1340,7 @@ export async function buildServer(
     }
     deps.turns?.cancel(granted.sessionId);
     emitAudit({
-      id: crypto.randomUUID(),
+      id: newId(),
       at: new Date().toISOString(),
       tenantId: identity?.tenantId ?? NIL_TENANT,
       userId: identity?.userId ?? 'anonymous',
@@ -1374,7 +1375,7 @@ export async function buildServer(
     // Durable trail (idempotent, first writer wins) + audit + channel reply.
     await deps.approvalStore?.resolve(approvalId, body.data.outcome, decidedBy);
     emitAudit({
-      id: crypto.randomUUID(),
+      id: newId(),
       at: new Date().toISOString(),
       tenantId: identity?.tenantId ?? NIL_TENANT,
       userId: decidedBy,
@@ -1729,7 +1730,7 @@ export async function buildServer(
 
         case 'session/new': {
           const cwd = typeof params['cwd'] === 'string' ? params['cwd'] : deps.workspaceRoot;
-          const sessionId = crypto.randomUUID();
+          const sessionId = newId();
           if (auth) {
             await auth.metas.create({
               id: sessionId,
@@ -1744,7 +1745,7 @@ export async function buildServer(
             [
               {
                 type: 'session/created',
-                eventId: crypto.randomUUID(),
+                eventId: newId(),
                 at: new Date().toISOString(),
                 workspaceUri: cwd,
               },
@@ -1826,7 +1827,7 @@ export async function buildServer(
             [
               {
                 type: 'message/user',
-                eventId: crypto.randomUUID(),
+                eventId: newId(),
                 at: new Date().toISOString(),
                 surfaceOp: 'append',
                 content: content ?? [{ kind: 'text', text }],
@@ -1901,7 +1902,7 @@ export async function buildServer(
             await auth.metas.setPolicy(granted.sessionId, value);
           }
           emitAudit({
-            id: crypto.randomUUID(),
+            id: newId(),
             at: new Date().toISOString(),
             tenantId: identity?.tenantId ?? NIL_TENANT,
             userId: identity?.userId ?? 'anonymous',

@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.5.0",
+    "@trinity-harness/shared": "*",
     "dotenv": "^18.0.4",
     "tsx": "^4.23.15",
     "zod": "^4.6.5"

@@ -4,6 +4,8 @@
  * node environment (AGENTS.md §6); no React/antd imports here.
  */
 
+import { newId } from '@trinity-harness/shared';
+
 export type ToolCallView = {
   toolCallId: string;
   title: string;
@@ -27,6 +29,14 @@ export type CommittedUserMessage = {
   content: string;
   attachments?: AttachmentView[];
 };
+
+/**
+ * RFC 4122 v7 id for ChatItem keys (time-ordered; see packages/shared).
+ * Falls back gracefully on runtimes without Web Crypto.
+ */
+export function newItemKey(): string {
+  return newId();
+}
 
 /**
  * Merge a replayed/relayed `message/committed` (role=user) into the list.

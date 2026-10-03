@@ -1,4 +1,5 @@
 import type { AgentTaskQueue, TurnTask } from '@trinity-harness/contracts';
+import { newId } from '@trinity-harness/shared';
 import { Queue, Worker, type ConnectionOptions, type Job } from 'bullmq';
 
 /**
@@ -29,7 +30,7 @@ export class RedisTurnQueue implements AgentTaskQueue {
   }
 
   async enqueue(task: TurnTask): Promise<void> {
-    await this.queue.add('turn', task, { jobId: crypto.randomUUID() });
+    await this.queue.add('turn', task, { jobId: newId() });
   }
 
   /**

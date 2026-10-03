@@ -7,6 +7,7 @@ import type {
   SessionStore,
   TurnTask,
 } from '@trinity-harness/contracts';
+import { newId } from '@trinity-harness/shared';
 
 /**
  * agent-worker turn handler (docs/design.md §4 step 3–5): claim a turn task,
@@ -50,7 +51,7 @@ export function createTurnHandler(
         }
         if (loopEvent.type === 'tool/call') {
           deps.audit.emit({
-            id: crypto.randomUUID(),
+            id: newId(),
             at: new Date().toISOString(),
             ...auditContext,
             action: 'tool/call',
@@ -60,7 +61,7 @@ export function createTurnHandler(
           });
         } else if (loopEvent.type === 'tool/result') {
           deps.audit.emit({
-            id: crypto.randomUUID(),
+            id: newId(),
             at: new Date().toISOString(),
             ...auditContext,
             action: 'tool/result',

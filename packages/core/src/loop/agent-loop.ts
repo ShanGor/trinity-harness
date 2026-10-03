@@ -18,6 +18,7 @@ import type {
   UsagePort,
 } from '@trinity-harness/contracts';
 import { windowStart } from '@trinity-harness/contracts';
+import { newId } from '@trinity-harness/shared';
 
 import type { ContextManager } from '../context/context-manager.js';
 import { PolicyToolRegistry } from '../policy-tool-registry.js';
@@ -89,7 +90,7 @@ export interface AgentLoopOptions {
 }
 
 function meta(): { eventId: string; at: string } {
-  return { eventId: crypto.randomUUID(), at: new Date().toISOString() };
+  return { eventId: newId(), at: new Date().toISOString() };
 }
 
 function isAbortError(err: unknown): boolean {
@@ -646,7 +647,7 @@ export class CoreAgentLoop implements AgentLoop {
     signal: AbortSignal | undefined,
   ): Promise<'allowed' | 'rejected'> {
     const requester = this.opts.approvals;
-    const approvalId = crypto.randomUUID();
+    const approvalId = newId();
     // M5 OTel: approval latency (docs/design.md §17 审批延迟).
     const approvalStartedAt = Date.now();
 

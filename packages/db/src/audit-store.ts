@@ -1,5 +1,6 @@
 import type { AuditPage, AuditQuery, AuditRecord, AuditStore } from '@trinity-harness/contracts';
 import { auditRecordSchema } from '@trinity-harness/contracts';
+import { newId } from '@trinity-harness/shared';
 import { and, count, desc, eq, type SQL } from 'drizzle-orm';
 
 import type { Db } from './client.js';
@@ -77,5 +78,5 @@ export class PgAuditStore implements AuditStore {
 
 /** Convenience for producers building a record (id/at filled here). */
 export function newAuditRecord(input: Omit<AuditRecord, 'id' | 'at'>): AuditRecord {
-  return { id: crypto.randomUUID(), at: new Date().toISOString(), ...input };
+  return { id: newId(), at: new Date().toISOString(), ...input };
 }

@@ -44,6 +44,9 @@ importers:
       '@agentclientprotocol/sdk':
         specifier: ^1.5.0
         version: 1.5.0(zod@4.6.5)
+      '@trinity-harness/shared':
+        specifier: '*'
+        version: link:../../packages/shared
       dotenv:
         specifier: ^18.0.4
         version: 18.0.4
@@ -66,9 +69,6 @@ importers:
       '@trinity-harness/redis':
         specifier: '*'
         version: link:../../packages/redis
-      '@trinity-harness/shared':
-        specifier: '*'
-        version: link:../../packages/shared
       '@types/pg':
         specifier: ^8.23.1
         version: 8.23.1
@@ -191,6 +191,9 @@ importers:
       '@trinity-harness/client-acp':
         specifier: '*'
         version: link:../../packages/client-acp
+      '@trinity-harness/shared':
+        specifier: '*'
+        version: link:../../packages/shared
       antd:
         specifier: ^5.29.3
         version: 5.29.3(luxon@3.7.2)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -207,9 +210,6 @@ importers:
         specifier: ^4.0.1
         version: 4.0.1(supports-color@7.1.0)
     devDependencies:
-      '@trinity-harness/shared':
-        specifier: '*'
-        version: link:../../packages/shared
       '@types/react':
         specifier: ^19.3.0
         version: 19.3.0
@@ -330,6 +330,9 @@ importers:
       '@trinity-harness/contracts':
         specifier: '*'
         version: link:../contracts
+      '@trinity-harness/shared':
+        specifier: '*'
+        version: link:../shared
       bullmq:
         specifier: ^5.0.0
         version: 5.81.5(supports-color@7.1.0)

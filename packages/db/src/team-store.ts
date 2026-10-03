@@ -1,5 +1,6 @@
 import type { Team, TeamRole, TeamStore } from '@trinity-harness/contracts';
 import { and, eq } from 'drizzle-orm';
+import { newId } from '@trinity-harness/shared';
 
 import type { Db } from './client.js';
 import { teamMembers, teams, users } from './schema.js';
@@ -21,7 +22,7 @@ export class PgTeamStore implements TeamStore {
     return this.db.transaction(async (tx) => {
       const [row] = await tx
         .insert(teams)
-        .values({ tenantId: input.tenantId, name: input.name })
+        .values({ id: newId(), tenantId: input.tenantId, name: input.name })
         .returning();
       if (!row) throw new Error('team insert returned no row');
       await tx.insert(teamMembers).values({ teamId: row.id, userId: input.ownerId, role: 'owner' });
