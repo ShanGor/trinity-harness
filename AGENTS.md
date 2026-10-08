@@ -91,6 +91,7 @@ An enterprise-grade, multi-user, browser ↔ server AI Agent platform (core scen
 
 - **New/modified logic must come with tests**. Layers:
   - Pure functions (projections, reducers, renders) → unit tests, mandatory.
+  - Web interactions → per-file jsdom environment with a fake ACP client; test focus/draft preservation and avoid rerendering unchanged history/messages while typing or streaming. Vitest inlines antd/antd-x for their ESM imports.
   - Port implementations → integration tests with in-memory fakes or testcontainers.
   - Loop → drive event sequences with fake `LLMPort` / fake `ToolRegistry`, assert the log event stream.
 - Tests must be deterministic: no reliance on real network, real LLMs, or real clocks (inject a clock).

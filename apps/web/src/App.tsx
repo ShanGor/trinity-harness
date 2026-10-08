@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 
 import type { ServerEvent, SessionUpdate } from '@trinity-harness/shared';
 import {
@@ -19,7 +19,7 @@ import {
   Typography,
   Upload,
 } from 'antd';
-import { Bubble, Sender } from '@ant-design/x';
+import { Bubble } from '@ant-design/x';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -31,6 +31,7 @@ import {
 } from '@trinity-harness/client-acp';
 
 import { HistorySidebar, HistoryDivider } from './history-sidebar';
+import { ChatComposer } from './chat-composer';
 
 import {
   mergeCommittedAssistantMessage,
@@ -119,7 +120,7 @@ export default function App() {
   /** Workspace for the NEXT session (existing sessions keep their own). */
   const [workspace, setWorkspace] = useState<WorkspaceSelection>({ scope: 'personal' });
   const [busy, setBusy] = useState(false);
-  const [input, setInput] = useState('');
+  const [draftResetVersion, setDraftResetVersion] = useState(0);
   const [approval, setApproval] = useState<PendingApproval | null>(null);
   const [policy, setPolicy] = useState<string>('workspace-write');
   const [teamsOpen, setTeamsOpen] = useState(false);
@@ -371,7 +372,7 @@ export default function App() {
       setApproval(null);
       setStaged([]);
       setBusy(false);
-      setInput('');
+      setDraftResetVersion((version) => version + 1);
       activateSession(id, 0);
     },
     [activateSession],
@@ -384,7 +385,7 @@ export default function App() {
     setApproval(null);
     setStaged([]);
     setBusy(false);
-    setInput('');
+    setDraftResetVersion((version) => version + 1);
     sessionRef.current = null;
     setSessionId(null);
   }, []);
@@ -492,29 +493,6 @@ export default function App() {
 
   const activeTitle = sessions.find((s) => s.sessionId === sessionId)?.title;
 
-  const bubbleItems = useMemo(
-    () =>
-      items.map((item) => ({
-        key: item.key,
-        role: item.role,
-        content: item.content,
-        messageRender: (content: string) =>
-          item.role === 'assistant' ? (
-            <AssistantContent item={item} content={content} />
-          ) : (
-            <div>
-              {content.length > 0 && (
-                <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>
-                  {content}
-                </Typography.Paragraph>
-              )}
-              <AttachmentList attachments={item.attachments} />
-            </div>
-          ),
-      })),
-    [items],
-  );
-
   const chatPanel = (
     <div className="chat-panel">
       {items.length === 0 && (
@@ -527,16 +505,7 @@ export default function App() {
           </Typography.Text>
         </div>
       )}
-      {items.length > 0 && (
-        <Bubble.List
-          className="chat-messages"
-          items={bubbleItems}
-          roles={{
-            user: { placement: 'end' as const },
-            assistant: { placement: 'start' as const },
-          }}
-        />
-      )}
+      {items.length > 0 && <ChatTranscript items={items} />}
       {staged.length > 0 && (
         <Flex gap={8} wrap style={{ marginBottom: 8 }}>
           {staged.map((att) => (
@@ -563,15 +532,11 @@ export default function App() {
           <Button icon={<span>＋</span>} disabled={busy} aria-label="Attach image or PDF" />
         </Upload>
         <div style={{ flex: 1 }}>
-          <Sender
-            value={input}
-            onChange={setInput}
-            onSubmit={(text) => {
-              setInput('');
-              void onSubmit(text);
-            }}
-            loading={busy}
-            placeholder="Describe a coding task…"
+          <ChatComposer
+            busy={busy}
+            resetVersion={draftResetVersion}
+            onSubmit={onSubmit}
+            onCancel={onCancelTurn}
           />
         </div>
       </Flex>
@@ -626,64 +591,14 @@ export default function App() {
         </Button>
         <span className="sider-section-label">Recent conversations</span>
         <div className="history-scroll">
-          <List
-            size="small"
-            dataSource={sessions}
-            locale={{ emptyText: 'No sessions yet' }}
-            renderItem={(s) => (
-              <List.Item
-                onClick={() => switchSession(s.sessionId)}
-                className={`history-item${s.sessionId === sessionId ? ' active' : ''}`}
-                actions={[
-                  <Dropdown
-                    key="actions"
-                    menu={{
-                      items: [
-                        { key: 'export', label: 'Export JSON' },
-                        {
-                          key: 'delete',
-                          label: 'Delete',
-                          danger: true,
-                          disabled:
-                            user.role === 'viewer' ||
-                            (user.role !== 'admin' && s.userId !== user.id),
-                        },
-                      ],
-                      onClick: ({ key, domEvent }) => {
-                        domEvent.stopPropagation();
-                        if (key === 'export') void exportSession(s.sessionId);
-                        if (key === 'delete') confirmDeleteSession(s.sessionId);
-                      },
-                    }}
-                  >
-                    <Button size="small" type="text" onClick={(event) => event.stopPropagation()}>
-                      ⋯
-                    </Button>
-                  </Dropdown>,
-                ]}
-              >
-                <List.Item.Meta
-                  title={
-                    <Typography.Text
-                      ellipsis
-                      style={{ maxWidth: 200, fontWeight: s.sessionId === sessionId ? 600 : 400 }}
-                    >
-                      {s.title || '(untitled)'}
-                    </Typography.Text>
-                  }
-                  description={
-                    <Flex gap={8} align="center">
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {new Date(s.createdAt).toLocaleString()}
-                      </Typography.Text>
-                      <Tag style={{ fontSize: 11, lineHeight: '14px' }}>
-                        {workspaceLabel(s, teams)}
-                      </Tag>
-                    </Flex>
-                  }
-                />
-              </List.Item>
-            )}
+          <RecentConversations
+            sessions={sessions}
+            sessionId={sessionId}
+            user={user}
+            teams={teams}
+            onSelect={switchSession}
+            onExport={exportSession}
+            onDelete={confirmDeleteSession}
           />
         </div>
       </HistorySidebar>
@@ -844,6 +759,128 @@ export default function App() {
     </Layout>
   );
 }
+
+const RecentConversations = memo(function RecentConversations({
+  sessions,
+  sessionId,
+  user,
+  teams,
+  onSelect,
+  onExport,
+  onDelete,
+}: {
+  sessions: SessionSummary[];
+  sessionId: string | null;
+  user: MeUser;
+  teams: TeamView[];
+  onSelect: (id: string) => void;
+  onExport: (id: string) => Promise<void>;
+  onDelete: (id: string) => void;
+}): ReactElement {
+  return (
+    <List
+      size="small"
+      dataSource={sessions}
+      locale={{ emptyText: 'No sessions yet' }}
+      renderItem={(s) => (
+        <List.Item
+          onClick={() => onSelect(s.sessionId)}
+          className={`history-item${s.sessionId === sessionId ? ' active' : ''}`}
+          actions={[
+            <Dropdown
+              key="actions"
+              menu={{
+                items: [
+                  { key: 'export', label: 'Export JSON' },
+                  {
+                    key: 'delete',
+                    label: 'Delete',
+                    danger: true,
+                    disabled:
+                      user.role === 'viewer' || (user.role !== 'admin' && s.userId !== user.id),
+                  },
+                ],
+                onClick: ({ key, domEvent }) => {
+                  domEvent.stopPropagation();
+                  if (key === 'export') void onExport(s.sessionId);
+                  if (key === 'delete') onDelete(s.sessionId);
+                },
+              }}
+            >
+              <Button size="small" type="text" onClick={(event) => event.stopPropagation()}>
+                ⋯
+              </Button>
+            </Dropdown>,
+          ]}
+        >
+          <List.Item.Meta
+            title={
+              <Typography.Text
+                ellipsis
+                style={{ maxWidth: 200, fontWeight: s.sessionId === sessionId ? 600 : 400 }}
+              >
+                {s.title || '(untitled)'}
+              </Typography.Text>
+            }
+            description={
+              <Flex gap={8} align="center">
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {new Date(s.createdAt).toLocaleString()}
+                </Typography.Text>
+                <Tag style={{ fontSize: 11, lineHeight: '14px' }}>{workspaceLabel(s, teams)}</Tag>
+              </Flex>
+            }
+          />
+        </List.Item>
+      )}
+    />
+  );
+});
+
+const bubbleRoles = {
+  user: { placement: 'end' as const },
+  assistant: { placement: 'start' as const },
+};
+
+function renderChatMessage(item: ChatItem): ReactElement {
+  return <ChatMessageContent item={item} />;
+}
+
+const ChatTranscript = memo(function ChatTranscript({
+  items,
+}: {
+  items: ChatItem[];
+}): ReactElement {
+  const bubbleItems = useMemo(
+    () =>
+      items.map((item) => ({
+        key: item.key,
+        role: item.role,
+        content: item,
+        messageRender: renderChatMessage,
+      })),
+    [items],
+  );
+  return <Bubble.List className="chat-messages" items={bubbleItems} roles={bubbleRoles} />;
+});
+
+const ChatMessageContent = memo(function ChatMessageContent({
+  item,
+}: {
+  item: ChatItem;
+}): ReactElement {
+  if (item.role === 'assistant') return <AssistantContent item={item} content={item.content} />;
+  return (
+    <div>
+      {item.content.length > 0 && (
+        <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>
+          {item.content}
+        </Typography.Paragraph>
+      )}
+      <AttachmentList attachments={item.attachments} />
+    </div>
+  );
+});
 
 /** Markdown-rendered assistant bubble: streaming deltas + tool calls below. */
 function AssistantContent({ item, content }: { item: ChatItem; content: string }) {

@@ -447,6 +447,7 @@ PG 是唯一事实源：即使 Redis Stream 被截断、SSE 连接中断，任�
 - 状态管理：事件 reducer 将 `session/update` 折叠进 `createStore`/`zustand` store（消息 part 增量合并，delta 聚合）。
 - antd 组件与 ACP 消息类型一一对应：`session/update(tool_call)` → ToolCall 折叠面板；`request_permission` → 审批 Modal。
 - Web UI（apps/web）：左侧会话历史栏（`GET /api/sessions`，点击经 SSE `afterSeq=0` 重放日志还原会话）；工作区选择器（个人 / 我所属的团队，`POST /api/sessions` 的 `workspace` 字段）；assistant 消息以 Markdown 渲染（react-markdown + remark-gfm）。
+- 输入草稿保存在独立的 composer 组件内，避免每次按键重新渲染历史栏和消息列表；消息使用稳定的 render 函数和 memo，流式更新只重绘变化的消息。首次创建会话、流式响应和布局调整保留 textarea 节点及草稿；显式新建或切换会话才清空草稿。DOM 回归测试使用 jsdom 和模拟 ACP client，检查焦点、草稿以及未变化消息的渲染次数；Vitest 内联 antd / antd-x 依赖以解析其 ESM 导入。
 
 ---
 
