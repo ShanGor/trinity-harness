@@ -8,6 +8,7 @@ import {
   Dropdown,
   Flex,
   Form,
+  Image,
   Input,
   Layout,
   List,
@@ -32,6 +33,7 @@ import {
 
 import { HistorySidebar, HistoryDivider } from './history-sidebar';
 import { ChatComposer } from './chat-composer';
+import './chat-layout.css';
 
 import {
   mergeCommittedAssistantMessage,
@@ -506,40 +508,65 @@ export default function App() {
         </div>
       )}
       {items.length > 0 && <ChatTranscript items={items} />}
-      {staged.length > 0 && (
-        <Flex gap={8} wrap style={{ marginBottom: 8 }}>
-          {staged.map((att) => (
-            <Tag
-              key={att.uri}
-              closable
-              onClose={() => setStaged((prev) => prev.filter((s) => s.uri !== att.uri))}
+      <div className="composer-dock">
+        <div className="composer-card">
+          {staged.length > 0 && (
+            <div className="composer-attachments" role="group" aria-label="Attached files">
+              {staged.map((att) =>
+                att.kind === 'image' ? (
+                  <div className="staged-image-card" key={att.uri}>
+                    <AttachmentItem attachment={att} size={48} />
+                    <Typography.Text ellipsis title={att.name} className="staged-image-name">
+                      {att.name}
+                    </Typography.Text>
+                    <Button
+                      className="staged-image-remove"
+                      type="text"
+                      shape="circle"
+                      size="small"
+                      aria-label={`Remove ${att.name}`}
+                      onClick={() => setStaged((prev) => prev.filter((s) => s.uri !== att.uri))}
+                    >
+                      ×
+                    </Button>
+                  </div>
+                ) : (
+                  <Tag
+                    className="staged-file-tag"
+                    key={att.uri}
+                    closable
+                    onClose={() => setStaged((prev) => prev.filter((s) => s.uri !== att.uri))}
+                  >
+                    📄 {att.name}
+                  </Tag>
+                ),
+              )}
+            </div>
+          )}
+          <Flex gap={8} align="center" className="chat-composer">
+            <Upload
+              beforeUpload={(file) => {
+                void onStageFile(file as unknown as File);
+                return false; // keep antd from posting the file itself
+              }}
+              showUploadList={false}
+              accept="image/png,image/jpeg,image/webp,image/gif,application/pdf"
+              disabled={busy}
             >
-              {att.kind === 'file' ? '📄' : '🖼️'} {att.name}
-            </Tag>
-          ))}
-        </Flex>
-      )}
-      <Flex gap={8} align="end" className="chat-composer">
-        <Upload
-          beforeUpload={(file) => {
-            void onStageFile(file as unknown as File);
-            return false; // keep antd from posting the file itself
-          }}
-          showUploadList={false}
-          accept="image/png,image/jpeg,image/webp,image/gif,application/pdf"
-          disabled={busy}
-        >
-          <Button icon={<span>＋</span>} disabled={busy} aria-label="Attach image or PDF" />
-        </Upload>
-        <div style={{ flex: 1 }}>
-          <ChatComposer
-            busy={busy}
-            resetVersion={draftResetVersion}
-            onSubmit={onSubmit}
-            onCancel={onCancelTurn}
-          />
+              <Button icon={<span>＋</span>} disabled={busy} aria-label="Attach image or PDF" />
+            </Upload>
+            <div className="chat-composer-input">
+              <ChatComposer
+                busy={busy}
+                resetVersion={draftResetVersion}
+                onSubmit={onSubmit}
+                onCancel={onCancelTurn}
+              />
+            </div>
+          </Flex>
         </div>
-      </Flex>
+        <p className="composer-hint">Enter to send · Shift + Enter for a new line</p>
+      </div>
     </div>
   );
 
@@ -923,21 +950,69 @@ function AttachmentList({ attachments }: { attachments: AttachmentView[] }) {
   if (attachments.length === 0) return null;
   return (
     <Flex gap={8} wrap style={{ marginBottom: 8 }}>
-      {attachments.map((att) =>
-        att.kind === 'image' ? (
-          <img
-            key={att.uri}
-            src={client.blobUrl(att.uri)}
-            alt={att.uri}
-            style={{ maxWidth: 320, maxHeight: 240, borderRadius: 8 }}
-          />
-        ) : (
-          <a key={att.uri} href={client.blobUrl(att.uri)} target="_blank" rel="noreferrer">
-            📄 {att.mimeType ?? 'document'}
-          </a>
-        ),
-      )}
+      {attachments.map((att) => (
+        <AttachmentItem key={att.uri} attachment={att} />
+      ))}
     </Flex>
+  );
+}
+
+function AttachmentItem({
+  attachment,
+  size = 80,
+}: {
+  attachment: AttachmentView;
+  size?: number;
+}): ReactElement {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    setFailed(false);
+    setUrl(null);
+    void client
+      .fetchBlob(attachment.uri, controller.signal)
+      .then((blob) => {
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setFailed(true);
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [attachment.uri]);
+
+  if (!url) {
+    return (
+      <Typography.Text type={failed ? 'danger' : 'secondary'}>
+        {failed ? 'Attachment unavailable' : 'Loading attachment…'}
+      </Typography.Text>
+    );
+  }
+
+  if (attachment.kind === 'image') {
+    return (
+      <Image
+        src={url}
+        alt={attachment.mimeType ?? 'Uploaded image'}
+        width={size}
+        height={size}
+        style={{ objectFit: 'cover', borderRadius: 8 }}
+        preview={{ src: url }}
+      />
+    );
+  }
+
+  return (
+    <a href={url} target="_blank" rel="noreferrer">
+      📄 {attachment.mimeType ?? 'document'}
+    </a>
   );
 }
 

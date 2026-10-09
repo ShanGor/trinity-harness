@@ -235,6 +235,18 @@ export class AcpClient {
     return (await res.json()) as { uri: string; mimeType: string; size: number };
   }
 
+  /** Fetch an attachment with the same bearer authentication as other API calls. */
+  async fetchBlob(uri: string, signal?: AbortSignal): Promise<Blob> {
+    const res = await fetch(this.blobUrl(uri), {
+      headers: this.authHeaders(),
+      ...(signal ? { signal } : {}),
+    });
+    if (!res.ok) {
+      throw new Error(`fetchBlob failed: ${res.status}`);
+    }
+    return res.blob();
+  }
+
   /** Public blob URL for UI rendering (`/api/blobs/<key>` strips blob://). */
   blobUrl(uri: string): string {
     return `${this.baseUrl}/api/blobs/${uri.replace('blob://', '')}`;
