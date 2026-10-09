@@ -11,7 +11,8 @@ const fake = vi.hoisted(() => ({
   onEvent: undefined as ((event: ServerEvent) => void) | undefined,
   markdown: vi.fn(),
   sendPrompt: vi.fn(async () => undefined),
-  cancelTurn: vi.fn(async () => undefined),
+  respondApproval: vi.fn(async () => undefined),
+  cancelTurn: vi.fn(async () => ({ ok: true as const, alreadyStopped: false })),
 }));
 
 vi.mock('react-markdown', () => ({
@@ -36,6 +37,7 @@ vi.mock('@trinity-harness/client-acp', () => ({
     createSession = async () => 'new-session';
     sendPrompt = fake.sendPrompt;
     cancelTurn = fake.cancelTurn;
+    respondApproval = fake.respondApproval;
     openEventStream(_id: string, handlers: { onEvent: (event: ServerEvent) => void }) {
       fake.onEvent = handlers.onEvent;
       return { close: () => undefined };
@@ -47,6 +49,7 @@ vi.mock('@trinity-harness/client-acp', () => ({
 let container: HTMLDivElement;
 let root: Root;
 let dateRender: ReturnType<typeof vi.spyOn>;
+let clipboardDescriptor: PropertyDescriptor | undefined;
 
 async function type(textarea: HTMLTextAreaElement, value: string): Promise<void> {
   await act(async () => {
@@ -68,6 +71,8 @@ async function emit(event: ServerEvent): Promise<void> {
 }
 
 beforeEach(async () => {
+  clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-08T06:00:00Z'));
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('matchMedia', () => ({
     matches: false,
@@ -107,9 +112,209 @@ afterEach(async () => {
   sessionStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  if (clipboardDescriptor) Object.defineProperty(navigator, 'clipboard', clipboardDescriptor);
+  else Reflect.deleteProperty(navigator, 'clipboard');
 });
 
 describe('chat typing and streaming performance', () => {
+  it('replays a single response with collapsed activity and Trinity-style source evidence', async () => {
+    await click(container.querySelector('.history-item'));
+    await emit({ type: 'message/committed', message: { role: 'user', content: 'Research' } });
+    await emit({
+      type: 'message/committed',
+      message: { role: 'assistant', content: 'Reading primary sources', phase: 'progress' },
+    });
+    await emit({
+      type: 'session/update',
+      update: { kind: 'tool_call', toolCallId: 'read', title: 'browser', status: 'completed' },
+    });
+    const citations = [
+      {
+        kind: 'web_source' as const,
+        label: 'Primary announcement',
+        url: 'https://example.com/announcement',
+        detail: 'Observed public passage.',
+        callId: 'read',
+        evidenceSeq: 5,
+      },
+    ];
+    await emit({
+      type: 'message/committed',
+      message: {
+        role: 'assistant',
+        content: 'A supported answer',
+        phase: 'final',
+        citationList: citations,
+      },
+    });
+    await emit({ type: 'session/turn_status', status: 'completed' });
+    expect(container.querySelectorAll('.assistant-response')).toHaveLength(1);
+    expect(container.querySelector('.md')?.textContent).toBe('A supported answer');
+    expect(container.querySelector('.turn-activity')?.hasAttribute('open')).toBe(false);
+    expect(container.querySelector('.answer-sources')?.textContent).toContain(
+      'Sources · 1 citation · 1 source',
+    );
+    const textarea = container.querySelector('textarea')!;
+    await act(async () => textarea.focus());
+    await type(textarea, 'Next draft');
+    fake.markdown.mockClear();
+    await click(
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'View evidence',
+      ) ?? null,
+    );
+    const link = document.body.querySelector<HTMLAnchorElement>('.answer-evidence a');
+    expect(link?.href).toBe('https://example.com/announcement');
+    expect(document.body.querySelector('.answer-evidence')?.textContent).toContain(
+      'Observed public passage.',
+    );
+    expect(fake.markdown).not.toHaveBeenCalled();
+    expect(textarea.value).toBe('Next draft');
+  });
+  it('clears stale approval and streaming state when an errored turn ends', async () => {
+    await click(container.querySelector('.history-item'));
+    await emit({
+      type: 'session/update',
+      update: { kind: 'agent_message_chunk', text: 'working' },
+    });
+    await emit({
+      type: 'session/update',
+      update: {
+        kind: 'permission_request',
+        approvalId: 'approval',
+        toolName: 'bash',
+        title: 'browser',
+        argsPreview: 'browser',
+        status: 'pending',
+      },
+    });
+    expect(document.body.querySelector('.ant-modal')).not.toBeNull();
+    await emit({ type: 'error', message: 'turn failed' });
+    const modal = document.body.querySelector<HTMLElement>('.ant-modal');
+    expect(
+      modal === null ||
+        modal.classList.contains('ant-zoom-leave') ||
+        modal.closest<HTMLElement>('.ant-modal-wrap')?.style.display === 'none',
+    ).toBe(true);
+    expect(container.querySelector('.response-streaming')).toBeNull();
+  });
+
+  it('offers Stop during approval and waits for the active worker terminal event', async () => {
+    await click(container.querySelector('.history-item'));
+    await emit({
+      type: 'session/update',
+      update: { kind: 'agent_message_chunk', text: 'working' },
+    });
+    await emit({
+      type: 'session/update',
+      update: {
+        kind: 'permission_request',
+        approvalId: 'approval',
+        toolName: 'bash',
+        title: 'browser',
+        argsPreview: 'browser',
+        status: 'pending',
+      },
+    });
+    await click(
+      [...document.body.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Stop task',
+      ) ?? null,
+    );
+    expect(fake.cancelTurn).toHaveBeenCalledWith('s0');
+    expect(container.querySelector('.response-streaming')).not.toBeNull();
+    await emit({ type: 'session/turn_status', status: 'aborted' });
+    expect(container.querySelector('.response-streaming')).toBeNull();
+  });
+
+  it('clears an already-stopped turn when clicking the composer Stop button', async () => {
+    await click(container.querySelector('.history-item'));
+    await emit({
+      type: 'session/update',
+      update: { kind: 'agent_message_chunk', text: 'stale working' },
+    });
+    fake.cancelTurn.mockResolvedValueOnce({ ok: true, alreadyStopped: true });
+    await click(container.querySelector('.ant-sender-actions-btn'));
+    expect(fake.cancelTurn).toHaveBeenCalledWith('s0');
+    expect(container.querySelector('.response-streaming')).toBeNull();
+    expect(container.querySelector('.md')).toBeNull();
+    expect(container.querySelector('.turn-progress')?.textContent).toContain('stale working');
+  });
+
+  it('displays chunks before commit after replay and between assistant steps', async () => {
+    await click(container.querySelector('.history-item'));
+    await emit({ type: 'message/committed', message: { role: 'user', content: 'Question' } });
+    await emit({
+      type: 'session/update',
+      update: { kind: 'agent_message_chunk', text: 'First step' },
+    });
+    expect(container.querySelector('.md')?.textContent).toContain('First step');
+    expect(container.querySelector('.response-streaming')).not.toBeNull();
+    await emit({
+      type: 'message/committed',
+      message: { role: 'assistant', content: 'First step' },
+    });
+    fake.markdown.mockClear();
+    await emit({
+      type: 'session/update',
+      update: { kind: 'agent_message_chunk', text: 'Next step' },
+    });
+    expect(Array.from(container.querySelectorAll('.md'), (node) => node.textContent)).toEqual([
+      'Next step▋',
+    ]);
+    expect(fake.markdown.mock.calls.map(([content]) => content)).toEqual(['Next step']);
+    await emit({
+      type: 'message/committed',
+      message: { role: 'assistant', content: 'Next step done' },
+    });
+    await emit({ type: 'session/turn_status', status: 'completed' });
+    expect(container.querySelectorAll('.assistant-response')).toHaveLength(1);
+    expect(container.querySelector('.turn-progress')?.textContent).toContain('First step');
+    expect(container.querySelector('.turn-activity')?.hasAttribute('open')).toBe(false);
+    expect(container.querySelector('.response-streaming')).toBeNull();
+  });
+  it('exposes named workspace controls and keyboard accessible history actions', async () => {
+    const title = container.querySelector<HTMLButtonElement>('.history-title')!;
+    expect(title.tagName).toBe('BUTTON');
+    expect(title.textContent).toBe('Conversation 0');
+    expect(container.querySelector('[aria-label="Actions for Conversation 0"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Workspace for the next session"]')).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Tool permissions for the next session"]'),
+    ).not.toBeNull();
+
+    await act(async () => title.focus());
+    expect(document.activeElement).toBe(title);
+    await click(title);
+    expect(title.getAttribute('aria-current')).toBe('true');
+    expect(container.querySelectorAll('.history-title[aria-current="true"]')).toHaveLength(1);
+    expect(fake.onEvent).toBeTypeOf('function');
+  });
+
+  it('starts with history collapsed on phones and lets the user restore it', async () => {
+    vi.stubGlobal('matchMedia', () => ({
+      matches: true,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+    }));
+    await act(async () =>
+      root.render(createElement(AntdApp, null, createElement(App, { key: 'phone' }))),
+    );
+    expect(container.querySelector('#conversation-history')?.hasAttribute('hidden')).toBe(true);
+    expect(container.querySelector('textarea')).not.toBeNull();
+    await click(container.querySelector('.history-toggle'));
+    expect(container.querySelector('#conversation-history')?.hasAttribute('hidden')).toBe(false);
+    expect(container.querySelectorAll('.history-title')).toHaveLength(30);
+  });
+
+  it('shows task guidance and composing shortcuts without submitting a prompt', () => {
+    expect(container.querySelector('.empty-chat-description')?.textContent).toContain(
+      'work through a bug',
+    );
+    expect(container.querySelector('.composer-hint')?.textContent).toContain('Shift + Enter');
+    expect(fake.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('keeps draft updates local without rerendering history or completed messages', async () => {
     await click(container.querySelector('.history-item'));
     await emit({ type: 'message/committed', message: { role: 'user', content: 'Question' } });
@@ -185,6 +390,130 @@ describe('chat typing and streaming performance', () => {
     expect(dateRender).not.toHaveBeenCalled();
   });
 
+  it('copies a response and toggles feedback without rerendering its Markdown', async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    await click(container.querySelector('.history-item'));
+    const content = '## Summary\n\n```ts\nconst value = 42;\n```';
+    await emit({ type: 'message/committed', message: { role: 'assistant', content } });
+    expect(container.querySelector('article[aria-label="Trinity response"]')).not.toBeNull();
+    fake.markdown.mockClear();
+
+    await click(container.querySelector('[aria-label="Copy response"]'));
+    expect(writeText).toHaveBeenCalledWith(content);
+    expect(container.querySelector('.response-action-status')?.textContent).toBe('Copied');
+
+    const like = container.querySelector('[aria-label="Like response"]');
+    const dislike = container.querySelector('[aria-label="Dislike response"]');
+    await click(like);
+    expect(like?.getAttribute('aria-pressed')).toBe('true');
+    expect(dislike?.getAttribute('aria-pressed')).toBe('false');
+    await click(dislike);
+    expect(like?.getAttribute('aria-pressed')).toBe('false');
+    expect(dislike?.getAttribute('aria-pressed')).toBe('true');
+    await click(dislike);
+    expect(dislike?.getAttribute('aria-pressed')).toBe('false');
+    expect(fake.markdown).not.toHaveBeenCalled();
+
+    await click(like);
+    await emit({
+      type: 'message/committed',
+      message: { role: 'user', content: 'Another question' },
+    });
+    await emit({
+      type: 'message/committed',
+      message: { role: 'assistant', content: 'Another response' },
+    });
+    const likes = container.querySelectorAll('[aria-label="Like response"]');
+    expect(likes[0]?.getAttribute('aria-pressed')).toBe('true');
+    expect(likes[1]?.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('shows clipboard failures and allows a successful retry', async () => {
+    const writeText = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Clipboard permission denied'))
+      .mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    await click(container.querySelector('.history-item'));
+    await emit({ type: 'message/committed', message: { role: 'assistant', content: 'An answer' } });
+    await click(container.querySelector('[aria-label="Copy response"]'));
+    expect(container.querySelector('.response-action-status')?.textContent).toContain(
+      'Could not copy',
+    );
+    await click(container.querySelector('[aria-label="Copy response"]'));
+    expect(container.querySelector('.response-action-status')?.textContent).toBe('Copied');
+  });
+
+  it('offers manual copying when the clipboard API is unavailable', async () => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+    await click(container.querySelector('.history-item'));
+    await emit({ type: 'message/committed', message: { role: 'assistant', content: 'An answer' } });
+    await click(container.querySelector('[aria-label="Copy response"]'));
+    expect(container.querySelector('.response-action-status')?.textContent).toContain(
+      'copy manually',
+    );
+  });
+
+  it('only shows response actions after streaming finishes', async () => {
+    const textarea = container.querySelector('textarea')!;
+    await type(textarea, 'First prompt');
+    await click(container.querySelector('.ant-sender-actions-btn'));
+    await emit({
+      type: 'session/update',
+      update: { kind: 'agent_message_chunk', text: 'In progress' },
+    });
+    expect(container.querySelector('.response-streaming')?.textContent).toBe('Responding…');
+    expect(container.querySelector('.response-actions')).toBeNull();
+    await emit({ type: 'session/turn_status', status: 'completed' });
+    expect(container.querySelector('.response-streaming')).toBeNull();
+    expect(container.querySelectorAll('.response-actions')).toHaveLength(1);
+    await click(container.querySelector('.new-chat-button'));
+    expect(container.querySelector('.response-actions')).toBeNull();
+  });
+
+  it('renders saved timestamps on both user and assistant messages during replay', async () => {
+    await click(container.querySelector('.history-item'));
+    const userAt = '2026-10-07T06:00:00.000Z';
+    const assistantAt = '2026-10-07T06:01:00.000Z';
+    await emit({
+      type: 'message/committed',
+      message: { role: 'user', content: 'Yesterday', at: userAt },
+    });
+    await emit({
+      type: 'message/committed',
+      message: { role: 'assistant', content: 'Saved reply', at: assistantAt },
+    });
+    expect(container.querySelector('.user-message-heading time')?.getAttribute('datetime')).toBe(
+      userAt,
+    );
+    expect(container.querySelector('.response-heading time')?.getAttribute('datetime')).toBe(
+      assistantAt,
+    );
+    expect(container.querySelector('.response-heading time')?.getAttribute('title')).toBe('Oct 8');
+  });
+
+  it('reconciles optimistic timestamps without clearing a draft or duplicating messages', async () => {
+    const textarea = container.querySelector('textarea')!;
+    await type(textarea, 'First prompt');
+    await click(container.querySelector('.ant-sender-actions-btn'));
+    expect(container.querySelectorAll('time.message-timestamp')).toHaveLength(2);
+    await type(textarea, 'Next draft');
+    const at = '2026-10-08T06:00:02.000Z';
+    await emit({
+      type: 'message/committed',
+      message: { role: 'user', content: 'First prompt', at },
+    });
+    await emit({ type: 'message/committed', message: { role: 'assistant', content: 'Reply', at } });
+    expect(container.querySelectorAll('time.message-timestamp')).toHaveLength(2);
+    expect(
+      [...container.querySelectorAll('time.message-timestamp')].map((node) =>
+        node.getAttribute('datetime'),
+      ),
+    ).toEqual([at, at]);
+    expect(textarea.value).toBe('Next draft');
+  });
+
   it('clears the draft when starting or selecting a conversation', async () => {
     const textarea = container.querySelector('textarea')!;
     await type(textarea, 'Draft');
@@ -202,4 +531,28 @@ describe('chat typing and streaming performance', () => {
     await click(container.querySelector('.ant-sender-actions-btn'));
     expect(fake.cancelTurn).toHaveBeenCalledWith('new-session');
   });
+});
+
+it('offers a conversation command prefix and sends it with approval', async () => {
+  await click(container.querySelector('.history-item'));
+  await emit({
+    type: 'session/update',
+    update: {
+      kind: 'permission_request',
+      approvalId: 'a',
+      toolName: 'bash',
+      toolCallId: 'c',
+      title: 'custom-cli inspect',
+      argsPreview: JSON.stringify({ command: 'custom-cli inspect' }),
+      status: 'pending',
+    },
+  });
+  const input = document.body.querySelector<HTMLInputElement>('input[aria-label="Command prefix"]');
+  expect(input?.value).toBe('custom-cli');
+  await click(
+    [...document.body.querySelectorAll('button')].find(
+      (node) => node.textContent === 'Allow pattern for conversation',
+    ) ?? null,
+  );
+  expect(fake.respondApproval).toHaveBeenCalledWith('s0', 'a', 'allowed', ['custom-cli']);
 });

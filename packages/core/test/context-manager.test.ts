@@ -99,6 +99,49 @@ describe('toModelMessages with compaction ranges', () => {
 });
 
 describe('ContextManager', () => {
+  it('summarizes only input and final output, excluding progress and tool observations', async () => {
+    const store = new MemorySessionStore();
+    await store.append('s', [
+      user('Initial question'),
+      assistant('Scattered progress'),
+      {
+        type: 'tool/call',
+        eventId: id(),
+        at: now,
+        callId: 'c',
+        name: 'bash',
+        args: { command: 'inspect' },
+      },
+      {
+        type: 'tool/result',
+        eventId: id(),
+        at: now,
+        callId: 'c',
+        value: { stdout: 'Internal tool observation' },
+        isError: false,
+      },
+      assistant('Final supported conclusion'),
+      { type: 'turn/end', eventId: id(), at: now, reason: 'completed' },
+      user('Followup'),
+    ]);
+    const llm = new FakeLLM((request) => {
+      const context = JSON.stringify(request.messages);
+      expect(context).toContain('Initial question');
+      expect(context).toContain('Final supported conclusion');
+      expect(context).not.toContain('Scattered progress');
+      expect(context).not.toContain('Internal tool observation');
+      return textChunks('Summary');
+    });
+    const manager = new ContextManager({
+      llm,
+      store,
+      model: 'fake',
+      maxTokens: 1,
+      keepTokens: 0,
+      estimate: () => 10000,
+    });
+    expect((await manager.compact('s')).compacted).toBe(true);
+  });
   function managerFor(store: MemorySessionStore, llm: FakeLLM, maxTokens = 100, keepTokens = 40) {
     return new ContextManager({
       llm,

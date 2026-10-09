@@ -73,3 +73,8 @@ export interface LiveEventSubscriber {
   /** One subscription fans out every session's live events in-process. */
   subscribe(handler: (sessionId: string, event: LoopEvent) => void): Disposable;
 }
+
+/** Await delivery of a cancellation wake-up; durable intent lives in SessionStore. */
+export interface TurnCancellationPort {
+  cancel(sessionId: string): void | Promise<void>;
+}

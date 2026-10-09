@@ -1,3 +1,4 @@
+import type { SkillRuntimePort } from '@trinity-harness/contracts';
 import type {
   AgentLoop,
   ApprovalRequester,
@@ -17,7 +18,7 @@ import type {
   TurnOutcome,
   UsagePort,
 } from '@trinity-harness/contracts';
-import { windowStart } from '@trinity-harness/contracts';
+import { turnStepBudgetSchema, windowStart } from '@trinity-harness/contracts';
 import { newId } from '@trinity-harness/shared';
 
 import type { ContextManager } from '../context/context-manager.js';
@@ -30,9 +31,11 @@ import {
   turnDuration,
   turnSteps,
 } from '../telemetry.js';
+import { matchesCommandPrefix } from '../tools/command-prefix.js';
+import { progressGuidance } from './progress-guidance.js';
 import { toModelMessages } from './to-model-messages.js';
+import { answerGrounding } from './answer-grounding.js';
 
-const DEFAULT_MAX_STEPS = 32;
 const DEFAULT_MAX_PARALLEL_TOOLS = 4;
 /** M4 spill default: tool results above 50 KB go to the BlobStore (§7). */
 const DEFAULT_SPILL_THRESHOLD_BYTES = 50_000;
@@ -45,6 +48,7 @@ export interface AgentLoopOptions {
   tools: ToolRegistry;
   store: SessionStore;
   workspaceRoot: string;
+  skills?: SkillRuntimePort | undefined;
   maxSteps?: number | undefined;
   /** Rolling pool size for parallel-class tools (design.md §6.3). */
   maxParallelTools?: number | undefined;
@@ -120,7 +124,7 @@ export class CoreAgentLoop implements AgentLoop {
   private readonly maxParallel: number;
 
   constructor(private readonly opts: AgentLoopOptions) {
-    this.maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
+    this.maxSteps = turnStepBudgetSchema.parse(opts.maxSteps);
     this.maxParallel = Math.max(1, opts.maxParallelTools ?? DEFAULT_MAX_PARALLEL_TOOLS);
   }
 
@@ -152,6 +156,7 @@ export class CoreAgentLoop implements AgentLoop {
     try {
       // M3: policy gating (docs/design.md §12). No policy ⇒ M2 behavior.
       const gate = runOpts?.policy ? new PolicyToolRegistry(tools, runOpts.policy) : null;
+      const researchAvailable = tools.schemas().some((tool) => tool.name === 'research');
 
       const throwIfAborted = (): void => {
         if (signal?.aborted) {
@@ -191,10 +196,17 @@ export class CoreAgentLoop implements AgentLoop {
           : null;
       const promptSeq = runOpts?.promptSeq ?? appendedUser!.from;
 
+      const checkCancellation = async (): Promise<boolean> =>
+        (await store.load(sessionId)).some(
+          (event) => event.type === 'turn/cancel_requested' && promptSeq <= event.throughPromptSeq,
+        );
+      if (await checkCancellation()) reason = 'aborted';
+
       // Prompt gate (docs/design.md §12): the user message is treated like a
       // tool call. Denied ⇒ the row is removed again (never-ran prompts leave
       // no trace, see SessionStore.remove) and the turn ends immediately.
       if (
+        reason === 'completed' &&
         gate &&
         gate.decide({ id: `prompt-${promptSeq}`, name: 'prompt', args: promptPreview }) !==
           'allowed'
@@ -223,6 +235,7 @@ export class CoreAgentLoop implements AgentLoop {
         // `promptGated` ⇒ skip the model loop entirely; turn/end still lands.
         while (reason === 'completed') {
           throwIfAborted();
+          if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
           // Reached only when the previous step ended with tool calls: the cap
           // counts completed model requests, so a turn finishing exactly on the
           // limit still reports 'completed'.
@@ -241,18 +254,61 @@ export class CoreAgentLoop implements AgentLoop {
             await this.opts.context.compact(sessionId, { signal, appendOpts, sink });
           }
 
-          const history = await store.load(sessionId);
+          await this.opts.skills?.prepare({
+            sessionId,
+            workspaceRoot: this.opts.workspaceRoot,
+            prompt: steps === 1 ? prompt : undefined,
+            policy: runOpts?.policy,
+            signal,
+            appendOpts,
+          });
+          let history = await store.load(sessionId);
+          const advice = progressGuidance(
+            history,
+            promptSeq,
+            steps,
+            this.maxSteps,
+            researchAvailable,
+          );
+          const previousGuidance = [...history]
+            .reverse()
+            .find((event) => event.type === 'turn/guidance' && event.promptSeq === promptSeq);
+          const currentAdvice =
+            advice ??
+            (previousGuidance
+              ? 'The previous progress warning has cleared. Continue toward the user request; use the evidence already collected.'
+              : null);
+          if (
+            currentAdvice &&
+            (previousGuidance?.type !== 'turn/guidance' ||
+              previousGuidance.advice !== currentAdvice)
+          ) {
+            await store.append(
+              sessionId,
+              [{ ...meta(), type: 'turn/guidance', promptSeq, advice: currentAdvice }],
+              appendOpts,
+            );
+            history = await store.load(sessionId);
+          }
           // M4: per-step system augmentation (LSP diagnostics injection, §9).
           const augmented = await this.opts.augmentSystem?.(sessionId);
-          const system =
-            this.opts.systemPrompt !== undefined || augmented !== undefined
-              ? [this.opts.systemPrompt, augmented].filter((s) => s !== undefined).join('\n\n')
-              : undefined;
+          const concluding = steps === this.maxSteps;
+          const conclusion = concluding
+            ? 'This is the final step of the turn. Produce your final answer now using the evidence already collected. State uncertainties and incomplete work explicitly; do not claim success without evidence. Cite retrieved sources when relevant. Do not call tools.'
+            : undefined;
+          const system = [
+            this.opts.systemPrompt,
+            augmented,
+            conclusion,
+            'Keep progress updates brief. The final answer must synthesize the user request and link factual claims to reference documents actually read, using Markdown links. Distinguish supported findings, inference and unresolved questions. The interface lists observed sources separately; do not invent citations or describe internal bookkeeping.',
+          ]
+            .filter((s) => s !== undefined)
+            .join('\n\n');
           const request: LLMRequest = {
             model: this.opts.model,
             system,
             messages: toModelMessages(history),
-            tools: tools.schemas(),
+            tools: concluding ? [] : tools.schemas(),
             signal,
             ...(this.opts.resolveBlob !== undefined ? { resolveBlob: this.opts.resolveBlob } : {}),
           };
@@ -321,6 +377,8 @@ export class CoreAgentLoop implements AgentLoop {
             stepSpan.end();
           }
 
+          if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
+
           // M5 metering: persist this request's token usage + OTel token
           // metrics (best-effort — metering must never break the turn,
           // docs/design.md §17).
@@ -347,6 +405,17 @@ export class CoreAgentLoop implements AgentLoop {
           }
 
           if (text.length > 0 || reasoningText.length > 0) {
+            const phase = toolCalls.length === 0 ? ('final' as const) : ('progress' as const);
+            const citationList =
+              phase === 'final' && text.trim().length > 0
+                ? await answerGrounding(
+                    await store.load(sessionId),
+                    promptSeq,
+                    sessionId,
+                    this.opts.spill?.store,
+                    signal,
+                  )
+                : undefined;
             await store.append(
               sessionId,
               [
@@ -354,6 +423,8 @@ export class CoreAgentLoop implements AgentLoop {
                   ...meta(),
                   type: 'message/assistant',
                   surfaceOp: 'append',
+                  phase,
+                  ...(citationList?.length ? { citationList } : {}),
                   content: [
                     ...(reasoningText.length > 0
                       ? [
@@ -373,12 +444,23 @@ export class CoreAgentLoop implements AgentLoop {
               appendOpts,
             );
             if (text.length > 0) {
-              sink.emit({ type: 'message/assistant', content: text });
+              sink.emit({
+                type: 'message/assistant',
+                content: text,
+                phase,
+                ...(citationList?.length ? { citationList } : {}),
+              });
             }
           }
 
           if (toolCalls.length === 0) {
             break; // model is done — turn complete
+          }
+
+          if (concluding) {
+            reason = 'error';
+            detail = `step limit (${this.maxSteps}) reached`;
+            break;
           }
 
           // Tool scheduling (design.md §6.3): consecutive parallel-class calls
@@ -425,7 +507,19 @@ export class CoreAgentLoop implements AgentLoop {
             const presolved = new Map<string, ToolResult>();
             const executable: ToolCall[] = [];
             for (const call of wave) {
-              const decision = gate?.decide(call) ?? 'allowed';
+              let decision = gate?.decide(call) ?? 'allowed';
+              if (decision === 'ask' && call.name === 'bash') {
+                const grants = (await store.load(sessionId)).filter(
+                  (event) => event.type === 'approval/command_granted',
+                );
+                if (
+                  matchesCommandPrefix(
+                    (call.args as { command?: unknown } | null)?.command,
+                    grants.map((event) => event.prefix),
+                  )
+                )
+                  decision = 'allowed';
+              }
               if (decision === 'denied') {
                 presolved.set(call.id, {
                   value: {
@@ -510,7 +604,7 @@ export class CoreAgentLoop implements AgentLoop {
           }
         }
       } catch (err) {
-        if (isAbortError(err)) {
+        if (signal?.aborted || isAbortError(err)) {
           reason = 'aborted';
         } else {
           reason = 'error';
@@ -603,7 +697,7 @@ export class CoreAgentLoop implements AgentLoop {
     result: ToolResult,
   ): Promise<ToolResult> {
     const spill = this.opts.spill;
-    if (!spill) return result;
+    if (!spill || call.name === 'skill') return result;
     let serialized: string;
     try {
       serialized = typeof result.value === 'string' ? result.value : JSON.stringify(result.value);

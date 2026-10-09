@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   AiSdkGateway,
@@ -8,6 +9,10 @@ import {
   CoreToolRegistry,
   createLspTools,
   createReadBlobTool,
+  createResearchTool,
+  createSkillTool,
+  FileSkillCatalog,
+  SkillRuntime,
   createSubagentTool,
   editFileTool,
   globTool,
@@ -61,6 +66,10 @@ async function main(): Promise<void> {
     console.log('[agent-worker] OTel SDK started');
   }
   const env = loadWorkerEnv();
+  const skillCatalog = new FileSkillCatalog({
+    bundledDirectories: [fileURLToPath(new URL('../../../skills/', import.meta.url))],
+    configuredDirectories: env.SKILL_DIRS.map((directory) => path.resolve(directory)),
+  });
   const pool = createPool(env.DATABASE_URL);
   const db = createDb(pool);
 
@@ -70,6 +79,9 @@ async function main(): Promise<void> {
     new PgSessionStore(db),
     new RedisSessionEventPublisher(redis),
   );
+  const skills = new SkillRuntime(skillCatalog, store, {
+    browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
+  });
   const metas = new PgSessionMetaStore(db);
   // M5: token metering — the loop records usage and gates model calls on the
   // tenant quota before every request (docs/design.md §17).
@@ -111,6 +123,8 @@ async function main(): Promise<void> {
     if (assembly) return assembly;
     const sandbox = new LocalSandbox(root, { envMode: env.SANDBOX_ENV_MODE });
     const registry = new CoreToolRegistry(sandbox);
+    registry.register(createSkillTool(skills));
+    registry.register(createResearchTool(store, blobStore));
     for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
       registry.register(tool);
     }
@@ -123,29 +137,35 @@ async function main(): Promise<void> {
     // M4: subagent — child loop with a fresh in-memory context (§8). The child
     // registry reuses the base tools + read_blob, minus subagent (no recursion),
     // sandboxed to the SAME root as the parent turn.
-    const childRegistry = new CoreToolRegistry(sandbox);
-    for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
-      childRegistry.register(tool);
-    }
-    childRegistry.register(createReadBlobTool(blobStore));
-    if (lsp) {
-      for (const tool of createLspTools(lsp)) {
-        childRegistry.register(tool);
-      }
-    }
     registry.register(
       createSubagentTool({
-        createLoop: () =>
-          new CoreAgentLoop({
+        createLoop: () => {
+          const childStore = new MemorySessionStore();
+          const childSkills = new SkillRuntime(skillCatalog, childStore, {
+            browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
+          });
+          const childRegistry = new CoreToolRegistry(sandbox);
+          for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
+            childRegistry.register(tool);
+          }
+          childRegistry.register(createReadBlobTool(blobStore));
+          childRegistry.register(createSkillTool(childSkills));
+          childRegistry.register(createResearchTool(childStore, blobStore));
+          if (lsp) {
+            for (const tool of createLspTools(lsp)) childRegistry.register(tool);
+          }
+          return new CoreAgentLoop({
             llm,
             model: env.MODEL,
             systemPrompt: env.SYSTEM_PROMPT,
             tools: childRegistry,
-            store: new MemorySessionStore(),
+            store: childStore,
+            skills: childSkills,
             workspaceRoot: root,
             maxSteps: 16,
             resolveBlob,
-          }),
+          });
+        },
       }),
     );
     assembly = { sandbox, registry };
@@ -179,8 +199,10 @@ async function main(): Promise<void> {
       new CoreAgentLoop({
         llm,
         model: env.MODEL,
+        maxSteps: env.MAX_TURN_STEPS,
         systemPrompt: env.SYSTEM_PROMPT,
         tools: assemblyFor(workspaceRoot).registry,
+        skills,
         store,
         workspaceRoot,
         // M3: fail-closed human approval channel + durable approval trail.
@@ -198,9 +220,15 @@ async function main(): Promise<void> {
     audit: new BusAuditEmitter(bus),
   });
 
+  let cancelActiveTurn: ((sessionId: string) => void) | undefined = undefined;
+  const cancels = new RedisTurnCancelSubscriber(redis);
+  const cancelSub = cancels.subscribe((sessionId) => cancelActiveTurn?.(sessionId));
+  await cancelSub.started;
+
   const worker = createTurnWorker({ url: env.REDIS_URL }, (task, _job, signal) =>
     handleTurn(task, signal),
   );
+  cancelActiveTurn = (sessionId) => worker.cancel(sessionId);
 
   // M5: queue-depth metric (docs/design.md §17). The ObservableGauge callback
   // fires per metric collection — event-driven, no polling loop (AGENTS §4.2).
@@ -224,8 +252,6 @@ async function main(): Promise<void> {
       }
     });
   // M3 session/cancel: abort the turn when it is running on THIS replica.
-  const cancels = new RedisTurnCancelSubscriber(redis);
-  const cancelSub = cancels.subscribe((sessionId) => worker.cancel(sessionId));
   console.log('[agent-worker] consuming turns from BullMQ');
 
   const shutdown = async (): Promise<void> => {

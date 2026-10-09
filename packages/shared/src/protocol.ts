@@ -1,4 +1,10 @@
 import { z } from 'zod';
+import { answerCitationListSchema } from '@trinity-harness/contracts';
+export {
+  answerCitationSchema,
+  answerCitationListSchema,
+  type AnswerCitation,
+} from '@trinity-harness/contracts';
 
 /**
  * ACP-flavored wire protocol between server and browser (docs/design.md §11).
@@ -45,8 +51,13 @@ export type SessionUpdate = z.infer<typeof sessionUpdateSchema>;
 
 /** One committed message in the UI surface. */
 export const surfaceMessageSchema = z.object({
+  id: z.uuid().optional(),
+  /** Timestamp of the committed session event; optional for older clients/servers. */
+  at: z.iso.datetime().optional(),
   role: z.enum(['user', 'assistant']),
   content: z.string(),
+  phase: z.enum(['progress', 'final']).optional(),
+  citationList: answerCitationListSchema.optional(),
   /**
    * M4 multimodal: image/file references carried by the message (rendered by
    * the UI from the blob endpoint; `content` keeps the text fallback).
@@ -91,3 +102,29 @@ export const serverEventSchema = z.discriminatedUnion('type', [
   }),
 ]);
 export type ServerEvent = z.infer<typeof serverEventSchema>;
+
+export const turnCancelResponseSchema = z.object({
+  ok: z.literal(true),
+  alreadyStopped: z.boolean(),
+});
+export type TurnCancelResponse = z.infer<typeof turnCancelResponseSchema>;
+
+/** Conversation-scoped literal command-prefix approval. */
+export const approvalResponseSchema = z
+  .object({
+    outcome: z.enum(['allowed', 'rejected']),
+    commandPrefix: z
+      .array(
+        z
+          .string()
+          .min(1)
+          .max(500)
+          .regex(/^[a-zA-Z0-9_./:@=+-]+$/),
+      )
+      .min(1)
+      .max(32)
+      .optional(),
+  })
+  .refine((value) => value.commandPrefix === undefined || value.outcome === 'allowed', {
+    message: 'Only allowed requests can grant a command prefix',
+  });

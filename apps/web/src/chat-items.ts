@@ -4,7 +4,12 @@
  * node environment (AGENTS.md §6); no React/antd imports here.
  */
 
-import { newId } from '@trinity-harness/shared';
+import {
+  newId,
+  type AnswerCitation,
+  type SurfaceMessage,
+  type SessionUpdate,
+} from '@trinity-harness/shared';
 
 export type ToolCallView = {
   toolCallId: string;
@@ -17,15 +22,25 @@ export type ToolCallView = {
 export type AttachmentView = { kind: 'image' | 'file'; uri: string; mimeType?: string };
 
 export type ChatItem = {
+  messageId?: string;
+  at?: string;
   key: string;
   role: 'user' | 'assistant';
   content: string;
   streaming: boolean;
   tools: ToolCallView[];
   attachments: AttachmentView[];
+  activity?: { content: string; at?: string }[];
+  stepCommitted?: boolean;
+  final?: boolean;
+  stopped?: boolean;
+  error?: boolean;
+  citationList?: AnswerCitation[];
 };
 
 export type CommittedUserMessage = {
+  id?: string;
+  at?: string;
   content: string;
   attachments?: AttachmentView[];
 };
@@ -36,6 +51,43 @@ export type CommittedUserMessage = {
  */
 export function newItemKey(): string {
   return newId();
+}
+
+export function mergeAssistantChunk(
+  items: readonly ChatItem[],
+  text: string,
+  newKey: () => string,
+  at: string,
+): ChatItem[] {
+  const last = items[items.length - 1];
+  if (last?.role === 'assistant' && (last.final || last.stopped || last.error)) return [...items];
+  if (last?.role === 'assistant') {
+    const base = last.stepCommitted ? archiveAssistantStep(last) : last;
+    return [
+      ...items.slice(0, -1),
+      {
+        ...base,
+        at: base.at ?? at,
+        content: base.content + text,
+        streaming: true,
+        stepCommitted: false,
+        final: false,
+        stopped: false,
+      },
+    ];
+  }
+  return [
+    ...items,
+    {
+      key: newKey(),
+      role: 'assistant',
+      at,
+      content: text,
+      streaming: true,
+      tools: [],
+      attachments: [],
+    },
+  ];
 }
 
 /**
@@ -61,13 +113,30 @@ export function mergeCommittedUserMessage(
       lastUser.attachments.length > 0 &&
       lastUser.attachments.length === incoming.length &&
       lastUser.attachments.every((a, i) => a.uri === incoming[i]?.uri);
-    if (sameContent || sameAttachments) return [...items];
+    if (
+      (!message.id || !lastUser.messageId || message.id === lastUser.messageId) &&
+      (sameContent || sameAttachments)
+    ) {
+      return items.map((item) =>
+        item === lastUser &&
+        ((message.at !== undefined && item.at !== message.at) ||
+          (message.id && item.messageId !== message.id))
+          ? {
+              ...item,
+              ...(message.at ? { at: message.at } : {}),
+              ...(message.id ? { messageId: message.id } : {}),
+            }
+          : item,
+      );
+    }
   }
   return [
     ...items,
     {
       key: newKey(),
       role: 'user',
+      ...(message.id ? { messageId: message.id } : {}),
+      ...(message.at !== undefined ? { at: message.at } : {}),
       content: message.content,
       streaming: false,
       tools: [],
@@ -76,32 +145,123 @@ export function mergeCommittedUserMessage(
   ];
 }
 
-/**
- * Merge a `message/committed` (role=assistant) into the list.
- *
- * In the live flow the optimistic placeholder (streaming) is filled in place.
- * During log replay there is no placeholder: each committed assistant
- * message follows a user message, so a NEW item is appended instead —
- * otherwise the update would target the wrong turn or be dropped.
- */
+/** Move a provisional step into the turn's activity without creating a new response. */
+export function archiveAssistantStep(item: ChatItem): ChatItem {
+  if (!item.content.trim()) return item;
+  const activity = item.activity ?? [];
+  return {
+    ...item,
+    content: '',
+    stepCommitted: false,
+    citationList: undefined,
+    activity:
+      activity.at(-1)?.content === item.content
+        ? activity
+        : [...activity, { content: item.content, at: item.at }],
+  };
+}
+
+/** Live and replayed model steps replace the same assistant response for a prompt. */
 export function mergeCommittedAssistantMessage(
   items: readonly ChatItem[],
   content: string,
   newKey: () => string,
+  at?: string,
+  metadata: Pick<SurfaceMessage, 'phase' | 'citationList'> = {},
 ): ChatItem[] {
-  const last = items[items.length - 1];
-  if (last?.role === 'assistant' && last.streaming) {
-    return [...items.slice(0, -1), { ...last, content, streaming: false }];
+  const last = items.at(-1);
+  let item: ChatItem =
+    last?.role === 'assistant'
+      ? last
+      : {
+          key: newKey(),
+          role: 'assistant',
+          content: '',
+          streaming: true,
+          tools: [],
+          attachments: [],
+        };
+  if (item.stepCommitted && item.content !== content) item = archiveAssistantStep(item);
+  item = {
+    ...item,
+    content,
+    ...(at !== undefined ? { at } : {}),
+    citationList: metadata.citationList,
+    stopped: false,
+  };
+  if (metadata.phase === 'progress') {
+    item = { ...archiveAssistantStep(item), streaming: true, final: false };
+  } else {
+    item = { ...item, streaming: false, stepCommitted: true, final: metadata.phase === 'final' };
   }
-  return [
-    ...items,
-    {
-      key: newKey(),
-      role: 'assistant',
-      content,
+  return last?.role === 'assistant' ? [...items.slice(0, -1), item] : [...items, item];
+}
+
+/** Tool-only steps also belong to the current prompt's single assistant response. */
+export function mergeToolUpdate(
+  items: readonly ChatItem[],
+  update: SessionUpdate & { kind: 'tool_call' },
+  newKey: () => string,
+  at: string,
+): ChatItem[] {
+  const last = items.at(-1);
+  let item: ChatItem =
+    last?.role === 'assistant'
+      ? last
+      : {
+          key: newKey(),
+          role: 'assistant',
+          content: '',
+          streaming: true,
+          tools: [],
+          attachments: [],
+          at,
+        };
+  if (update.status === 'in_progress' && !item.final)
+    item = { ...archiveAssistantStep(item), streaming: true };
+  const existing = item.tools.find((tool) => tool.toolCallId === update.toolCallId);
+  const tool: ToolCallView = {
+    toolCallId: update.toolCallId,
+    title: existing?.title || update.title || update.toolCallId,
+    status: update.status,
+    content: update.content ?? existing?.content,
+  };
+  item = {
+    ...item,
+    tools: existing
+      ? item.tools.map((value) => (value === existing ? tool : value))
+      : [...item.tools, tool],
+  };
+  return last?.role === 'assistant' ? [...items.slice(0, -1), item] : [...items, item];
+}
+
+/** Settle live output and pending tools when their turn ends without results. */
+export function settleAssistantItems(
+  items: readonly ChatItem[],
+  status: 'completed' | 'aborted' | 'error' = 'completed',
+): ChatItem[] {
+  return items.map((item) => {
+    if (item.role !== 'assistant' || item !== items.at(-1)) return item;
+    const pending = item.tools.some(
+      (tool) => tool.status === 'pending' || tool.status === 'in_progress',
+    );
+    if (!item.streaming && !pending && !(item.stepCommitted && !item.final)) return item;
+    const base = status !== 'completed' && !item.final ? archiveAssistantStep(item) : item;
+    return {
+      ...base,
       streaming: false,
-      tools: [],
-      attachments: [],
-    },
-  ];
+      final: status === 'completed' && base.content.trim().length > 0,
+      stopped: status === 'aborted',
+      error: status === 'error',
+      tools: item.tools.map((tool) =>
+        tool.status === 'pending' || tool.status === 'in_progress'
+          ? {
+              ...tool,
+              status: 'failed' as const,
+              content: 'No result received; the turn has ended.',
+            }
+          : tool,
+      ),
+    };
+  });
 }

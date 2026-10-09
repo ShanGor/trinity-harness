@@ -187,8 +187,11 @@ describe('CoreAgentLoop M4: tool-result spill', () => {
     // Full content never hits the append-only log (docs/design.md §7).
     expect(JSON.stringify(result)).not.toContain('y'.repeat(500));
 
-    // The model-visible fold shows the reference, and read_blob retrieves it.
-    const fold = JSON.stringify(toModelMessages(await store.load('s1')));
+    // The active request sees the reference; finished history drops tool details.
+    const fold = JSON.stringify(llm.requests[1]!.messages);
+    expect(JSON.stringify(toModelMessages(await store.load('s1')))).not.toContain(
+      'spill/s1/c1.json',
+    );
     expect(fold).toContain('spill/s1/c1.json');
     const fetched = await blobStore.get(value.spilled);
     expect(fetched).not.toBeNull();
@@ -296,6 +299,8 @@ describe('CoreAgentLoop M4: system augmentation', () => {
     });
     await loop.run('s1', 'hi', new CollectingSink());
     const [request] = llm.requests;
-    expect(request!.system).toBe('base\n\n[language-server diagnostics]\n- [error] a.py:1 bad');
+    expect(request!.system).toContain(
+      'base\n\n[language-server diagnostics]\n- [error] a.py:1 bad',
+    );
   });
 });

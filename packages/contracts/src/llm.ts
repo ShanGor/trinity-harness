@@ -34,8 +34,8 @@ export interface ConversationMessage {
    */
   blocks?: ContentBlock[] | undefined;
   /**
-   * Present on assistant messages produced by a reasoning model; replayed
-   * verbatim on subsequent turns (MiniMax-M3: "原样保留这些内容块").
+   * Present on active assistant steps produced by a reasoning model; replayed
+   * verbatim within that active exchange. Completed turns keep final text only.
    */
   reasoning?: ReasoningBlock[] | undefined;
   /** Present on assistant messages that requested tool calls. */

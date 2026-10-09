@@ -1,8 +1,85 @@
 import type { ContentBlock, SessionEvent } from './events.js';
+import type { AnswerCitation } from './citations.js';
 /** A message on the model-visible surface (projection of the event log). */
 export interface Message {
   role: 'user' | 'assistant';
   content: ContentBlock[];
+  citationList?: AnswerCitation[];
+}
+
+/** One final answer per prompt; legacy logs infer progress from later tool calls. */
+export function turnMessageProjection(events: readonly SessionEvent[]): {
+  closed: Set<number>;
+  finals: Set<number>;
+  progress: Set<number>;
+  terminalFallbacks: Map<number, string>;
+} {
+  const closed = new Set<number>();
+  const finals = new Set<number>();
+  const progress = new Set<number>();
+  const terminalFallbacks = new Map<number, string>();
+  const compacted = compactionRanges(events);
+  const lastTerminal = events.reduce(
+    (last, event, index) => (event.type === 'turn/end' ? index : last),
+    -1,
+  );
+  let start = -1;
+  let candidate = -1;
+  const close = (end: number, terminal?: Extract<SessionEvent, { type: 'turn/end' }>): void => {
+    if (start < 0) return;
+    if (!terminal && end > lastTerminal) {
+      const pending = new Set<string>();
+      for (const event of events.slice(start + 1, end)) {
+        if (event.type === 'tool/call') pending.add(event.callId);
+        if (event.type === 'tool/result') pending.delete(event.callId);
+      }
+      // A new prompt can continue an interrupted execution. Keep unknown tool
+      // outcomes repairable until that continuation reaches a terminal event.
+      if (pending.size) {
+        start = -1;
+        candidate = -1;
+        return;
+      }
+    }
+    for (let j = start + 1; j < end; j++) closed.add(j);
+    const event = events[candidate];
+    if (
+      event?.type === 'message/assistant' &&
+      event.content.some((block) => block.kind === 'text' && block.text.trim().length > 0) &&
+      (!terminal || terminal.reason === 'completed' || event.phase === 'final')
+    )
+      finals.add(candidate);
+    else if (terminal)
+      terminalFallbacks.set(
+        end,
+        `The previous task ended ${terminal.reason} without a final answer.${terminal.detail ? ` ${terminal.detail}` : ''}`,
+      );
+    else if (events.slice(start + 1, end).some((item) => item.type === 'tool/call'))
+      terminalFallbacks.set(
+        end,
+        'The previous task was interrupted without a final answer. Tool outcomes may be unknown; inspect current state before retrying side effects.',
+      );
+    start = -1;
+    candidate = -1;
+  };
+  events.forEach((event, i) => {
+    if (isCompacted(i + 1, compacted)) return;
+    if (event.type === 'message/user') {
+      close(i);
+      start = i;
+    }
+    if (event.type === 'message/assistant') {
+      if (candidate >= 0) progress.add(candidate);
+      candidate = event.phase === 'progress' ? -1 : i;
+      if (event.phase === 'progress') progress.add(i);
+    }
+    if (event.type === 'tool/call' && candidate >= 0) {
+      progress.add(candidate);
+      candidate = -1;
+    }
+    if (event.type === 'turn/end') close(i, event);
+  });
+  return { closed, finals, progress, terminalFallbacks };
 }
 
 export interface SeqRange {
@@ -85,6 +162,7 @@ interface SurfaceEntry {
   content: ContentBlock[];
   fromSeq: number;
   toSeq: number;
+  citationList?: AnswerCitation[];
 }
 
 export function compactionSummaryText(summary: string): string {
@@ -102,6 +180,7 @@ export function compactionSummaryText(summary: string): string {
 export function foldSurface(events: readonly SessionEvent[]): SurfaceEntry[] {
   const surface: SurfaceEntry[] = [];
   const ranges = compactionRanges(events);
+  const { closed, finals, progress } = turnMessageProjection(events);
   let emitIdx = 0;
   let activeIdx = -1; // range currently covering events
   const pushSummary = (range: CompactionRange): void => {
@@ -133,12 +212,32 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceEntry[] {
         surface.push({ role: 'user', content: event.content, fromSeq: seq, toSeq: seq });
         break;
       case 'message/assistant': {
+        if (progress.has(i) || (closed.has(i) && !finals.has(i))) break;
+        const content = finals.has(i)
+          ? event.content.filter((block) => block.kind !== 'reasoning')
+          : event.content;
         const last = surface.at(-1);
+        let from = i;
+        while (
+          from > 0 &&
+          events[from]?.type === 'message/assistant' &&
+          (events[from] as Extract<SessionEvent, { type: 'message/assistant' }>).surfaceOp ===
+            'replace' &&
+          events[from - 1]?.type === 'message/assistant'
+        )
+          from--;
         if (event.surfaceOp === 'replace' && last?.role === 'assistant') {
-          last.content = event.content;
+          last.content = content;
           last.toSeq = seq;
+          last.citationList = event.citationList;
         } else {
-          surface.push({ role: 'assistant', content: event.content, fromSeq: seq, toSeq: seq });
+          surface.push({
+            role: 'assistant',
+            content,
+            fromSeq: from + 1,
+            toSeq: seq,
+            ...(event.citationList ? { citationList: event.citationList } : {}),
+          });
         }
         break;
       }
@@ -162,5 +261,9 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceEntry[] {
  * replace 表面区间").
  */
 export function projectMessages(events: readonly SessionEvent[]): Message[] {
-  return foldSurface(events).map(({ role, content }) => ({ role, content }));
+  return foldSurface(events).map(({ role, content, citationList }) => ({
+    role,
+    content,
+    ...(citationList ? { citationList } : {}),
+  }));
 }

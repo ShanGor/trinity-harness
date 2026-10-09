@@ -16,10 +16,19 @@ createRoot(container).render(
     <ConfigProvider
       theme={{
         token: {
-          colorPrimary: '#116149',
-          borderRadius: 12,
-          colorText: '#172133',
-          fontFamily: '"IBM Plex Sans", "Source Sans 3", "Avenir Next", "Segoe UI", sans-serif',
+          colorPrimary: '#24634b',
+          colorInfo: '#24634b',
+          colorTextSecondary: '#626e65',
+          colorBorder: '#e1e5df',
+          colorBgLayout: '#f6f7f5',
+          controlHeight: 40,
+          controlHeightSM: 32,
+          fontSize: 14,
+          lineHeight: 1.6,
+          borderRadius: 8,
+          colorText: '#202923',
+          fontFamily: 'var(--font-ui)',
+          fontFamilyCode: 'var(--font-code)',
         },
       }}
     >

@@ -178,6 +178,54 @@ describe.skipIf(!reachable)('Redis adapters (integration)', () => {
     await queue.close();
   });
 
+  it('delivers a cancellation wake-up after subscription readiness and aborts an active worker', async () => {
+    const { RedisTurnCancelPublisher, RedisTurnCancelSubscriber } = await import('../src/index.js');
+    const queueName = `cancel-test-${crypto.randomUUID()}`;
+    const sessionId = crypto.randomUUID();
+    const queue = new RedisTurnQueue({ url: redisUrl }, queueName);
+    let started!: () => void;
+    let finished!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    const worker = createTurnWorker(
+      { url: redisUrl },
+      async (_task, _job, signal) => {
+        started();
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        expect(signal.aborted).toBe(true);
+        finished();
+      },
+      queueName,
+    );
+    const listener = new RedisTurnCancelSubscriber(redis).subscribe((id) => worker.cancel(id));
+    try {
+      await listener.started;
+      await queue.enqueue({
+        sessionId,
+        prompt: 'run',
+        actor: 'test',
+        tenantId: 'test',
+        promptSeq: 1,
+        policy: parsePermissionPolicy('workspace-write'),
+      });
+      await running;
+      await new RedisTurnCancelPublisher(redis).cancel(sessionId);
+      await aborted;
+    } finally {
+      worker.cancel(sessionId);
+      listener.dispose();
+      await worker.close();
+      await queue.close();
+    }
+  });
+
   it('M3: approval hub fans requests out and routes the first reply back', async () => {
     const { RedisApprovalHub, RedisApprovalRequester } = await import('../src/index.js');
     const hub = new RedisApprovalHub(redis);
@@ -194,6 +242,7 @@ describe.skipIf(!reachable)('Redis adapters (integration)', () => {
       listenerB.reply({ approvalId: req.approvalId, outcome: 'allowed', decidedBy: 'u9' });
     });
 
+    await Promise.all([listenerA.started, listenerB.started]);
     const reply = await requester.request({
       sessionId,
       approvalId: crypto.randomUUID(),

@@ -36,15 +36,12 @@ interface ReplyEnvelope {
 export class RedisApprovalHub implements ApprovalHub {
   constructor(private readonly redis: Redis) {}
 
-  listen(sessionId: string): ApprovalListener {
+  listen(sessionId: string): ApprovalListener & { started: Promise<void> } {
     const reqConn = this.redis.duplicate();
     const resConn = this.redis.duplicate();
     let stopped = false;
     let requestHandler: ((req: ApprovalRequest) => void) | null = null;
 
-    void reqConn.subscribe(approvalRequestChannel(sessionId)).catch((err) => {
-      if (!stopped) console.error('[RedisApprovalHub] subscribe failed', err);
-    });
     reqConn.on('message', (_channel: string, message: string) => {
       if (stopped || !requestHandler) return;
       try {
@@ -54,7 +51,12 @@ export class RedisApprovalHub implements ApprovalHub {
       }
     });
 
+    const started = reqConn.subscribe(approvalRequestChannel(sessionId)).then(() => undefined);
+    void started.catch((err) => {
+      if (!stopped) console.error('[RedisApprovalHub] subscribe failed', err);
+    });
     return {
+      started,
       onRequest: (handler) => {
         requestHandler = handler;
       },
@@ -121,7 +123,6 @@ export class RedisApprovalRequester implements ApprovalRequester {
 
       void (async () => {
         try {
-          await conn.subscribe(approvalReplyChannel(req.sessionId));
           conn.on('message', (_channel: string, message: string) => {
             try {
               const env = JSON.parse(message) as ReplyEnvelope;
@@ -136,7 +137,9 @@ export class RedisApprovalRequester implements ApprovalRequester {
               // malformed envelope — keep waiting until timeout
             }
           });
-          await this.redis.publish(approvalRequestChannel(req.sessionId), JSON.stringify(req));
+          await conn.subscribe(approvalReplyChannel(req.sessionId));
+          if (!settled)
+            await this.redis.publish(approvalRequestChannel(req.sessionId), JSON.stringify(req));
         } catch {
           // Redis unreachable ⇒ fail closed immediately.
           reject('unreachable');

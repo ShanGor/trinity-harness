@@ -152,23 +152,24 @@ trinity-harness/
 
 ### 5.1 模块总览
 
-| 模块                    | 职责                                                        | 关键依赖（仅 contracts）                                  |
-| ----------------------- | ----------------------------------------------------------- | --------------------------------------------------------- |
-| `LLM Gateway`           | 统一模型访问：流式、工具调用、多模态、重试、计量            | `ModelProvider`                                           |
-| `Agent Loop`            | turn/step 驱动、工具调度、并发控制、取消                    | `ToolRegistry`、`SessionStore`、`LLMPort`、`ApprovalPort` |
-| `Tool Runtime`          | 工具注册、参数校验、执行管线（pre/execute/post）            | `SandboxPort`                                             |
-| `Session Core`          | 事件溯源日志、消息投影、压缩（compaction）、fork            | `EventBus`                                                |
-| `Context Manager`       | 上下文压力检测、压缩、溢出文件化（spill）                   | `LLMPort`、`SessionStore`                                 |
-| `LSP Service`           | 语言服务接入：诊断、符号、跳转、格式化                      | （对 Loop 暴露为工具）                                    |
-| `Permission & Approval` | 工具审批、策略判定、审批持久化                              | `EventBus`                                                |
-| `Audit`                 | 全链路审计事件采集与查询                                    | `EventBus`                                                |
-| `Multimodal`            | 图片/文档解析、附件存储、内容分块                           | `BlobStore`                                               |
-| `Sandbox`               | 命令执行与文件系统隔离（先容器内，预留 gVisor/Firecracker） | —                                                         |
-| `Observability`         | OTel 埋点（api 全局）+ SDK 引导（OTLP/Prometheus 导出）     | `@opentelemetry/api`                                      |
-| `Identity & Tenant`     | 用户、租户、RBAC、配额                                      | PostgreSQL                                                |
-| `Event Bus`             | Redis Stream 封装：发布、消费组、重放                       | Redis                                                     |
-| `API Server`            | REST/SSE 网关、`/acp` HTTP binding、会话控制、配置          | 以上全部（通过 DI）                                       |
-| `ACP Adapter`           | ACP 协议 ↔ 内部服务的翻译层                                 | `API Server`（内部 SDK）                                  |
+| 模块                    | 职责                                                                     | 关键依赖（仅 contracts）                                  |
+| ----------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------- |
+| `LLM Gateway`           | 统一模型访问：流式、工具调用、多模态、重试、计量                         | `ModelProvider`                                           |
+| `Agent Loop`            | turn/step 驱动、工具调度、并发控制、取消                                 | `ToolRegistry`、`SessionStore`、`LLMPort`、`ApprovalPort` |
+| `Tool Runtime`          | 工具注册、参数校验、执行管线（pre/execute/post）                         | `SandboxPort`                                             |
+| `Session Core`          | 事件溯源日志、消息投影、压缩（compaction）、fork                         | `EventBus`                                                |
+| `Context Manager`       | 上下文压力检测、压缩、溢出文件化（spill）                                | `LLMPort`、`SessionStore`                                 |
+| `Skill Runtime`         | SKILL.md 发现、渐进加载、显式调用、资源读取与指令快照回放（core/skills） | `SkillCatalogPort`、`SkillRuntimePort`、`SessionStore`    |
+| `LSP Service`           | 语言服务接入：诊断、符号、跳转、格式化                                   | （对 Loop 暴露为工具）                                    |
+| `Permission & Approval` | 工具审批、策略判定、审批持久化                                           | `EventBus`                                                |
+| `Audit`                 | 全链路审计事件采集与查询                                                 | `EventBus`                                                |
+| `Multimodal`            | 图片/文档解析、附件存储、内容分块                                        | `BlobStore`                                               |
+| `Sandbox`               | 命令执行与文件系统隔离（先容器内，预留 gVisor/Firecracker）              | —                                                         |
+| `Observability`         | OTel 埋点（api 全局）+ SDK 引导（OTLP/Prometheus 导出）                  | `@opentelemetry/api`                                      |
+| `Identity & Tenant`     | 用户、租户、RBAC、配额                                                   | PostgreSQL                                                |
+| `Event Bus`             | Redis Stream 封装：发布、消费组、重放                                    | Redis                                                     |
+| `API Server`            | REST/SSE 网关、`/acp` HTTP binding、会话控制、配置                       | 以上全部（通过 DI）                                       |
+| `ACP Adapter`           | ACP 协议 ↔ 内部服务的翻译层                                              | `API Server`（内部 SDK）                                  |
 
 ### 5.2 接口定义示例（`packages/contracts`）
 
@@ -271,6 +272,11 @@ turn/start
 turn/end (completed | max-tokens | blocked | aborted | error)
 ```
 
+- 默认 turn budget 为 **64 model steps**（server/worker 的 `MAX_TURN_STEPS` 可配置 1..1024）（显式子 agent budget 仍独立，默认 worker child 为 16）；最后一步禁用工具用于最终回答。工具运行次数和 model step 分别计量，不把审批等待当成 model step。
+- **研究执行**：仍使用 Skill Runtime + Bash/Sandbox 调用 agent-browser，不新增浏览器/MCP 执行通道。bundled skill 的 DOM extractor 一次提取有界正文、URL、标题、明确 publication metadata 和正文链接；无 metadata 时日期为 null，不从侧栏猜测。`research` tool 位于既有 Tool Runtime，composition root 注入 SessionStore/BlobStore，contracts 定义 Zod DTO。它记录问题范围、claims、支持/反证/背景引用、未决问题与是否足够作答；引用必须来自当前 prompt 后成功的 agent-browser tool/result，URL 和 quote 同时匹配结构化提取结果。校验保证观察来源，不保证网站真实或 claim 语义正确；页面始终是未信任数据。notes 通过普通 tool/call/result append-only 留痕，重启可 replay；spill 后按当前 session/call 的受限 blob URI 恢复（最多 500 KB），不跨 session 读取；不建立内存账本或新表，不额外联网。完成 turn 后 notes 随内部工具历史退出后续 context，最终回答须自带关键结论/引用。
+- **进度反馈**：Loop 内纯函数从当前 prompt 的 tool events 检测三次连续浏览器失败/空 read，以及当前页面上三次重复 read（忽略变动的 accessibility refs）。重复输出只能说明观察没有变化，不等价于任务停滞；只提示换读取方式/来源或总结，不自动停止或重复副作用。在多个来源已提取但未记录 notes 时要求 evidence checkpoint，notes 后每新增两个来源要求更新结论/未决问题，notes 标记 ready 时提示回答；到 budget 最后四分之一提示收敛；guidance 变化追加 `turn/guidance`，模型只见当前 prompt 的最新 guidance，进展恢复时清除旧提示。compaction 不压缩活动 turn；历史 UI 不把 guidance 当作普通回复。
+- Turn 的最后一个允许 step 预留为无工具的最终回答：基于已有证据总结，并明确未完成工作/证据缺口；防止耗尽全部 step 后只有进度消息。模型仍请求工具时不执行超预算副作用。
+
 ### 6.2 Loop 伪代码
 
 ```
@@ -305,7 +311,9 @@ while (msg = inbox.claim()):            // inbox = 用户消息 + 工具延期�
 
 - **`session_events` 表**：`(session_id, seq, event_type, payload_jsonb, actor, created_at, prev_hash)`，append-only，`seq` 单调；`prev_hash` 形成哈希链，防篡改（审计要求）。
 - **表面投影（projection）**：模型可见消息 = 事件的纯函数投影；compaction **只追加日志事件并 replace 表面区间**，历史永不删除（对应 dsh 的 `surfaceOp: replace`）。
+- **完成 turn 的上下文**：活动 turn 只保留当前执行所需 reasoning/tool call/result，普通 progress 文本不进入下一次模型请求；`turn/end` 后历史投影只保留原始用户输入和最终非工具回答（去除历史 reasoning）。没有最终回答时投影明确终止原因，不能把最后一条进度当作成功。contracts 的 `turnMessageProjection` 统一判定 progress/final：新事件写入显式 `phase`，旧日志依据 tool/turn 边界推断；对话 API、模型上下文和 compaction 的输入共用该规则。事件日志、UI 活动回放和审计保留全部记录；skill 快照单独固定，不因工具历史过滤丢失。最终 source metadata 随答案保留，避免后续追问丢失引用。
 - **Fork**：复制事件前缀 + `session/forked` 标记，O(1) 元数据操作 + 逻辑视图。
+- **取消实现**：REST/ACP Stop 先追加 `turn/cancel_requested(throughPromptSeq)`，再 await `TurnCancellationPort` 的 Redis wake-up；marker 覆盖已提交但尚未执行的 prompt 和重试，未来更高 seq 的 prompt 不受影响。Loop 在 prompt gate 前与每 step 检查持久化 marker；活跃任务经 AbortSignal 立即中断，worker 开始消费前等待 cancellation subscription ready。inline server 也持有并清理每个活跃 turn 的 AbortController。API 返回 `alreadyStopped`，UI 对已终止的旧 turn 清理 loading/approval；活跃 turn 等待 `turn/end`，错误终止也清理 approval；无结果的 pending tool 指示器随 turn 结束标为失败，并保留历史消息对象引用。取消导致的 provider 异常按 aborted 处理；POSIX Bash 命令置于独立进程组，取消/超时对整个命令组发送 SIGTERM，1 秒未退出则升级 SIGKILL，避免只杀 shell 留下子命令。用户已经运行的 CDP Chrome 不在该命令组内。审批 request/reply listener 在 subscribe 前注册，异步 subscription 暴露 ready promise，避免快速消息丢失。回放对所有未闭合 tool call 合成未知结果错误，不自动重复副作用。
 - **回放**：worker 崩溃恢复时，从上次 `turn/end` 之后截断的尾部自动合成关闭事件（借鉴 dsh 的 torn-tail 修复）。
 - **Compaction**：LLM 生成摘要替换表面区间；摘要边界吸附在 tool call/result 配对处；图像转储（image offload）、大结果 spill 到对象存储仅留引用（借鉴 dsh `spill/`）。
   - **M4 实现备注**：`compaction/summary` 事件携带 `[fromSeq, toSeq]`，投影**原地**替换该区间（摘要占据首个被覆盖事件的位置，时序不变）；边界按"整个交换（用户消息 + 其后全部事件）"吸附，当前 turn 的最新交换永不压缩；compaction 在每个模型请求前与工具波后检查上下文压力（`ContextManager`，可注入 token 估算器）。spill 落在 `BlobStore`（M4 为本地文件系统适配器，S3 可替换），日志仅存 `blob://` 引用 + 预览，`read_blob` 工具取回。
@@ -316,18 +324,29 @@ while (msg = inbox.claim()):            // inbox = 用户消息 + 工具延期�
 
 首批内置工具（优先级从高到低）：
 
-| 工具                                     | 说明                                                           |
-| ---------------------------------------- | -------------------------------------------------------------- |
-| `bash`                                   | 经 Sandbox 执行 shell，支持持久会话、沙箱升级需审批            |
-| `read_file` / `write_file` / `edit_file` | edit 采用 str-replace 语义（强制模型先读再改，减少误改）       |
-| `glob` / `grep`                          | 代码检索（rg 后端）                                            |
-| `web_search` / `web_fetch`               | 联网能力（可配置关闭）                                         |
-| `todo`                                   | 任务规划                                                       |
-| `lsp_*`                                  | `lsp_diagnostics` / `lsp_symbols` / `lsp_hover` / `lsp_rename` |
-| `ask_user`                               | 向用户提问（阻塞 turn 直至回复）                               |
-| `subagent`                               | 派生子 Agent（独立上下文，结果回收）                           |
+| 工具                                     | 说明                                                                                                |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `bash`                                   | 经 Sandbox 执行 shell，支持持久会话、沙箱升级需审批                                                 |
+| `read_file` / `write_file` / `edit_file` | edit 采用 str-replace 语义（强制模型先读再改，减少误改）                                            |
+| `glob` / `grep`                          | 代码检索（rg 后端）                                                                                 |
+| `web_search` / `web_fetch`               | 联网能力（可配置关闭）                                                                              |
+| `research`                               | 有界的研究问题、claims/引用与未决问题；工具结果留痕，来源校验使用当前 turn 的成功 browser read 结果 |
+| `todo`                                   | 任务规划                                                                                            |
+| `lsp_*`                                  | `lsp_diagnostics` / `lsp_symbols` / `lsp_hover` / `lsp_rename`                                      |
+| `ask_user`                               | 向用户提问（阻塞 turn 直至回复）                                                                    |
+| `subagent`                               | 派生子 Agent（独立上下文，结果回收）                                                                |
 
 工具实现遵循 §5.2 的 `ToolDefinition`：execute 返回规范化 JSON 值，`render` 负责生成模型可见内容——**测试与 UI 展示都可复用同一渲染层**。
+
+### 8.1 Runtime Skills
+
+Skill 是 Markdown 指令包，执行能力仍来自已有工具。借鉴 dsh 的独立技能目录/服务边界和持久化 catalog，以及 oc 的摘要发现 + 按需加载：`packages/core/src/skills` 实现 Skill Runtime，端口和 DTO/Zod schema 定义在 contracts，server inline、agent-worker 与 worker subagent 在 composition root 注入同一能力。不引入 MCP 或插件依赖。
+
+- **来源与隔离**：只扫描当前 session sandbox root 下的 `.trinity/skills`、`.agents/skills`、`.claude/skills`，以及管理员显式配置的 `SKILL_DIRS`（JSON 路径数组）和发行版 `skills/`。依次优先，重复名称首个有效定义胜出，目录内按路径排序。禁止向 workspace 父目录或宿主 HOME 自动查找，禁止符号链接逃逸；读取、递归深度、目录数、skill 数都有上限。workspace skill 是当前用户提供的指令，不能修改服务端权限、密钥或 egress 策略。
+- **格式与发现**：标准 `SKILL.md` YAML frontmatter（name、description），可选 `disable-model-invocation`、`user-invocable`。无效文件只产生不含正文的诊断，并从可调用 catalog 中移除。服务无会话内存状态，每 step 从来源重新发现；file hash 标识版本。已加载且仍可由模型调用的活跃 skill 在来源版本变化时追加新的 `skill/loaded` 快照；旧 tool/result 在模型投影中标记为已被取代，历史日志不修改，避免更新后会话继续执行旧指令。
+- **渐进加载**：模型先看到 name/description 的 catalog，根据任务选择调用 `skill(name)` 加载完整正文；此接口只加载指令，不执行 skill 中的命令。`skill(name, resource)` 按需读取同目录文本资源，执行脚本仍经 Bash/Sandbox 和现有审批。用户可用 `$skill-name` 显式加载，未知、禁用或策略拒绝时明确失败；明确调用的正文在首个模型请求前入日志；同一 prompt 的显式指令超过 128 KiB 时原子拒绝。`skill: ask` 的摘要仍可发现，模型加载经普通审批；显式加载未取得审批时拒绝。
+- **持久化**：catalog 变化追加 `skill/catalog`（摘要与渲染后的指令），显式加载追加 `skill/loaded`（完整版本快照）；模型加载的正文/资源在普通 `tool/result` 中记录。所有 model-visible skill 内容均可从 PG log 重放，不依赖重启后文件内容。最新 catalog 在 compaction 后重新投影；已加载 skill 按最近使用顺序，在 128 KiB 指令预留预算内保留最新版本快照，避免摘要遗失操作规范或无限累积旧指令；更旧快照仍在日志中，可按需再次加载。当前 session 标识在 catalog 中持久化，fork 后刷新，避免浏览器隔离复用父会话标识。历史 skill 内容不进入 UI 普通聊天消息。未完成的 skill call 在回放投影中合成可重试中断错误，不自动执行或假装已加载。
+- **发布**：发行版安装 `skills/agent-browser/SKILL.md`，支持使用现有 Bash 工具调用 CLI 进行浏览和研究。server/worker Docker 镜像包含 skill 目录。管理员可显式配置 `BROWSER_CDP_ENDPOINT`（无凭据的端口或 HTTP/WebSocket URL）；该连接目标随 catalog 入日志，server/worker/subagent 一致注入。skill 要求每条命令带命名 session、`--cdp`、`--pin-tab`，连接失败不退回独立 headless 浏览器，也不关闭用户 Chrome。未配置时不自动发现宿主浏览器；共享 CDP 仅隔离 tab，cookies/auth 仍共享，因此仅用于显式信任的专用部署，不作为租户隔离机制。Sandbox minimal env 保留 `XDG_RUNTIME_DIR`，保证 CLI daemon socket 目录一致。CLI/浏览器二进制和网络许可是独立部署前提；本地已安装的 CLI 可经 worker 的 PATH 调用，skill 加载不赋予额外执行权限。
 
 ---
 
@@ -443,11 +462,19 @@ PG 是唯一事实源：即使 Redis Stream 被截断、SSE 连接中断，任�
 
 ### 11.5 前端会话层（React）
 
+- 每条用户与 Assistant 消息显示本地时区日期 / 时间，悬停可查看完整时间；`message/committed.message.at` 是向后兼容的可选字段，来自日志事件的 `at`，回放保留原始时间。乐观消息先用本地发送时间，提交后以日志时间校正；旧协议缺少时间时明确显示不可用，不伪造历史时间。Assistant 响应以全宽卡片显示，保留 Markdown、工具调用折叠区与流式状态；完成且有正文后显示复制 / 赞 / 踩操作。复制经浏览器 Clipboard API 写入完整 Markdown，失败提示手动复制；评分仅为当前视图内的互斥可取消选择，尚不持久化或发送到服务端。操作状态在独立 memo 组件内，避免操作时重绘正文与历史。
+
+- 视觉与排版：界面与 antd theme 共享 CSS 字体变量，正文使用 `system-ui` 原生平台字体（Apple 的 San Francisco、Windows 的 Segoe UI、Android 的 Roboto，Linux 按系统配置选择），代码使用 `ui-monospace` 与本地等宽字体回退；不依赖远程字体，以避免加载时布局偏移及外部网络依赖。低对比度的中性背景与绿色强调色用于区分导航和主内容，消息正文保持可读的行高与宽度。手机首次打开时折叠历史栏，为对话保留空间，用户可以随时展开；移动端使用 44px 操作目标、16px 输入字号及安全区内边距；支持键盘焦点与减少动态效果偏好。
+
 - 轻量 ACP client 库（`packages/client-acp`）：封装 `EventSource` 生命周期、重连退避、`Last-Event-ID` 管理、JSON-RPC request/response 配对（`id` → Promise）、缺口检测。
 - 状态管理：事件 reducer 将 `session/update` 折叠进 `createStore`/`zustand` store（消息 part 增量合并，delta 聚合）。
 - antd 组件与 ACP 消息类型一一对应：`session/update(tool_call)` → ToolCall 折叠面板；`request_permission` → 审批 Modal。
 - Web UI（apps/web）：左侧会话历史栏（`GET /api/sessions`，点击经 SSE `afterSeq=0` 重放日志还原会话）；工作区选择器（个人 / 我所属的团队，`POST /api/sessions` 的 `workspace` 字段）；assistant 消息以 Markdown 渲染（react-markdown + remark-gfm）。
 - 输入草稿保存在独立的 composer 组件内，避免每次按键重新渲染历史栏和消息列表；消息使用稳定的 render 函数和 memo，流式更新只重绘变化的消息。首次创建会话、流式响应和布局调整保留 textarea 节点及草稿；显式新建或切换会话才清空草稿。DOM 回归测试使用 jsdom 和模拟 ACP client，检查焦点、草稿以及未变化消息的渲染次数；Vitest 内联 antd / antd-x 依赖以解析其 ESM 导入。
+- 每个用户 prompt 只有一个 assistant response，所有 step 更新同一个稳定节点。progress commit 与 tool step 的临时正文移入默认折叠的 Activity，最终 synthesis 替换主正文；流式 provisional text 仍即时显示。旧日志 replay 同样按 tool/turn 边界合并，取消/错误后的 progress 不作为最终答案，late chunks 不重开已结束的 response。用户消息通过保存的 event ID 区分相同文本的不同 turn，避免吞掉重复提问。
+- 最终回答使用 Trinity (`~/sources/trinity`) 的 **Sources → View evidence** 展示思路：正文用 Markdown links，Sources 计数与 Evidence drawer 按 web source、workspace reference、research claim 展示文档标题、URL/文件位置及有界 excerpt。Zod citation DTO 定义在 contracts，经 shared 重导出（shared 仅增加对 contracts 的依赖，contracts 仍无实现依赖）；最终 `message/assistant` 事件与 ACP `_meta` 携带 `citationList`，SSE/刷新/导出可重放。Loop 从当前 turn 的成功 browser extraction、read_file 和验证过的 research notes 构建最多 60 条引用，携带原始 callId/evidenceSeq；spill 按受限 session blob 恢复，不从模型随意输出的链接制造 grounding。source list 表示观察来源，不保证 claim 语义正确。无来源的普通对话不伪造 citation。
+- 实时文本 / 思考 chunk 不参与持久化日志 seq 去重，也不推进恢复游标：浏览器 EventSource 会让没有 `id:` 的 Pub/Sub 帧继承上一条已提交事件的 ID，按该 ID 去重会吞掉整个实时响应。已提交事件仍按 seq 去重与重放。没有本地占位消息时（重开运行中的会话或同一 turn 的下一模型 step），文本 chunk 创建或更新当前 turn 的唯一流式 Assistant response，提交后原位替换正文；不等待 turn 完成才展示。
+- Composer 使用 `@chenglou/pretext`（参考 `/home/sam/sources/trinity/frontend` 的测量思路）替代 antd textarea 的逐次 DOM autosize 测量，避免输入与流式响应竞争同步布局。DOM 字体 / 内边距 / 宽度在挂载与宽度改变时缓存；内容变化时 `prepare`，同内容调整宽度只做 `layout`，ResizeObserver 忽略仅由自身高度改变引起的通知并在卸载时断开。保留原有 Sender 提交、IME、焦点与草稿行为。
 
 ---
 
@@ -457,6 +484,8 @@ PG 是唯一事实源：即使 Redis Stream 被截断、SSE 连接中断，任�
    - `workspace-write + ask`（默认）：工作区内写自由，危险命令需审批；
    - `read-only`：只读；
    - `danger-full-access + never`（CI 场景，禁用审批）。
+   - `commandPrefixes` 支持管理员配置的 literal argv 前缀白名单，workspace-write 默认含 `agent-browser`。匹配仅接受单一 literal 命令，拒绝 shell composition/expansion，仅允许一个有限行数的 stdin `head`/`tail` 输出过滤器（无文件参数、文件重定向或后续命令；可合并 stderr 到 stdout `2>&1`）；不通过字符串 startsWith 授权，不允许同名后缀 executable 绕过。显式 tool denied 始终优先。
+   - 审批 UI 支持一次或当前 conversation 的 executable/argument-prefix approval。REST 鉴权后核对当前 session 的待决请求和实际 Bash call，先追加 `approval/command_granted` 再通知 worker。Loop 从 PG event log 读取授权，跨 turn/restart 生效，不能覆盖 denied 或绕过沙箱。无原始命令的截断预览不能定义权限。
 2. **审批流**：工具命中策略 → `ApprovalPort.request` → 事件发布到 Redis Stream → API Server 推送到前端对话框（或 ACP `session/request_permission`）→ 结果写回事件日志（**审批请求与结果均留痕**）。无应答器时 fail-closed。
 3. **Sandbox**：v1 在容器内运行（K8s Pod 内嵌套隔离 + 文件系统只读挂载 + 网络策略）；预留接口切换 gVisor / Firecracker microVM；越权操作必须经审批后升级。
 4. **RBAC**：租户 → 角色（admin/developer/viewer）→ 会话与工具策略；密钥（模型 API Key 等）由服务端统一托管（K8s Secret + 信封加密），**永不下发前端**。

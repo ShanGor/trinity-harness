@@ -1,4 +1,4 @@
-import type { Disposable } from '@trinity-harness/contracts';
+import type { Disposable, TurnCancellationPort } from '@trinity-harness/contracts';
 import type { Redis } from 'ioredis';
 
 /**
@@ -10,32 +10,29 @@ import type { Redis } from 'ioredis';
 
 export const cancelChannel = (sessionId: string): string => `sesscancel:${sessionId}`;
 
-export class RedisTurnCancelPublisher {
+export class RedisTurnCancelPublisher implements TurnCancellationPort {
   constructor(private readonly redis: Redis) {}
 
-  cancel(sessionId: string): void {
-    void this.redis.publish(cancelChannel(sessionId), 'cancel').catch(() => {});
+  async cancel(sessionId: string): Promise<void> {
+    await this.redis.publish(cancelChannel(sessionId), 'cancel');
   }
 }
 
 export class RedisTurnCancelSubscriber {
   constructor(private readonly redis: Redis) {}
 
-  subscribe(handler: (sessionId: string) => void): Disposable {
+  subscribe(handler: (sessionId: string) => void): Disposable & { started: Promise<void> } {
     const conn = this.redis.duplicate();
     let stopped = false;
-    void conn
-      .psubscribe('sesscancel:*')
-      .then(() => {
-        conn.on('pmessage', (_pattern: string, channel: string) => {
-          if (stopped) return;
-          handler(channel.slice('sesscancel:'.length));
-        });
-      })
-      .catch((err) => {
-        if (!stopped) console.error('[RedisTurnCancelSubscriber] psubscribe failed', err);
-      });
+    conn.on('pmessage', (_pattern: string, channel: string) => {
+      if (!stopped) handler(channel.slice('sesscancel:'.length));
+    });
+    const started = conn.psubscribe('sesscancel:*').then(() => undefined);
+    void started.catch((err) => {
+      if (!stopped) console.error('[RedisTurnCancelSubscriber] psubscribe failed', err);
+    });
     return {
+      started,
       dispose: () => {
         stopped = true;
         conn.disconnect();

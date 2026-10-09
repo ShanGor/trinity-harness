@@ -11,3 +11,4 @@ export * from './blob/index.js';
 export * from './context/index.js';
 export * from './multimodal/index.js';
 export * from './lsp/index.js';
+export * from './skills/index.js';

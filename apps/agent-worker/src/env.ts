@@ -1,3 +1,8 @@
+import {
+  browserCdpEndpointSchema,
+  skillDirectoriesEnvSchema,
+  turnStepBudgetSchema,
+} from '@trinity-harness/contracts';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
@@ -18,6 +23,9 @@ const workerEnvSchema = z.object({
       'MODEL must be in "provider/model-id" form, e.g. "anthropic/claude-sonnet-4-20250514"',
     )
     .default('anthropic/claude-sonnet-4-20250514'),
+  BROWSER_CDP_ENDPOINT: browserCdpEndpointSchema.optional(),
+  SKILL_DIRS: skillDirectoriesEnvSchema,
+  MAX_TURN_STEPS: turnStepBudgetSchema,
   SYSTEM_PROMPT: z.string().min(1).default('You are Trinity, a software engineering agent.'),
   REASONING_BUDGET_TOKENS: z.coerce.number().int().positive().optional(),
   REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),

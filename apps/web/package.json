@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@ant-design/x": "^1.6.1",
+    "@chenglou/pretext": "^0.0.3",
     "@trinity-harness/client-acp": "*",
     "@trinity-harness/shared": "*",
     "antd": "^5.29.3",

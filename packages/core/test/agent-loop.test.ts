@@ -62,7 +62,8 @@ describe('CoreAgentLoop', () => {
 
     const [request] = llm.requests;
     expect(request!.model).toBe('fake/model');
-    expect(request!.system).toBe('you are a test agent');
+    expect(request!.system).toContain('you are a test agent');
+    expect(request!.system).toContain('reference documents actually read');
     expect(request!.messages).toEqual([{ role: 'user', content: 'hi there' }]);
     expect(request!.tools.map((t) => t.name)).toEqual(['write_file']);
   });
@@ -159,7 +160,7 @@ describe('CoreAgentLoop', () => {
     expect((await store.load('s1')).at(-1)).toMatchObject({ type: 'turn/end', reason: 'aborted' });
   });
 
-  it('persists reasoning and replays it to the model on the next turn', async () => {
+  it('persists reasoning for audit but excludes it from a completed turn context', async () => {
     const llm = new FakeLLM(
       () => [...reasoningChunks('Let me think. '), ...textChunks('answer: 4')],
       () => textChunks('6'),
@@ -183,13 +184,12 @@ describe('CoreAgentLoop', () => {
     const second = await loop.run('s1', 'and 3+3?', new CollectingSink());
 
     expect(second).toEqual({ reason: 'completed', steps: 1 });
-    // The next model request must echo the reasoning back (MiniMax-M3).
+    // A completed turn contributes its final answer, without internal reasoning.
     expect(llm.requests[1]!.messages).toEqual([
       { role: 'user', content: 'what is 2+2?' },
       {
         role: 'assistant',
         content: 'answer: 4',
-        reasoning: [{ text: 'Let me think. ', signature: 'sig-test' }],
       },
       { role: 'user', content: 'and 3+3?' },
     ]);
@@ -235,4 +235,180 @@ describe('CoreAgentLoop', () => {
       { role: 'user', content: 'two' },
     ]);
   });
+});
+
+it('classifies provider failures triggered by cancellation as aborted', async () => {
+  const controller = new AbortController();
+  const store = new MemorySessionStore();
+  const loop = new CoreAgentLoop({
+    llm: {
+      stream: async () => {
+        controller.abort();
+        throw new Error('No output generated');
+      },
+    },
+    model: 'fake/model',
+    tools: new CoreToolRegistry(new FakeSandbox()),
+    store,
+    workspaceRoot: '/ws',
+  });
+  expect(
+    (await loop.run('cancel-provider', 'go', new CollectingSink(), { signal: controller.signal }))
+      .reason,
+  ).toBe('aborted');
+});
+
+it('honors a durable Stop received during a model request before executing its tools', async () => {
+  const store = new MemorySessionStore();
+  const sandbox = new FakeSandbox();
+  const tools = new CoreToolRegistry(sandbox);
+  tools.register(writeFileTool);
+  const loop = new CoreAgentLoop({
+    llm: {
+      stream: async () =>
+        (async function* () {
+          await store.append('durable-stop', [
+            {
+              type: 'turn/cancel_requested',
+              throughPromptSeq: 1,
+              eventId: crypto.randomUUID(),
+              at: '2026-01-01T00:00:00.000Z',
+            },
+          ]);
+          yield* toolCallThenFinish('write', 'write_file', {
+            path: 'out.txt',
+            content: 'side effect',
+          });
+        })(),
+    },
+    model: 'fake/model',
+    tools,
+    store,
+    workspaceRoot: '/ws',
+  });
+  expect((await loop.run('durable-stop', 'write file', new CollectingSink())).reason).toBe(
+    'aborted',
+  );
+  expect(sandbox.files.size).toBe(0);
+});
+
+it('reserves the last step for a final answer instead of more tools', async () => {
+  const llm = new FakeLLM(
+    () => toolCallThenFinish('c', 'write_file', { path: 'x', content: 'evidence' }),
+    (req) => {
+      expect(req.tools).toEqual([]);
+      expect(req.system).toContain('final answer now');
+      return textChunks('Here is the result; remaining work is incomplete.');
+    },
+  );
+  const { loop, store } = makeLoop(llm, new FakeSandbox(), { maxSteps: 2 });
+  expect(await loop.run('s', 'research', new CollectingSink())).toEqual({
+    reason: 'completed',
+    steps: 2,
+  });
+  expect((await store.load('s')).filter((event) => event.type === 'tool/call')).toHaveLength(1);
+});
+
+it('replays conversation command grants and never overrides a denied tool', async () => {
+  const store = new MemorySessionStore();
+  const registry = new CoreToolRegistry(new FakeSandbox());
+  // An unregistered command returns an error, but still must bypass approval.
+  await store.append('s', [
+    {
+      eventId: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      type: 'approval/command_granted',
+      approvalId: crypto.randomUUID(),
+      prefix: ['custom-cli'],
+      decidedBy: 'user',
+    },
+  ]);
+  const policy = {
+    onAsk: 'ask' as const,
+    tools: { bash: 'ask' as const },
+    allowWorkspaceInternalBash: false,
+  };
+  const run = async (denied: boolean): Promise<void> => {
+    const loop = new CoreAgentLoop({
+      store,
+      tools: registry,
+      workspaceRoot: '/ws',
+      model: 'fake',
+      llm: new FakeLLM(
+        () => toolCallThenFinish(denied ? 'd' : 'c', 'bash', { command: 'custom-cli inspect' }),
+        () => textChunks('done'),
+      ),
+    });
+    await loop.run('s', 'go', new CollectingSink(), {
+      policy: denied ? { ...policy, tools: { bash: 'denied' } } : policy,
+    });
+  };
+  await run(false);
+  await run(true);
+  const events = await store.load('s');
+  expect(events.filter((event) => event.type === 'approval/requested')).toHaveLength(0);
+  expect(
+    events.find((event) => event.type === 'tool/result' && event.callId === 'd'),
+  ).toMatchObject({ isError: true, value: { message: expect.stringContaining('denied') } });
+});
+
+it('defaults to 64 model steps and reserves the last for an answer', async () => {
+  const llm = new FakeLLM(
+    ...Array.from(
+      { length: 63 },
+      (_, i) => () => toolCallThenFinish(`c${i}`, 'write_file', { path: 'x', content: String(i) }),
+    ),
+    (request) => {
+      expect(request.tools).toEqual([]);
+      expect(request.system).toContain('final answer now');
+      return textChunks('Completed with these limits.');
+    },
+  );
+  const { loop, store } = makeLoop(llm);
+  expect(await loop.run('s', 'go', new CollectingSink())).toEqual({
+    reason: 'completed',
+    steps: 64,
+  });
+  expect((await store.load('s')).filter((event) => event.type === 'tool/call')).toHaveLength(63);
+  expect((await store.load('s')).filter((event) => event.type === 'turn/guidance')).toHaveLength(1);
+});
+
+it('persists repeated-read guidance, clears it after new evidence, and keeps executing', async () => {
+  const { bashTool } = await import('../src/tools/builtin.js');
+  const store = new MemorySessionStore();
+  const sandbox = new FakeSandbox();
+  sandbox.execHandler = (command) => ({
+    stdout: command.includes('new') ? 'new evidence' : 'same article',
+    stderr: '',
+    exitCode: 0,
+  });
+  const registry = new CoreToolRegistry(sandbox);
+  registry.register(bashTool);
+  const llm = new FakeLLM(
+    ...Array.from(
+      { length: 4 },
+      (_, i) => () => toolCallThenFinish(`read${i}`, 'bash', { command: 'agent-browser snapshot' }),
+    ),
+    (request) => {
+      expect(JSON.stringify(request.messages)).toContain('last three browser reads');
+      return toolCallThenFinish('new', 'bash', { command: 'agent-browser read --filter new' });
+    },
+    (request) => {
+      expect(JSON.stringify(request.messages)).not.toContain('last three browser reads');
+      expect(JSON.stringify(request.messages)).toContain('previous progress warning has cleared');
+      return textChunks('The evidence supports a qualified answer.');
+    },
+  );
+  const loop = new CoreAgentLoop({
+    llm,
+    store,
+    tools: registry,
+    model: 'fake',
+    workspaceRoot: '/ws',
+  });
+  expect(await loop.run('s', 'research', new CollectingSink())).toEqual({
+    reason: 'completed',
+    steps: 6,
+  });
+  expect((await store.load('s')).filter((event) => event.type === 'turn/guidance')).toHaveLength(2);
 });

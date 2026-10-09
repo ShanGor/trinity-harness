@@ -24,6 +24,7 @@
     "@trinity-harness/shared": "*",
     "ai": "^7.0.116",
     "pdf-parse": "^2.4.5",
+    "yaml": "^2.9.1",
     "zod": "^4.6.5"
   }
 }

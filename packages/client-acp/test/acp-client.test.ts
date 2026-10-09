@@ -7,9 +7,11 @@ class FakeEventSource implements EventSourceLike {
   onmessage: ((msg: { data: unknown; lastEventId?: string }) => void) | null = null;
   onerror: ((err: unknown) => void) | null = null;
   closed = false;
+  private lastEventId = '';
   constructor(readonly url: string) {}
   emit(data: unknown, seq?: number): void {
-    this.onmessage?.({ data: JSON.stringify(data), ...(seq ? { lastEventId: String(seq) } : {}) });
+    if (seq !== undefined) this.lastEventId = String(seq);
+    this.onmessage?.({ data: JSON.stringify(data), lastEventId: this.lastEventId });
   }
   close(): void {
     this.closed = true;
@@ -31,6 +33,55 @@ function fakeFetch(routes: Record<string, (init?: RequestInit) => Response>) {
 }
 
 describe('AcpClient', () => {
+  it('delivers live deltas with inherited ids without advancing the replay cursor', () => {
+    let fake!: FakeEventSource;
+    const client = new AcpClient({
+      eventSourceFactory: (url) => (fake = new FakeEventSource(url)),
+    });
+    const received: unknown[] = [];
+    const sequences: number[] = [];
+    const handle = client.openEventStream('abc', {
+      onEvent: (event) => received.push(event),
+      onSeq: (seq) => sequences.push(seq),
+    });
+    const user = {
+      type: 'message/committed',
+      sessionId: 'abc',
+      message: { role: 'user', content: 'Hello' },
+    };
+    const text = {
+      type: 'session/update',
+      sessionId: 'abc',
+      update: { kind: 'agent_message_chunk', text: 'Hi' },
+    };
+    const thought = {
+      type: 'session/update',
+      sessionId: 'abc',
+      update: { kind: 'agent_thought_chunk', text: 'Thinking' },
+    };
+    fake.emit(user, 3);
+    fake.emit(text);
+    fake.emit(text);
+    fake.emit(thought);
+    fake.emit(user, 3);
+    expect(received).toEqual([user, text, text, thought]);
+    expect(sequences).toEqual([3]);
+    expect(client.getSeq('abc')).toBe(3);
+
+    const committed = {
+      type: 'message/committed',
+      sessionId: 'abc',
+      message: { role: 'assistant', content: 'HiHi' },
+    };
+    fake.emit(committed, 5);
+    fake.emit(committed, 5);
+    fake.emit(text);
+    expect(received).toEqual([user, text, text, thought, committed, text]);
+    expect(sequences).toEqual([3, 5]);
+    handle.close();
+    client.openEventStream('abc', { onEvent: () => undefined }).close();
+    expect(fake.url).toContain('afterSeq=5');
+  });
   it('sends a selected personal folder and browses its children', async () => {
     const { impl } = fakeFetch({
       'POST http://x/api/sessions': (init) => {
@@ -146,6 +197,23 @@ describe('AcpClient', () => {
     fake.emit(event, 4);
     expect(received).toHaveLength(2);
     replay.close();
+  });
+
+  it('returns validated cancellation status and surfaces delivery failures', async () => {
+    const { impl } = fakeFetch({
+      'POST http://x/api/sessions/stopped/cancel': () =>
+        new Response('{"ok":true,"alreadyStopped":true}'),
+      'POST http://x/api/sessions/fail/cancel': () => new Response('failed', { status: 500 }),
+    });
+    const client = new AcpClient({ baseUrl: 'http://x', token: 'secret' });
+    const original = globalThis.fetch;
+    globalThis.fetch = impl;
+    try {
+      expect(await client.cancelTurn('stopped')).toEqual({ ok: true, alreadyStopped: true });
+      await expect(client.cancelTurn('fail')).rejects.toThrow('cancelTurn failed: 500');
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 
   it('uses authenticated export and delete endpoints', async () => {

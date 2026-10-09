@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   AiSdkGateway,
@@ -8,6 +9,10 @@ import {
   CoreToolRegistry,
   createLspTools,
   createReadBlobTool,
+  createResearchTool,
+  createSkillTool,
+  FileSkillCatalog,
+  SkillRuntime,
   editFileTool,
   globTool,
   LocalBlobStore,
@@ -68,6 +73,10 @@ async function main(): Promise<void> {
     console.log('[server] OTel SDK started');
   }
   const env = loadServerEnv();
+  const skillCatalog = new FileSkillCatalog({
+    bundledDirectories: [fileURLToPath(new URL('../../../skills/', import.meta.url))],
+    configuredDirectories: env.SKILL_DIRS.map((directory) => path.resolve(directory)),
+  });
   // M5: sandbox env scrubbing (docs/design.md §12.3 hardening) — spawned
   // shells get a minimal env; server secrets never leak into tool children.
   //
@@ -78,6 +87,7 @@ async function main(): Promise<void> {
   interface RootAssembly {
     sandbox: LocalSandbox;
     registry: CoreToolRegistry;
+    skills: SkillRuntime;
   }
   const assemblies = new Map<string, RootAssembly>();
   const assemblyFor = (root: string): RootAssembly => {
@@ -85,6 +95,11 @@ async function main(): Promise<void> {
     if (!assembly) {
       const sandbox = new LocalSandbox(root, { envMode: env.SANDBOX_ENV_MODE });
       const registry = new CoreToolRegistry(sandbox);
+      const skills = new SkillRuntime(skillCatalog, store, {
+        browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
+      });
+      registry.register(createSkillTool(skills));
+      registry.register(createResearchTool(store, blobStore));
       for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
         registry.register(tool);
       }
@@ -94,7 +109,7 @@ async function main(): Promise<void> {
           registry.register(tool);
         }
       }
-      assembly = { sandbox, registry };
+      assembly = { sandbox, registry, skills };
       assemblies.set(root, assembly);
     }
     return assembly;
@@ -128,8 +143,10 @@ async function main(): Promise<void> {
   const m4LoopExtras = (workspaceRoot: string): ConstructorParameters<typeof CoreAgentLoop>[0] => ({
     llm,
     model: env.MODEL,
+    maxSteps: env.MAX_TURN_STEPS,
     systemPrompt: env.SYSTEM_PROMPT,
     tools: assemblyFor(workspaceRoot).registry,
+    skills: assemblyFor(workspaceRoot).skills,
     store,
     workspaceRoot,
     spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },

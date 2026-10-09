@@ -22,10 +22,12 @@ import type {
   SessionStore,
   TeamStore,
   TokenService,
+  TurnCancellationPort,
   UsagePort,
   UserStore,
 } from '@trinity-harness/contracts';
 import {
+  approvalResponseSchema,
   newId,
   personalFoldersQuerySchema,
   serverEventSchema,
@@ -80,9 +82,7 @@ const setPolicySchema = z.object({
   policy: z.string().min(1).max(4000),
 });
 
-const approvalRespondSchema = z.object({
-  outcome: z.enum(['allowed', 'rejected']),
-});
+const approvalRespondSchema = approvalResponseSchema;
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -273,7 +273,12 @@ export function toServerEvent(sessionId: string, event: LoopEvent): ServerEvent 
       return {
         type: 'message/committed',
         sessionId,
-        message: { role: 'assistant', content: event.content },
+        message: {
+          role: 'assistant',
+          content: event.content,
+          ...(event.phase ? { phase: event.phase } : {}),
+          ...(event.citationList ? { citationList: event.citationList } : {}),
+        },
       };
     case 'tool/call':
       return {
@@ -363,6 +368,8 @@ export function logEventToServerEvent(sessionId: string, event: SessionEvent): S
         sessionId,
         message: {
           role: 'user',
+          id: event.eventId,
+          at: event.at,
           content: blocksToText(event.content),
           ...(mediaOf(event.content) !== undefined ? { attachments: mediaOf(event.content) } : {}),
         },
@@ -371,7 +378,13 @@ export function logEventToServerEvent(sessionId: string, event: SessionEvent): S
       return {
         type: 'message/committed',
         sessionId,
-        message: { role: 'assistant', content: blocksToText(event.content) },
+        message: {
+          role: 'assistant',
+          content: blocksToText(event.content),
+          at: event.at,
+          ...(event.phase ? { phase: event.phase } : {}),
+          ...(event.citationList ? { citationList: event.citationList } : {}),
+        },
       };
     case 'tool/call':
       return {
@@ -462,7 +475,7 @@ export interface ServerDeps {
   /** M3: durable approval trail (approvals table). */
   approvalStore?: ApprovalStore;
   /** M3: abort an in-flight turn (session/cancel); usually the worker handle. */
-  turns?: { cancel(sessionId: string): void };
+  turns?: TurnCancellationPort;
   /** M3: permission policy for new sessions when the client picks none. */
   defaultPolicy?: PermissionPolicy;
   /** M4: attachment + spill storage (docs/design.md §10). */
@@ -568,6 +581,63 @@ export async function buildServer(
       }
     },
   });
+
+  // Controllers own only live resources; cancellation intent remains in PG.
+  const inlineTurns = new Map<string, Set<AbortController>>();
+  const inlineJobs = new Set<Promise<unknown>>();
+  const runInline = (sessionId: string, run: (signal: AbortSignal) => Promise<unknown>): void => {
+    const controller = new AbortController();
+    const controllers = inlineTurns.get(sessionId) ?? new Set<AbortController>();
+    controllers.add(controller);
+    inlineTurns.set(sessionId, controllers);
+    const job = run(controller.signal)
+      .catch((err: unknown) => {
+        broadcast(sessionId, {
+          type: 'error',
+          sessionId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        controllers.delete(controller);
+        if (controllers.size === 0) inlineTurns.delete(sessionId);
+        inlineJobs.delete(job);
+      });
+    inlineJobs.add(job);
+  };
+  app.addHook('onClose', async () => {
+    for (const controllers of inlineTurns.values())
+      for (const controller of controllers) controller.abort();
+    await Promise.allSettled([...inlineJobs]);
+  });
+  const cancelTurn = async (
+    sessionId: string,
+    actor: string,
+  ): Promise<{ ok: true; alreadyStopped: boolean }> => {
+    const history = await deps.store.load(sessionId);
+    let promptSeq = 0;
+    let terminalSeq = 0;
+    history.forEach((event, index) => {
+      if (event.type === 'message/user') promptSeq = index + 1;
+      if (event.type === 'turn/end') terminalSeq = index + 1;
+    });
+    if (promptSeq > 0)
+      await deps.store.append(
+        sessionId,
+        [
+          {
+            type: 'turn/cancel_requested',
+            eventId: newId(),
+            at: new Date().toISOString(),
+            throughPromptSeq: promptSeq,
+          },
+        ],
+        { actor },
+      );
+    for (const controller of inlineTurns.get(sessionId) ?? []) controller.abort();
+    await deps.turns?.cancel(sessionId);
+    return { ok: true, alreadyStopped: promptSeq === 0 || terminalSeq > promptSeq };
+  };
 
   /** Ownership check (fail-closed, design.md §12): 404 hides existence. */
   const authorizeSession = async (
@@ -1045,7 +1115,11 @@ export async function buildServer(
     if (!granted) return;
     const surface = await deps.store.projectMessages(granted.sessionId);
     return {
-      messages: surface.map((m) => ({ role: m.role, content: blocksToText(m.content) })),
+      messages: surface.map((m) => ({
+        role: m.role,
+        content: blocksToText(m.content),
+        ...(m.citationList ? { citationList: m.citationList } : {}),
+      })),
     };
   });
 
@@ -1080,7 +1154,7 @@ export async function buildServer(
     ) {
       return reply.code(403).send({ error: 'session deletion requires a developer or admin' });
     }
-    deps.turns?.cancel(sessionId);
+    await cancelTurn(sessionId, identity?.userId ?? 'anonymous');
     await deps.store.append(
       sessionId,
       [{ type: 'session/closed', eventId: newId(), at: new Date().toISOString() }],
@@ -1181,9 +1255,9 @@ export async function buildServer(
     );
     const sink = sinkFor(sessionId);
     const loop = deps.createLoop(sessionId, workspaceRootFor(granted.meta));
-    // Run detached: SSE subscribers observe progress; failures surface as events.
-    void loop
-      .run(sessionId, body.data.text, sink, {
+    runInline(sessionId, (signal) =>
+      loop.run(sessionId, body.data.text, sink, {
+        signal,
         actor: identity?.userId ?? 'anonymous',
         tenantId: identity?.tenantId,
         policy: policyFor(granted.meta),
@@ -1191,14 +1265,8 @@ export async function buildServer(
         ...(body.data.attachments !== undefined
           ? { content: promptContent(body.data.text, body.data.attachments) }
           : {}),
-      })
-      .catch((err: unknown) => {
-        broadcast(sessionId, {
-          type: 'error',
-          sessionId,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      });
+      }),
+    );
     return reply.code(202).send({ accepted: true });
   });
 
@@ -1338,7 +1406,7 @@ export async function buildServer(
     if (identity?.role === 'viewer') {
       return reply.code(403).send({ error: 'viewer role is read-only' });
     }
-    deps.turns?.cancel(granted.sessionId);
+    const cancellation = await cancelTurn(granted.sessionId, identity?.userId ?? 'anonymous');
     emitAudit({
       id: newId(),
       at: new Date().toISOString(),
@@ -1348,7 +1416,7 @@ export async function buildServer(
       action: 'session/cancel',
       result: 'ok',
     });
-    return { ok: true };
+    return cancellation;
   });
 
   app.post('/api/sessions/:sessionId/approvals/:approvalId/respond', async (req, reply) => {
@@ -1372,6 +1440,56 @@ export async function buildServer(
     }
     const approvalId = approvalParams.data.approvalId;
     const decidedBy = identity?.userId ?? 'anonymous';
+    const history = await deps.store.load(granted.sessionId);
+    const request = history.find(
+      (event) => event.type === 'approval/requested' && event.approvalId === approvalId,
+    );
+    if (
+      !request ||
+      request.type !== 'approval/requested' ||
+      history.some((event) => event.type === 'approval/resolved' && event.approvalId === approvalId)
+    ) {
+      return reply.code(409).send({ error: 'approval is not pending in this session' });
+    }
+    const requestIndex = history.indexOf(request);
+    if (
+      history
+        .slice(requestIndex + 1)
+        .some((event) => event.type === 'turn/end' || event.type === 'turn/cancel_requested')
+    ) {
+      return reply.code(409).send({ error: 'approval belongs to a stopped turn' });
+    }
+    const prefix = body.data.commandPrefix;
+    if (prefix) {
+      const call = history.find(
+        (event) => event.type === 'tool/call' && event.callId === request.toolCallId,
+      );
+      const command =
+        call?.type === 'tool/call' && call.name === 'bash'
+          ? (call.args as { command?: unknown } | null)?.command
+          : undefined;
+      const literal = prefix.join(' ');
+      if (
+        typeof command !== 'string' ||
+        !(command.trim() === literal || command.trim().startsWith(literal + ' '))
+      ) {
+        return reply.code(400).send({ error: 'command prefix must match the pending Bash call' });
+      }
+      await deps.store.append(
+        granted.sessionId,
+        [
+          {
+            eventId: newId(),
+            at: new Date().toISOString(),
+            type: 'approval/command_granted',
+            approvalId,
+            prefix,
+            decidedBy,
+          },
+        ],
+        { actor: decidedBy },
+      );
+    }
     // Durable trail (idempotent, first writer wins) + audit + channel reply.
     await deps.approvalStore?.resolve(approvalId, body.data.outcome, decidedBy);
     emitAudit({
@@ -1471,6 +1589,10 @@ export async function buildServer(
             update: {
               sessionUpdate: 'agent_message_chunk',
               content: { type: 'text', text: event.message.content },
+              _meta: {
+                'trinity.phase': event.message.phase,
+                'trinity.citationList': event.message.citationList,
+              },
             },
           },
         };
@@ -1847,22 +1969,17 @@ export async function buildServer(
             });
           } else if (deps.createLoop) {
             const sink = sinkFor(granted.sessionId);
-            void deps
-              .createLoop(granted.sessionId, workspaceRootFor(granted.meta))
-              .run(granted.sessionId, text, sink, {
-                actor: identity?.userId ?? 'anonymous',
+            const loop = deps.createLoop(granted.sessionId, workspaceRootFor(granted.meta));
+            runInline(granted.sessionId, (signal) =>
+              loop.run(granted.sessionId, text, sink, {
+                signal,
+                actor: identity?.userId,
                 tenantId: identity?.tenantId,
                 policy: policyFor(granted.meta),
                 promptSeq: appended.from,
                 ...(content !== null ? { content } : {}),
-              })
-              .catch((err: unknown) => {
-                broadcast(granted.sessionId, {
-                  type: 'error',
-                  sessionId: granted.sessionId,
-                  message: err instanceof Error ? err.message : String(err),
-                });
-              });
+              }),
+            );
           } else {
             return reply.send(jsonRpcError(id, -32603, 'no agent runner configured'));
           }
@@ -1878,7 +1995,9 @@ export async function buildServer(
           const sessionId = String(params['sessionId'] ?? '');
           const granted = await authorizeSession(sessionId, identity, reply);
           if (!granted) return;
-          deps.turns?.cancel(granted.sessionId);
+          if (identity?.role === 'viewer')
+            return reply.send(jsonRpcError(id, -32603, 'viewer role is read-only'));
+          await cancelTurn(granted.sessionId, identity?.userId ?? 'anonymous');
           return id === null ? notify() : result({});
         }
 

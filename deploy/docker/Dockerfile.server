@@ -8,6 +8,7 @@ RUN corepack enable
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages ./packages
 COPY apps ./apps
+COPY skills ./skills
 RUN pnpm install --frozen-lockfile
 
 FROM node:22-slim

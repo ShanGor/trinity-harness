@@ -1,12 +1,15 @@
 import { z } from 'zod';
 
+import { skillSummarySchema, skillSnapshotSchema } from './skills.js';
+import { answerCitationListSchema } from './citations.js';
+
 /** Content blocks exchanged with the model (AI SDK-compatible shape). */
 export const contentBlockSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('text'), text: z.string() }),
   /**
    * Model reasoning ("thinking") block, assistant messages only. Must be
-   * replayed verbatim on subsequent turns for reasoning models (MiniMax-M3
-   * requires the last reasoning output in chat history); the provider
+   * replayed verbatim during active tool steps for reasoning models; finished
+   * turns retain only their final text in model context. The provider
    * signature is kept when the provider returns one (Anthropic format).
    */
   z.object({
@@ -68,6 +71,8 @@ export const assistantMessageEventSchema = z.object({
   ...baseFields,
   type: z.literal('message/assistant'),
   surfaceOp: z.enum(['append', 'replace']),
+  phase: z.enum(['progress', 'final']).optional(),
+  citationList: answerCitationListSchema.optional(),
   content: z.array(contentBlockSchema),
 });
 
@@ -112,14 +117,51 @@ export const approvalResolvedEventSchema = z.object({
   decidedBy: z.string().min(1),
 });
 
+export const commandApprovalGrantedEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('approval/command_granted'),
+  approvalId: z.uuid(),
+  prefix: z.array(z.string().min(1).max(500)).min(1).max(32),
+  decidedBy: z.string().min(1),
+});
+
+export const turnGuidanceEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('turn/guidance'),
+  promptSeq: z.number().int().positive(),
+  advice: z.string().min(1).max(2000),
+});
+
+export const turnCancelRequestedEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('turn/cancel_requested'),
+  throughPromptSeq: z.number().int().positive(),
+});
+
+export const skillCatalogEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('skill/catalog'),
+  skills: z.array(skillSummarySchema).max(128),
+  instructions: z.string().max(150_000),
+});
+export const skillLoadedEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('skill/loaded'),
+  snapshot: skillSnapshotSchema,
+});
+
 /**
  * Session event log entry — discriminated union, zod-validated, append-only.
  * See docs/design.md §7.
  */
 export const sessionEventSchema = z.discriminatedUnion('type', [
+  skillCatalogEventSchema,
+  skillLoadedEventSchema,
   sessionCreatedEventSchema,
   sessionClosedEventSchema,
   turnStartEventSchema,
+  turnCancelRequestedEventSchema,
+  turnGuidanceEventSchema,
   turnEndEventSchema,
   userMessageEventSchema,
   assistantMessageEventSchema,
@@ -128,6 +170,7 @@ export const sessionEventSchema = z.discriminatedUnion('type', [
   compactionSummaryEventSchema,
   approvalRequestedEventSchema,
   approvalResolvedEventSchema,
+  commandApprovalGrantedEventSchema,
 ]);
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
 export type SessionEventType = SessionEvent['type'];

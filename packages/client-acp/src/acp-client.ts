@@ -1,5 +1,14 @@
-import { personalFoldersResponseSchema, serverEventSchema } from '@trinity-harness/shared';
-import type { ServerEvent, SurfaceMessage, WorkspaceSelection } from '@trinity-harness/shared';
+import {
+  personalFoldersResponseSchema,
+  serverEventSchema,
+  turnCancelResponseSchema,
+} from '@trinity-harness/shared';
+import type {
+  ServerEvent,
+  SurfaceMessage,
+  WorkspaceSelection,
+  TurnCancelResponse,
+} from '@trinity-harness/shared';
 
 export type { WorkspaceSelection } from '@trinity-harness/shared';
 
@@ -278,7 +287,14 @@ export class AcpClient {
         const parsed = serverEventSchema.parse(JSON.parse(String(msg.data)));
         // Native Last-Event-ID handling: seq ids arrive out-of-band.
         const seq = Number(msg.lastEventId);
-        if (Number.isInteger(seq) && seq > 0) {
+        // EventSource inherits the previous id on Pub/Sub frames without id:.
+        // Text/thought deltas are ephemeral and must never advance or dedupe
+        // against the persisted log cursor.
+        const liveDelta =
+          parsed.type === 'session/update' &&
+          (parsed.update.kind === 'agent_message_chunk' ||
+            parsed.update.kind === 'agent_thought_chunk');
+        if (!liveDelta && Number.isInteger(seq) && seq > 0) {
           if (seq <= this.getSeq(sessionId)) return;
           this.noteSeq(sessionId, seq);
           handlers.onSeq?.(seq);
@@ -307,13 +323,14 @@ export class AcpClient {
     sessionId: string,
     approvalId: string,
     outcome: 'allowed' | 'rejected',
+    commandPrefix?: string[],
   ): Promise<void> {
     const res = await fetch(
       `${this.baseUrl}/api/sessions/${sessionId}/approvals/${approvalId}/respond`,
       {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...this.authHeaders() },
-        body: JSON.stringify({ outcome }),
+        body: JSON.stringify({ outcome, commandPrefix }),
       },
     );
     if (!res.ok) {
@@ -322,7 +339,7 @@ export class AcpClient {
   }
 
   /** M3: abort the in-flight turn of a session (session/cancel). */
-  async cancelTurn(sessionId: string): Promise<void> {
+  async cancelTurn(sessionId: string): Promise<TurnCancelResponse> {
     const res = await fetch(`${this.baseUrl}/api/sessions/${sessionId}/cancel`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...this.authHeaders() },
@@ -331,6 +348,7 @@ export class AcpClient {
     if (!res.ok) {
       throw new Error(`cancelTurn failed: ${res.status}`);
     }
+    return turnCancelResponseSchema.parse(await res.json());
   }
 
   /** Login against the M2 auth endpoint; returns the bearer token. */

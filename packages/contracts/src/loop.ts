@@ -1,13 +1,29 @@
+import { z } from 'zod';
+
+export const DEFAULT_TURN_MAX_STEPS = 64;
+export const turnStepBudgetSchema = z.coerce
+  .number()
+  .int()
+  .positive()
+  .max(1024)
+  .default(DEFAULT_TURN_MAX_STEPS);
+
 import type { ContentBlock } from './events.js';
 import type { PermissionPolicy } from './approval.js';
 import type { ToolCall, ToolResult } from './tools.js';
+import type { AnswerCitation } from './citations.js';
 
 /** Real-time events emitted by the Agent Loop while a turn runs (design.md §6). */
 export type LoopEvent =
   | { type: 'turn/start'; turn: number }
   | { type: 'text-delta'; text: string }
   | { type: 'reasoning-delta'; text: string }
-  | { type: 'message/assistant'; content: string }
+  | {
+      type: 'message/assistant';
+      content: string;
+      phase?: 'progress' | 'final';
+      citationList?: AnswerCitation[];
+    }
   | { type: 'tool/call'; call: ToolCall }
   | { type: 'tool/result'; callId: string; name: string; result: ToolResult }
   | {

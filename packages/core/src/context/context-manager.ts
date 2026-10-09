@@ -5,7 +5,12 @@ import type {
   SessionEvent,
   SessionStore,
 } from '@trinity-harness/contracts';
-import { compactionRanges, isCompacted } from '@trinity-harness/contracts';
+import {
+  compactionRanges,
+  isCompacted,
+  projectMessages,
+  citationContext,
+} from '@trinity-harness/contracts';
 import { newId } from '@trinity-harness/shared';
 
 import { heuristicEstimator, type TokenEstimator } from './estimate-tokens.js';
@@ -146,7 +151,14 @@ export class ContextManager {
     const fromSeq = groups[0]!.fromSeq;
 
     // Summarize the dropped range with the LLM.
-    const dropped = toModelMessages(events.slice(fromSeq - 1, toSeq));
+    const dropped = projectMessages(events.slice(fromSeq - 1, toSeq)).map((message) => ({
+      role: message.role,
+      content:
+        message.content
+          .filter((block) => block.kind === 'text')
+          .map((block) => (block.kind === 'text' ? block.text : ''))
+          .join('\n') + citationContext(message.citationList ?? []),
+    }));
     const summary = await this.summarize(dropped, extras?.signal);
 
     await store.append(

@@ -44,6 +44,25 @@ describe('LocalSandbox env scrubbing (M5)', () => {
     expect(result.stdout).toBe('hello');
   });
 
+  it('preserves the runtime socket directory without passing browser credentials or other configuration', async () => {
+    const keys = ['XDG_RUNTIME_DIR', 'AGENT_BROWSER_ENCRYPTION_KEY', 'AGENT_BROWSER_SESSION'];
+    const original = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    process.env['XDG_RUNTIME_DIR'] = '/tmp/trinity-test-runtime';
+    process.env['AGENT_BROWSER_ENCRYPTION_KEY'] = 'secret';
+    process.env['AGENT_BROWSER_SESSION'] = 'default';
+    try {
+      const result = await new LocalSandbox(workspace).exec('env');
+      expect(result.stdout).toContain('XDG_RUNTIME_DIR=/tmp/trinity-test-runtime');
+      expect(result.stdout).not.toContain('AGENT_BROWSER_ENCRYPTION_KEY');
+      expect(result.stdout).not.toContain('AGENT_BROWSER_SESSION');
+    } finally {
+      for (const key of keys) {
+        if (original[key] === undefined) delete process.env[key];
+        else process.env[key] = original[key];
+      }
+    }
+  });
+
   it('inherit mode keeps the legacy full-passthrough behavior', async () => {
     process.env['TRINITY_TEST_SECRET'] = 'super-secret-value';
     try {

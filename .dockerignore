@@ -9,3 +9,7 @@ docs
 .env.*
 deploy/helm
 scripts
+
+# Runtime skills are shipped instruction packages.
+!skills/
+!skills/**

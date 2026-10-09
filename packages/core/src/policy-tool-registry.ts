@@ -8,6 +8,8 @@ import type {
   ToolSchema,
 } from '@trinity-harness/contracts';
 
+import { matchesCommandPrefix } from './tools/command-prefix.js';
+
 import { classifyBashCommand } from './tools/bash-classifier.js';
 
 /**
@@ -47,6 +49,14 @@ export class PolicyToolRegistry implements ToolRegistry {
     const decision =
       policy.tools[call.name] ?? policy.tools['*'] ?? (call.name === 'bash' ? 'ask' : 'allowed');
     if (decision !== 'ask') return decision;
+    if (
+      call.name === 'bash' &&
+      matchesCommandPrefix(
+        (call.args as { command?: unknown } | null)?.command,
+        policy.commandPrefixes ?? [],
+      )
+    )
+      return 'allowed';
     if (
       call.name === 'bash' &&
       policy.allowWorkspaceInternalBash &&

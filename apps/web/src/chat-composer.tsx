@@ -1,5 +1,8 @@
 import { memo, useEffect, useState, type ReactElement } from 'react';
 import { Sender } from '@ant-design/x';
+import { PretextTextArea } from './pretext-textarea';
+
+const senderComponents = { input: PretextTextArea };
 
 export const ChatComposer = memo(function ChatComposer({
   busy,
@@ -20,6 +23,7 @@ export const ChatComposer = memo(function ChatComposer({
 
   return (
     <Sender
+      components={senderComponents}
       value={input}
       onChange={setInput}
       onSubmit={(text) => {

@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 
-import type { ServerEvent, SessionUpdate } from '@trinity-harness/shared';
+import type { ServerEvent } from '@trinity-harness/shared';
 import {
   App as AntdApp,
   Button,
@@ -34,14 +34,19 @@ import {
 import { HistorySidebar, HistoryDivider } from './history-sidebar';
 import { ChatComposer } from './chat-composer';
 import './chat-layout.css';
+import { ResponseActions } from './response-actions';
+import { MessageTimestamp } from './message-timestamp';
+import { AnswerCitationList } from './answer-citations';
 
 import {
+  settleAssistantItems,
+  mergeAssistantChunk,
+  mergeToolUpdate,
   mergeCommittedAssistantMessage,
   mergeCommittedUserMessage,
   newItemKey,
   type AttachmentView,
   type ChatItem,
-  type ToolCallView,
 } from './chat-items';
 
 /**
@@ -93,27 +98,13 @@ function workspaceLabel(s: SessionSummary, teams: TeamView[]): string {
   return teams.find((t) => t.teamId === s.scopeId)?.name ?? 'team';
 }
 
-function upsertTool(item: ChatItem, update: SessionUpdate & { kind: 'tool_call' }): ChatItem {
-  const existing = item.tools.find((t) => t.toolCallId === update.toolCallId);
-  const next: ToolCallView = {
-    toolCallId: update.toolCallId,
-    title: existing?.title || update.title || update.toolCallId,
-    status: update.status,
-    ...(update.content !== undefined ? { content: update.content } : {}),
-  };
-  return {
-    ...item,
-    tools: existing
-      ? item.tools.map((t) => (t.toolCallId === update.toolCallId ? next : t))
-      : [...item.tools, next],
-  };
-}
-
 export default function App() {
   const { message, modal } = AntdApp.useApp();
   const [user, setUser] = useState<MeUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
-  const [historyCollapsed, setHistoryCollapsed] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState(
+    () => window.matchMedia('(max-width: 600px)').matches,
+  );
   const [historyWidthRatio, setHistoryWidthRatio] = useState(0.22);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -176,20 +167,13 @@ export default function App() {
     }
   }, []);
 
-  const applyToLastAssistant = useCallback((fn: (item: ChatItem) => ChatItem) => {
-    setItems((prev) => {
-      const last = prev[prev.length - 1];
-      if (!last || last.role !== 'assistant') return prev;
-      return [...prev.slice(0, -1), fn(last)];
-    });
-  }, []);
-
   const handleEvent = useCallback(
     (event: ServerEvent) => {
       if (event.type === 'error') {
         message.error(event.message);
         setBusy(false);
-        applyToLastAssistant((item) => ({ ...item, streaming: false }));
+        setApproval(null);
+        setItems((items) => settleAssistantItems(items, 'error'));
         return;
       }
       if (event.type === 'message/committed') {
@@ -197,7 +181,13 @@ export default function App() {
           // Live: fill the optimistic placeholder. Replay: append a new item
           // (see chat-items.ts — the placeholder only exists in the live flow).
           setItems((prev) =>
-            mergeCommittedAssistantMessage(prev, event.message.content, newItemKey),
+            mergeCommittedAssistantMessage(
+              prev,
+              event.message.content,
+              newItemKey,
+              event.message.at,
+              event.message,
+            ),
           );
         } else {
           // Replayed/relayed user message — skip if we already rendered it
@@ -208,6 +198,8 @@ export default function App() {
               prev,
               {
                 content: event.message.content,
+                id: event.message.id,
+                at: event.message.at,
                 attachments: event.message.attachments,
               },
               newItemKey,
@@ -218,14 +210,17 @@ export default function App() {
       }
       if (event.type === 'session/update' && event.update.kind === 'agent_message_chunk') {
         const { text } = event.update;
-        applyToLastAssistant((item) =>
-          item.streaming ? { ...item, content: item.content + text } : item,
+        setItems((prev) =>
+          mergeAssistantChunk(prev, text, newItemKey, new Date(Date.now()).toISOString()),
         );
+        setBusy(true);
         return;
       }
       if (event.type === 'session/update' && event.update.kind === 'tool_call') {
         const update = event.update;
-        applyToLastAssistant((item) => upsertTool(item, update));
+        setItems((items) =>
+          mergeToolUpdate(items, update, newItemKey, new Date(Date.now()).toISOString()),
+        );
         return;
       }
       if (event.type === 'session/update' && event.update.kind === 'permission_request') {
@@ -245,13 +240,14 @@ export default function App() {
       }
       if (event.type === 'session/turn_status') {
         if (event.status === 'completed' || event.status === 'aborted') {
+          const status = event.status;
           setBusy(false);
           setApproval(null);
-          applyToLastAssistant((item) => ({ ...item, streaming: false }));
+          setItems((items) => settleAssistantItems(items, status));
         }
       }
     },
-    [applyToLastAssistant, message],
+    [message],
   );
 
   const openStream = useCallback(
@@ -270,10 +266,15 @@ export default function App() {
   );
 
   const onApprove = useCallback(
-    async (outcome: 'allowed' | 'rejected') => {
+    async (outcome: 'allowed' | 'rejected', commandPrefix?: string[]) => {
       if (!approval || !sessionRef.current) return;
       try {
-        await client.respondApproval(sessionRef.current, approval.approvalId, outcome);
+        await client.respondApproval(
+          sessionRef.current,
+          approval.approvalId,
+          outcome,
+          commandPrefix,
+        );
         setApproval(null);
       } catch (err) {
         message.error(err instanceof Error ? err.message : String(err));
@@ -285,7 +286,14 @@ export default function App() {
   const onCancelTurn = useCallback(async () => {
     if (!sessionRef.current) return;
     try {
-      await client.cancelTurn(sessionRef.current);
+      const sessionId = sessionRef.current;
+      const result = await client.cancelTurn(sessionId);
+      if (sessionRef.current !== sessionId) return;
+      setApproval(null);
+      if (result.alreadyStopped) {
+        setBusy(false);
+        setItems((items) => settleAssistantItems(items, 'aborted'));
+      }
     } catch (err) {
       message.error(err instanceof Error ? err.message : String(err));
     }
@@ -465,6 +473,7 @@ export default function App() {
         {
           key: newItemKey(),
           role: 'user',
+          at: new Date(Date.now()).toISOString(),
           content: trimmed || '[attachments]',
           streaming: false,
           tools: [],
@@ -473,6 +482,7 @@ export default function App() {
         {
           key: newItemKey(),
           role: 'assistant',
+          at: new Date(Date.now()).toISOString(),
           content: '',
           streaming: true,
           tools: [],
@@ -487,10 +497,10 @@ export default function App() {
       } catch (err) {
         message.error(err instanceof Error ? err.message : String(err));
         setBusy(false);
-        applyToLastAssistant((item) => ({ ...item, streaming: false }));
+        setItems((items) => settleAssistantItems(items, 'error'));
       }
     },
-    [applyToLastAssistant, busy, ensureSession, message, refreshSessions, staged],
+    [busy, ensureSession, message, refreshSessions, staged],
   );
 
   const activeTitle = sessions.find((s) => s.sessionId === sessionId)?.title;
@@ -501,10 +511,16 @@ export default function App() {
         <div className="empty-chat-state">
           <img src="/branding/trinity-logo.png" alt="Trinity logo" />
           <span className="eyebrow">TRINITY HARNESS</span>
-          <Typography.Title level={2}>What do you want to make progress on?</Typography.Title>
-          <Typography.Text>
-            Describe a coding task or attach an image or PDF to get started.
+          <Typography.Title level={2}>What would you like to work on?</Typography.Title>
+          <Typography.Text className="empty-chat-description">
+            Build something new, work through a bug, or explore your code. Start with what you have
+            in mind.
           </Typography.Text>
+          <div className="empty-chat-capabilities" aria-label="Things you can work on">
+            <span>Build & refine</span>
+            <span>Debug & understand</span>
+            <span>Review & improve</span>
+          </div>
         </div>
       )}
       {items.length > 0 && <ChatTranscript items={items} />}
@@ -599,8 +615,8 @@ export default function App() {
   }
 
   const workspaceOptions = [
-    { value: 'personal', label: `👤 Personal (${user.email})` },
-    ...teams.map((t) => ({ value: `team:${t.teamId}`, label: `👥 ${t.name}` })),
+    { value: 'personal', label: 'Personal workspace' },
+    ...teams.map((t) => ({ value: `team:${t.teamId}`, label: t.name })),
   ];
 
   return (
@@ -674,8 +690,9 @@ export default function App() {
                 }
                 disabled={busy || !!sessionRef.current}
                 options={workspaceOptions}
-                style={{ width: 160 }}
+                style={{ width: 180 }}
                 title="Workspace for the next session"
+                aria-label="Workspace for the next session"
               />
               {workspace.scope === 'personal' && (
                 <Button
@@ -686,23 +703,24 @@ export default function App() {
                     setFolderPickerOpen(true);
                   }}
                 >
-                  {workspace.path ? `📁 ${workspace.path}` : '📁 Personal root'}
+                  {workspace.path || 'Choose folder'}
                 </Button>
               )}
               <Button size="small" onClick={() => setTeamsOpen(true)}>
-                Teams…
+                Teams
               </Button>
               <Select
                 size="small"
+                aria-label="Tool permissions for the next session"
                 value={policy}
                 onChange={setPolicy}
                 disabled={busy || !!sessionRef.current}
                 options={[
-                  { value: 'workspace-write', label: 'workspace-write + ask' },
-                  { value: 'read-only', label: 'read-only' },
-                  { value: 'danger-full-access', label: 'danger-full-access + never' },
+                  { value: 'workspace-write', label: 'Workspace write · ask' },
+                  { value: 'read-only', label: 'Read only' },
+                  { value: 'danger-full-access', label: 'Full access · no approvals' },
                 ]}
-                style={{ width: 185 }}
+                style={{ width: 210 }}
               />
               <Typography.Text type="secondary" className="user-label">
                 {user.email} ({user.role})
@@ -715,7 +733,9 @@ export default function App() {
           <ApprovalModal
             approval={approval}
             onApprove={() => void onApprove('allowed')}
+            onApprovePattern={(prefix) => void onApprove('allowed', prefix)}
             onReject={() => void onApprove('rejected')}
+            onStop={() => void onCancelTurn()}
           />
           <Modal
             open={folderPickerOpen}
@@ -834,7 +854,12 @@ const RecentConversations = memo(function RecentConversations({
                 },
               }}
             >
-              <Button size="small" type="text" onClick={(event) => event.stopPropagation()}>
+              <Button
+                size="small"
+                type="text"
+                aria-label={`Actions for ${s.title || 'untitled conversation'}`}
+                onClick={(event) => event.stopPropagation()}
+              >
                 ⋯
               </Button>
             </Dropdown>,
@@ -842,12 +867,14 @@ const RecentConversations = memo(function RecentConversations({
         >
           <List.Item.Meta
             title={
-              <Typography.Text
-                ellipsis
-                style={{ maxWidth: 200, fontWeight: s.sessionId === sessionId ? 600 : 400 }}
+              <Button
+                type="text"
+                className="history-title"
+                aria-current={s.sessionId === sessionId ? 'true' : undefined}
+                title={s.title || 'Untitled conversation'}
               >
-                {s.title || '(untitled)'}
-              </Typography.Text>
+                {s.title || 'Untitled conversation'}
+              </Button>
             }
             description={
               <Flex gap={8} align="center">
@@ -899,6 +926,10 @@ const ChatMessageContent = memo(function ChatMessageContent({
   if (item.role === 'assistant') return <AssistantContent item={item} content={item.content} />;
   return (
     <div>
+      <div className="user-message-heading">
+        <span>You</span>
+        <MessageTimestamp at={item.at} />
+      </div>
       {item.content.length > 0 && (
         <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>
           {item.content}
@@ -910,9 +941,14 @@ const ChatMessageContent = memo(function ChatMessageContent({
 });
 
 /** Markdown-rendered assistant bubble: streaming deltas + tool calls below. */
-function AssistantContent({ item, content }: { item: ChatItem; content: string }) {
+function AssistantContent({ item, content }: { item: ChatItem; content: string }): ReactElement {
   return (
-    <div>
+    <article className="assistant-response" aria-label="Trinity response">
+      <div className="response-heading">
+        <span className="response-author">Trinity</span>
+        {item.streaming && <span className="response-streaming">Responding…</span>}
+        <MessageTimestamp at={item.at} />
+      </div>
       {content.length > 0 && (
         <div className="md" style={{ marginBottom: 8 }}>
           <ReactMarkdown
@@ -927,21 +963,41 @@ function AssistantContent({ item, content }: { item: ChatItem; content: string }
         </div>
       )}
       <AttachmentList attachments={item.attachments} />
-      {item.tools.length > 0 && (
-        <Collapse
-          size="small"
-          items={item.tools.map((tool) => ({
-            key: tool.toolCallId,
-            label: `${tool.status === 'in_progress' ? '⏳' : tool.status === 'failed' ? '❌' : '✅'} ${tool.title}`,
-            children: (
-              <Typography.Text code style={{ whiteSpace: 'pre-wrap' }}>
-                {tool.content ?? ''}
-              </Typography.Text>
-            ),
-          }))}
-        />
+      {(item.tools.length > 0 || !!item.activity?.length) && (
+        <details className="turn-activity">
+          <summary>
+            Activity · {item.activity?.length ?? 0} updates · {item.tools.length} tools
+          </summary>
+          {!!item.activity?.length && (
+            <ol className="turn-progress">
+              {item.activity.map((entry, index) => (
+                <li key={index}>
+                  <Typography.Paragraph style={{ whiteSpace: 'pre-wrap' }}>
+                    {entry.content}
+                  </Typography.Paragraph>
+                </li>
+              ))}
+            </ol>
+          )}
+          <Collapse
+            size="small"
+            items={item.tools.map((tool) => ({
+              key: tool.toolCallId,
+              label: `${tool.status === 'in_progress' ? '⏳' : tool.status === 'failed' ? '❌' : '✅'} ${tool.title}`,
+              children: (
+                <Typography.Text code style={{ whiteSpace: 'pre-wrap' }}>
+                  {tool.content ?? ''}
+                </Typography.Text>
+              ),
+            }))}
+          />
+        </details>
       )}
-    </div>
+      {item.stopped && <Typography.Text type="secondary">Task stopped.</Typography.Text>}
+      {item.error && <Typography.Text type="secondary">The task could not finish.</Typography.Text>}
+      {!item.streaming && <AnswerCitationList citations={item.citationList} />}
+      {!item.streaming && content.trim().length > 0 && <ResponseActions content={content} />}
+    </article>
   );
 }
 
@@ -1021,11 +1077,27 @@ function ApprovalModal({
   approval,
   onApprove,
   onReject,
+  onStop,
+  onApprovePattern,
 }: {
   approval: PendingApproval | null;
   onApprove: () => void;
   onReject: () => void;
+  onStop: () => void;
+  onApprovePattern: (prefix: string[]) => void;
 }) {
+  const [pattern, setPattern] = useState('');
+  useEffect(() => {
+    let command = '';
+    try {
+      command = (JSON.parse(approval?.argsPreview ?? '{}') as { command?: string }).command ?? '';
+    } catch {
+      command = '';
+    }
+    setPattern(command.trim().split(/\s+/)[0] ?? '');
+  }, [approval?.approvalId, approval?.argsPreview]);
+  const prefix = pattern.trim().split(/\s+/).filter(Boolean);
+  const valid = prefix.length > 0 && prefix.every((word) => /^[a-zA-Z0-9_./:@=+-]+$/.test(word));
   return (
     <Modal
       open={approval !== null}
@@ -1036,7 +1108,31 @@ function ApprovalModal({
       onCancel={onReject}
       maskClosable={false}
       keyboard={false}
+      footer={(_, { OkBtn, CancelBtn }) => (
+        <>
+          <Button onClick={onStop}>Stop task</Button>
+          {approval?.toolName === 'bash' && (
+            <Button disabled={!valid} onClick={() => onApprovePattern(prefix)}>
+              Allow pattern for conversation
+            </Button>
+          )}
+          <CancelBtn />
+          <OkBtn />
+        </>
+      )}
     >
+      {approval?.toolName === 'bash' && (
+        <>
+          <Typography.Paragraph>
+            Allow commands starting with this executable and arguments for this conversation:
+          </Typography.Paragraph>
+          <Input
+            aria-label="Command prefix"
+            value={pattern}
+            onChange={(event) => setPattern(event.target.value)}
+          />
+        </>
+      )}
       <Typography.Paragraph>The agent wants to run a gated tool call:</Typography.Paragraph>
       <Typography.Text code style={{ whiteSpace: 'pre-wrap', display: 'block' }}>
         {approval?.title ?? ''}
@@ -1107,8 +1203,7 @@ function TeamsModal({
         </Flex>
         {teams.length === 0 && (
           <Typography.Text type="secondary">
-            No teams yet. Create one, then add members by email — its workspace is
-            <Typography.Text code> $WORKSPACE_ROOT/&lt;team_id&gt;</Typography.Text>.
+            Create a team to share a workspace, then invite members by email.
           </Typography.Text>
         )}
         {teams.map((t) => (
@@ -1173,6 +1268,7 @@ function AuditTable() {
       <Table<AuditRow>
         size="small"
         rowKey="id"
+        scroll={{ x: 800 }}
         loading={loading}
         dataSource={rows}
         pagination={{

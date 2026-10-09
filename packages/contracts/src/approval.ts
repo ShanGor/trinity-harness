@@ -28,6 +28,11 @@ export const permissionPolicySchema = z.object({
    * decision is already 'allowed' or 'denied'.
    */
   allowWorkspaceInternalBash: z.boolean(),
+  /** Literal argv prefixes; only bounded stdin head/tail filters and stderr-to-stdout merging may follow. */
+  commandPrefixes: z
+    .array(z.array(z.string().min(1).max(500)).min(1).max(32))
+    .max(128)
+    .optional(),
 });
 export type PermissionPolicy = z.infer<typeof permissionPolicySchema>;
 
@@ -37,6 +42,7 @@ export const PERMISSION_PRESETS = {
     onAsk: 'ask',
     tools: {},
     allowWorkspaceInternalBash: true,
+    commandPrefixes: [['agent-browser']],
   },
   'read-only': {
     onAsk: 'ask',
@@ -100,6 +106,8 @@ export interface ApprovalRequester {
 }
 
 export interface ApprovalListener {
+  /** Resolves when the optional asynchronous request subscription is ready. */
+  started?: Promise<void>;
   /** Called for every approval request of this session. */
   onRequest(handler: (req: ApprovalRequest) => void): void;
   /** Resolves the pending request; ignored when the id is unknown. */

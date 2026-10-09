@@ -1,4 +1,4 @@
-import { spawn, execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { glob as fsGlob } from 'node:fs/promises';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -58,7 +58,17 @@ export class LocalSandbox implements SandboxPort {
       return { ...process.env, ...extra };
     }
     const minimal: NodeJS.ProcessEnv = {};
-    for (const key of ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR', 'USER', 'SHELL']) {
+    for (const key of [
+      'PATH',
+      'HOME',
+      'LANG',
+      'LC_ALL',
+      'TZ',
+      'TMPDIR',
+      'USER',
+      'SHELL',
+      'XDG_RUNTIME_DIR',
+    ]) {
       const value = process.env[key];
       if (value !== undefined) minimal[key] = value;
     }
@@ -81,30 +91,70 @@ export class LocalSandbox implements SandboxPort {
       AbortSignal.timeout(opts?.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS),
       ...(opts?.signal ? [opts.signal] : []),
     ];
+    const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
     return new Promise<ExecResult>((resolvePromise) => {
-      execFile(
-        'bash',
-        ['-c', command],
-        {
-          cwd,
-          env: this.childEnv(opts?.env),
-          signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals),
-          maxBuffer: MAX_BUFFER,
-        },
-        (error, stdout, stderr) => {
-          if (!error) {
-            resolvePromise({ stdout, stderr, exitCode: 0 });
-            return;
+      const child = spawn('bash', ['-c', command], {
+        cwd,
+        env: this.childEnv(opts?.env),
+        detached: process.platform !== 'win32',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const stdout: Buffer[] = [];
+      const stderr: Buffer[] = [];
+      let bytes = 0;
+      let failure: string | undefined;
+      let settled = false;
+      let escalation: AbortSignal | undefined;
+      const kill = (kind: NodeJS.Signals): void => {
+        if (!child.pid) return;
+        try {
+          if (process.platform === 'win32') child.kill(kind);
+          else process.kill(-child.pid, kind);
+        } catch (err) {
+          // ESRCH means the command group has already exited.
+          if (!(err instanceof Error && 'code' in err && err.code === 'ESRCH')) {
+            console.error('[LocalSandbox] command group cancellation failed', err);
           }
-          const killed = 'killed' in error && error.killed === true;
-          resolvePromise({
-            stdout: String(stdout ?? ''),
-            stderr: String(stderr ?? '') || error.message,
-            // 124 mirrors `timeout(1)` so callers can distinguish forced kills.
-            exitCode: killed ? 124 : typeof error.code === 'number' ? error.code : 1,
-          });
-        },
-      );
+        }
+      };
+      const forceKill = (): void => kill('SIGKILL');
+      const onAbort = (): void => {
+        kill('SIGTERM');
+        escalation = AbortSignal.timeout(1000);
+        escalation.addEventListener('abort', forceKill, { once: true });
+      };
+      const finish = (code: number | null): void => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        escalation?.removeEventListener('abort', forceKill);
+        resolvePromise({
+          stdout: Buffer.concat(stdout).toString('utf8'),
+          stderr:
+            Buffer.concat(stderr).toString('utf8') ||
+            failure ||
+            (signal.aborted ? 'command cancelled or timed out' : ''),
+          exitCode: signal.aborted ? 124 : failure ? 1 : (code ?? 1),
+        });
+      };
+      const capture = (target: Buffer[], chunk: Buffer): void => {
+        const remaining = Math.max(MAX_BUFFER - bytes, 0);
+        target.push(chunk.subarray(0, remaining));
+        bytes += chunk.byteLength;
+        if (bytes > MAX_BUFFER) {
+          failure = 'command output exceeded the buffer limit';
+          kill('SIGKILL');
+        }
+      };
+      child.stdout.on('data', (chunk: Buffer) => capture(stdout, chunk));
+      child.stderr.on('data', (chunk: Buffer) => capture(stderr, chunk));
+      child.once('error', (err) => {
+        failure = err.message;
+        finish(1);
+      });
+      child.once('close', (code) => finish(code));
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
     });
   }
 
