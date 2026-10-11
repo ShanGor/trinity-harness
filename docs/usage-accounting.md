@@ -1,0 +1,49 @@
+# Token usage and estimated cost
+
+Every model request records a `model/usage` event in the session log. The turn footer and session header open the same accounting panel: uncached input, cache reads, cache writes, output, reasoning within output, input cache-hit percentage, estimated money spent, and a breakdown by model. Session export includes these records.
+
+Session totals sum request consumption across turns, including reported compaction and subagent calls. They measure cumulative consumption, not the size of the current context. A model change keeps previous requests attributed to their original model. Rate changes never reprice previous requests. Request IDs prevent duplicate counts during replay/reconnection, while prompt IDs attach usage to the originating turn.
+
+## Configure prices
+
+Set `MODEL_PRICING` on the **server and agent worker** to a JSON object keyed by the exact routed `provider/model-id`. Each value is an array of price tiers. All rates are **decimal strings in currency units per million tokens**. The following is an illustrative configuration, not a published model price:
+
+```dotenv
+MODEL_PRICING='{"provider/model-id":[{"currency":"USD","version":"contract-2026-10","input":"2","output":"10","cacheRead":"0.2","cacheWrite":"2.5"}]}'
+```
+
+For Helm, set the equivalent object under `config.modelPricing`; it is serialized into the shared ConfigMap. Restart the relevant workloads after changing configuration. New requests save the selected rate snapshot alongside their cost. No default provider prices are assumed: proxies, negotiated contracts and deployments may use different rates.
+
+Each tier supports:
+
+| Field              | Meaning                                                                      |
+| ------------------ | ---------------------------------------------------------------------------- |
+| `currency`         | Three-letter uppercase currency code                                         |
+| `version`          | Operator-assigned rate version                                               |
+| `input` / `output` | Uncached input / total output rate                                           |
+| `cacheRead`        | Cached input read rate; optional when no reads occur                         |
+| `cacheWrite`       | Cache write rate, or short-duration rate when a duration split is configured |
+| `cacheWrite1h`     | Optional one-hour cache write rate                                           |
+| `minInputTokens`   | Minimum **total** input for this tier; defaults to zero                      |
+
+The tier with the greatest eligible `minInputTokens` is selected. A threshold uses the entire input, including cache reads/writes. Rates accept up to eight fractional digits. Money is calculated server-side with integer arithmetic at fourteen decimal places, then rounded for display. Different currencies remain separate totals.
+
+Input total includes uncached input, cache reads and cache writes. Output includes reasoning. For known disjoint buckets:
+
+```text
+cost = (uncached input × input rate
+      + cache reads × read rate
+      + short cache writes × write rate
+      + one-hour cache writes × one-hour rate
+      + output × output rate) / 1,000,000
+```
+
+## Missing data and scope
+
+An absent cache count is unknown, not automatically zero. A missing bucket can only be derived when the provider's exact total and other buckets force its value. Missing rates or required counts produce unavailable cost. Mixed priced/unpriced requests show the known money subtotal with a partial label. Old sessions retain unavailable usage; discarded historical cache details cannot be reconstructed.
+
+When `cacheWrite1h` is configured, a request with cache writes needs a reported duration split. The gateway reads Anthropic's one-hour count from raw SDK usage when available; compatible endpoints may omit it. Without the split the request's cost is unavailable. Omit `cacheWrite1h` only when a single configured write rate applies to all writes for that route.
+
+Failed/cancelled streams retain usage received before termination; requests that report no usage remain unavailable. Provider-internal attempts that expose no usage cannot be accounted for exactly. These are estimates of configured token charges, not provider invoices: taxes, credits, external tool charges and unsupported billing adjustments are excluded. Configure a separate model route for distinct billing arrangements that cannot be represented by input thresholds.
+
+The existing `model_usage` table remains the tenant token-quota projection. Session accounting is durable in `session_events`, requires no database migration, and survives compaction because the accounting projection reads the complete event log. Auxiliary model calls are included in tenant token quotas; subagent records are forwarded to the parent log without recording the same tokens twice in the quota table.

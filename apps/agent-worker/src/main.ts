@@ -188,12 +188,14 @@ async function main(): Promise<void> {
           return new CoreAgentLoop({
             llm,
             model: env.MODEL,
+            pricing: env.MODEL_PRICING,
             systemPrompt: env.SYSTEM_PROMPT,
             tools: childRegistry,
             store: childStore,
             skills: childSkills,
             workspaceRoot: root,
             maxSteps: 16,
+            usage,
             resolveBlob,
           });
         },
@@ -230,6 +232,7 @@ async function main(): Promise<void> {
       new CoreAgentLoop({
         llm,
         model: env.MODEL,
+        pricing: env.MODEL_PRICING,
         maxSteps: env.MAX_TURN_STEPS,
         systemPrompt: env.SYSTEM_PROMPT,
         tools: assemblyFor(workspaceRoot).registry,

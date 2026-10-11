@@ -9,6 +9,7 @@ data:
   PORT: "3000"
   WORKSPACE_ROOT: {{ .Values.workspace.mountPath | quote }}
   MODEL: {{ .Values.config.model | quote }}
+  MODEL_PRICING: {{ .Values.config.modelPricing | toJson | quote }}
   SYSTEM_PROMPT: {{ .Values.config.systemPrompt | quote }}
   DEFAULT_PERMISSION_POLICY: {{ .Values.config.defaultPermissionPolicy | quote }}
   CONTEXT_MAX_TOKENS: {{ .Values.config.contextMaxTokens | quote }}

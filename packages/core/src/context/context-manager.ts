@@ -4,6 +4,7 @@ import type {
   LLMPort,
   SessionEvent,
   SessionStore,
+  TokenUsage,
 } from '@trinity-harness/contracts';
 import {
   compactionRanges,
@@ -54,6 +55,7 @@ interface ExchangeGroup {
 }
 
 function eventApproxTokens(event: SessionEvent): number {
+  if (event.type === 'model/usage') return 0;
   // JSON payload length / 4 — the same scale as the text heuristic.
   try {
     return Math.ceil(JSON.stringify(event).length / 4);
@@ -118,6 +120,8 @@ export class ContextManager {
       signal?: AbortSignal | undefined;
       appendOpts?: AppendOptions | undefined;
       sink?: EventSink;
+      beforeModelCall?: () => Promise<void>;
+      recordUsage?: (model: string, samples: TokenUsage[]) => Promise<void>;
     },
   ): Promise<CompactResult> {
     const { store } = this.opts;
@@ -159,7 +163,14 @@ export class ContextManager {
           .map((block) => (block.kind === 'text' ? block.text : ''))
           .join('\n') + citationContext(message.citationList ?? []),
     }));
-    const summary = await this.summarize(dropped, extras?.signal);
+    await extras?.beforeModelCall?.();
+    const samples: TokenUsage[] = [];
+    let summary: string;
+    try {
+      summary = await this.summarize(dropped, extras?.signal, samples);
+    } finally {
+      await extras?.recordUsage?.(this.opts.model, samples);
+    }
 
     await store.append(
       sessionId,
@@ -192,6 +203,7 @@ export class ContextManager {
   private async summarize(
     dropped: ReturnType<typeof toModelMessages>,
     signal: AbortSignal | undefined,
+    samples: TokenUsage[],
   ): Promise<string> {
     const transcript = dropped
       .map((m) => {
@@ -204,22 +216,26 @@ export class ContextManager {
         return `### ${head}\n${m.content}${calls}`;
       })
       .join('\n\n');
-    const chunks = await llmStreamAll(this.opts.llm, {
-      model: this.opts.model,
-      system:
-        'You compact conversation histories for a coding agent. Summarize the excerpt: ' +
-        'key decisions, files read/written, commands run and their outcomes, errors hit, ' +
-        'and the current task state. Be dense and factual; the summary replaces the ' +
-        'excerpt in the agent context.',
-      messages: [
-        {
-          role: 'user',
-          content: `Condense the following conversation excerpt into a compact summary:\n\n${transcript}`,
-        },
-      ],
-      tools: [],
-      signal,
-    });
+    const chunks = await llmStreamAll(
+      this.opts.llm,
+      {
+        model: this.opts.model,
+        system:
+          'You compact conversation histories for a coding agent. Summarize the excerpt: ' +
+          'key decisions, files read/written, commands run and their outcomes, errors hit, ' +
+          'and the current task state. Be dense and factual; the summary replaces the ' +
+          'excerpt in the agent context.',
+        messages: [
+          {
+            role: 'user',
+            content: `Condense the following conversation excerpt into a compact summary:\n\n${transcript}`,
+          },
+        ],
+        tools: [],
+        signal,
+      },
+      samples,
+    );
     const text = chunks.join('');
     if (text.trim().length === 0) {
       // Never write an empty summary — a failed summarization must still
@@ -233,11 +249,13 @@ export class ContextManager {
 async function llmStreamAll(
   llm: LLMPort,
   req: Parameters<LLMPort['stream']>[0],
+  samples: TokenUsage[],
 ): Promise<string[]> {
   const stream = await llm.stream(req);
   const texts: string[] = [];
   for await (const chunk of stream) {
-    if (chunk.kind === 'text-delta') texts.push(chunk.text);
+    if (chunk.kind === 'usage') samples.push(chunk);
+    else if (chunk.kind === 'text-delta') texts.push(chunk.text);
     else if (chunk.kind === 'finish' && chunk.reason === 'error') {
       throw new Error('compaction summarizer stream finished with an error');
     }

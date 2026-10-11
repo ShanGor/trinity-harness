@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 
-import type { ServerEvent } from '@trinity-harness/shared';
+import type { ServerEvent, ModelUsage } from '@trinity-harness/shared';
 import {
   App as AntdApp,
   Button,
@@ -37,9 +37,11 @@ import './chat-layout.css';
 import { ResponseActions } from './response-actions';
 import { MessageTimestamp } from './message-timestamp';
 import { AnswerCitationList } from './answer-citations';
+import { UsagePanel } from './usage-panel';
 import { TurnProgress } from './turn-progress';
 
 import {
+  mergeModelUsage,
   settleAssistantItems,
   setAssistantApproval,
   mergeAssistantChunk,
@@ -109,6 +111,7 @@ export default function App() {
   );
   const [historyWidthRatio, setHistoryWidthRatio] = useState(0.22);
   const [items, setItems] = useState<ChatItem[]>([]);
+  const [usageRecords, setUsageRecords] = useState<ModelUsage[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [teams, setTeams] = useState<TeamView[]>([]);
@@ -171,6 +174,15 @@ export default function App() {
 
   const handleEvent = useCallback(
     (event: ServerEvent) => {
+      if (event.type === 'model/usage') {
+        setUsageRecords((records) =>
+          records.some((entry) => entry.requestId === event.usage.requestId)
+            ? records
+            : [...records, event.usage],
+        );
+        setItems((items) => mergeModelUsage(items, event.usage, newItemKey));
+        return;
+      }
       if (event.type === 'error') {
         message.error(event.message);
         setBusy(false);
@@ -354,6 +366,7 @@ export default function App() {
     streamRef.current?.close();
     setUser(null);
     setItems([]);
+    setUsageRecords([]);
     setSessions([]);
     setTeams([]);
     setSessionId(null);
@@ -387,6 +400,7 @@ export default function App() {
       if (id === sessionRef.current) return;
       streamRef.current?.close();
       setItems([]);
+      setUsageRecords([]);
       setApproval(null);
       setStaged([]);
       setBusy(false);
@@ -400,6 +414,7 @@ export default function App() {
   const newChat = useCallback(() => {
     streamRef.current?.close();
     setItems([]);
+    setUsageRecords([]);
     setApproval(null);
     setStaged([]);
     setBusy(false);
@@ -511,6 +526,12 @@ export default function App() {
     [busy, ensureSession, message, refreshSessions, staged],
   );
 
+  const unrecordedTurns = useMemo(() => {
+    const recorded = new Set(usageRecords.map((record) => record.promptId));
+    return items.filter(
+      (item) => item.role === 'user' && (!item.messageId || !recorded.has(item.messageId)),
+    ).length;
+  }, [items, usageRecords]);
   const activeTitle = sessions.find((s) => s.sessionId === sessionId)?.title;
 
   const chatPanel = (
@@ -686,6 +707,14 @@ export default function App() {
               </Typography.Title>
             </div>
             <Flex align="center" gap={8} wrap className="workspace-controls">
+              {sessionId && (
+                <UsagePanel
+                  records={usageRecords}
+                  scope="Session"
+                  active={busy}
+                  unrecordedTurns={unrecordedTurns}
+                />
+              )}
               <Select
                 size="small"
                 value={workspaceValue(workspace)}
@@ -949,6 +978,8 @@ const ChatMessageContent = memo(function ChatMessageContent({
 });
 
 /** Markdown-rendered assistant bubble: streaming deltas + tool calls below. */
+const EMPTY_USAGE: ModelUsage[] = [];
+
 function AssistantContent({ item, content }: { item: ChatItem; content: string }): ReactElement {
   return (
     <article className="assistant-response" aria-label="Trinity response">
@@ -1004,6 +1035,7 @@ function AssistantContent({ item, content }: { item: ChatItem; content: string }
       {!item.streaming && (
         <AnswerCitationList citations={item.citationList} renderImage={renderEvidenceImage} />
       )}
+      <UsagePanel records={item.usage ?? EMPTY_USAGE} scope="Turn" active={item.streaming} />
       {!item.streaming && content.trim().length > 0 && <ResponseActions content={content} />}
     </article>
   );

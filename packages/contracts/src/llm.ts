@@ -4,6 +4,7 @@
  * lives in packages/core and is the only place that touches provider APIs.
  */
 
+import type { TokenUsage } from './usage.js';
 import type { ContentBlock } from './events.js';
 
 export interface ModelToolCall {
@@ -73,7 +74,7 @@ export type StreamChunk =
   | { kind: 'text-delta'; text: string }
   | { kind: 'reasoning-delta'; text: string; signature?: string | undefined }
   | { kind: 'tool-call'; call: ModelToolCall }
-  | { kind: 'usage'; inputTokens: number; outputTokens: number }
+  | ({ kind: 'usage' } & TokenUsage)
   | { kind: 'finish'; reason: 'stop' | 'length' | 'error' };
 
 export interface LLMPort {

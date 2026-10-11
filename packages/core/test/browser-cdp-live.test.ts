@@ -26,7 +26,8 @@ it.skipIf(!process.env['TRINITY_TEST_CDP_ENDPOINT'])(
           "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
       });
       response.end(
-        '<!doctype html><title>Trinity CDP fixture</title><main><h1>Primary evidence</h1><p>论文标题：Example 查看更多 期刊：Nature “原文” 😀</p><p hidden>HIDDEN</p><pre>code\n  indentation</pre><a href="/source">Source</a><button onclick="document.getElementById(\'more\').hidden=false">Expand</button><p id="more" hidden>Expanded evidence.</p><input aria-label="Search"></main>',
+        '<!doctype html><title>Trinity CDP fixture</title><main><h1>Primary evidence</h1><p>论文标题：Example 查看更多 期刊：Nature “原文” 😀</p><p hidden>HIDDEN</p><pre>code\n  indentation</pre><a href="/source">Source</a><button onclick="document.getElementById(\'more\').hidden=false">Expand</button><p id="more" hidden>Expanded evidence.</p><input aria-label="Search"></main>' +
+          '<button>Additional interaction target with a long accessible name</button>'.repeat(100),
       );
     });
     await new Promise<void>((resolve) => fixture.listen(0, '127.0.0.1', resolve));
@@ -74,6 +75,8 @@ it.skipIf(!process.env['TRINITY_TEST_CDP_ENDPOINT'])(
       expect(navigation.isError, JSON.stringify(navigation.value)).toBe(false);
       const value = browserResultSchema.parse(navigation.value);
       expect(value.securityMode).toBe('trusted-cdp');
+      expect(value.snapshot!.truncated).toBe(true);
+      expect(value.snapshot!.targets.length).toBeLessThan(100);
       expect(value.url).toBe(url);
       expect(value.blocks.map((b) => b.text).join('\n')).toContain(
         '论文标题：Example 查看更多 期刊：Nature “原文” 😀',

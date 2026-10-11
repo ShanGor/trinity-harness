@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { ModelUsage } from './usage.js';
 
 import type { SandboxPort } from './sandbox.js';
 import type { ToolSchema } from './llm.js';
@@ -20,6 +21,8 @@ export interface ToolResult<V = unknown> {
 }
 
 export interface ToolContext {
+  tenantId?: string | undefined;
+  recordUsage?: ((usage: ModelUsage) => Promise<void>) | undefined;
   sessionId: string;
   /** Server-assigned originating call; never taken from model arguments. */
   callId?: string;

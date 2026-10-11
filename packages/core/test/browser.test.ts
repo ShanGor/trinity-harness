@@ -242,6 +242,83 @@ describe('browser contracts and capture', () => {
     expect(browserDeliveries(await store.load('s'), 's')).toHaveLength(1);
     expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThanOrEqual(BROWSER_LIMITS.overview);
   });
+  it('delivers a dense first navigation and replays its saved pagination and citations', async () => {
+    const { run, blobs, sandbox, store } = await assembly();
+    const original = sandbox.argvHandler!;
+    const text = 'Microsoft Teams：MCP Apps “evidence” 😀 '.repeat(400);
+    sandbox.argvHandler = async (command, args, opts) => {
+      const response = await original(command, args, opts);
+      if (args.includes('eval')) {
+        const value = args.some((arg) => arg.includes('privacyDenied'))
+          ? {
+              ...surface,
+              targets: Array.from({ length: 100 }, (_, i) => ({
+                ...surface.targets[0]!,
+                ref: `r${i}`,
+                name: 'Search result '.repeat(10),
+                path: [1, i],
+              })),
+            }
+          : { ...capture, blocks: [{ ...capture.blocks[0]!, text }] };
+        response.stdout = JSON.stringify({ success: true, data: { result: value } });
+      }
+      return response;
+    };
+    const navigation = await run('navigate', { operation: 'navigate', url: capture.url });
+    expect(navigation.isError).toBe(false);
+    const first = browserResultSchema.parse(navigation.value);
+    expect(first.blocks[0]!.text.length).toBeGreaterThan(500);
+    expect(first).toMatchObject({ effect: 'applied', outputTruncated: true });
+    expect(first.snapshot).toMatchObject({ truncated: true });
+    expect(first.snapshot!.targets.length).toBeLessThan(100);
+    expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(BROWSER_LIMITS.overview);
+    const artifact = browserObservationSchema.parse(
+      JSON.parse(new TextDecoder().decode(blobs.data.get(first.artifactUri))),
+    );
+    expect(artifact.interaction!.targets).toHaveLength(100);
+    expect(artifact.blocks[0]!.text).toBe(text);
+    expect(artifact.hash).toBe(browserHash(artifact));
+
+    // Rebuild the registry from persisted events and artifacts, without live access.
+    const restarted = new CoreToolRegistry(sandbox);
+    restarted.register(createBrowserTool({ store, blobs, now: () => new Date(meta().at) }));
+    sandbox.argvHandler = async () => {
+      throw new Error('Saved replay must not execute the browser');
+    };
+    const args = {
+      operation: 'read_observation' as const,
+      observationId: first.observationId,
+      cursor: first.continuation!,
+    };
+    await store.append('s', [
+      { ...meta(), type: 'tool/call', name: 'browser', callId: 'resume', args },
+    ]);
+    const resumed = await restarted.execute(
+      { id: 'resume', name: 'browser', args },
+      { sessionId: 's', workspaceRoot: '/ws' },
+    );
+    expect(resumed.isError).toBe(false);
+    const second = browserResultSchema.parse(resumed.value);
+    expect(second.blocks[0]!.start).toBe(first.blocks[0]!.end);
+    expect(second.blocks[0]!.text).toBe(
+      Array.from(text).slice(second.blocks[0]!.start, second.blocks[0]!.end).join(''),
+    );
+    expect(Buffer.byteLength(JSON.stringify(second))).toBeLessThanOrEqual(BROWSER_LIMITS.focused);
+    await store.append('s', [{ ...meta(), type: 'tool/result', callId: 'resume', ...resumed }]);
+    const range = second.receipt[0]!;
+    const source = await resolveBrowserSource(
+      { observationId: first.observationId, ...range, end: range.start + 20 },
+      await store.load('s'),
+      1,
+      's',
+      blobs,
+    );
+    expect(source.quote).toBe(
+      Array.from(text)
+        .slice(range.start, range.start + 20)
+        .join(''),
+    );
+  });
   it('does not expose live operations without a boundary', async () => {
     const { store, blobs, sandbox } = await assembly();
     const registry = new CoreToolRegistry(sandbox);
@@ -387,6 +464,26 @@ describe('bounded saved reading and evidence', () => {
     )!;
     expect(second.blocks[0]!.start).toBe(first.blocks[0]!.end);
     expect(browserResultSchema.safeParse(first).success).toBe(true);
+  });
+  it('keeps pagination inside exact byte boundaries between differently sized block IDs', () => {
+    const saved = observation();
+    saved.blocks = [
+      { ...capture.blocks[0]!, id: 'b0', text: 'First paragraph.' },
+      { ...capture.blocks[1]!, id: 'b'.repeat(200), text: '😀'.repeat(100) },
+    ];
+    for (let limit = 800; limit <= 1600; limit++) {
+      const result = deliver(
+        saved,
+        { operation: 'read_observation', observationId: saved.observationId },
+        'read',
+        limit,
+      );
+      expect(result, `limit=${limit}`).not.toBeNull();
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(limit);
+      expect(browserResultSchema.safeParse(result).success).toBe(true);
+      if (result!.outputTruncated) expect(result!.continuation).not.toBeNull();
+    }
+    expect(deliver(saved, { operation: 'get_page_text', mode: 'article' }, 'tiny', 100)).toBeNull();
   });
   it('restores saved reads without executing CLI and suppresses duplicate deliveries', async () => {
     const { run, calls, store, blobs } = await assembly();

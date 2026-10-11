@@ -76,7 +76,7 @@ describe('buildServer', () => {
     expect(created.status).toBe(201);
     const { sessionId } = (await created.json()) as { sessionId: string };
 
-    // 2. Open SSE stream first (avoids the M1 no-replay race).
+    // 2. Open SSE stream before sending.
     const stream = await fetch(`${baseUrl}/api/sessions/${sessionId}/events`);
     expect(stream.status).toBe(200);
     expect(stream.headers.get('content-type')).toContain('text/event-stream');
@@ -89,7 +89,7 @@ describe('buildServer', () => {
         if (lineEnd >= 0) {
           const raw = buffer.slice(0, lineEnd);
           buffer = buffer.slice(lineEnd + 2);
-          const data = raw.replace(/^data: /m, '').trim();
+          const data = raw.match(/^data: (.*)$/m)?.[1]?.trim() ?? '';
           if (data.startsWith('{')) {
             return serverEventSchema.parse(JSON.parse(data));
           }
@@ -111,7 +111,7 @@ describe('buildServer', () => {
 
     // 4. Observe tool call + committed assistant message over SSE.
     const seen: ServerEvent[] = [];
-    while (seen.filter((e) => e.type === 'message/committed').length < 1) {
+    while (!seen.some((e) => e.type === 'message/committed' && e.message.role === 'assistant')) {
       const event = await Promise.race([
         readNext(),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error('sse timeout')), 5000)),
@@ -127,7 +127,9 @@ describe('buildServer', () => {
     expect(kinds).toContain('update:tool_call:completed');
     expect(kinds).toContain('message/committed');
 
-    const committed = seen.find((e) => e.type === 'message/committed');
+    const committed = seen.find(
+      (e) => e.type === 'message/committed' && e.message.role === 'assistant',
+    );
     expect(committed).toMatchObject({ message: { role: 'assistant', content: 'File written.' } });
 
     await reader.cancel();

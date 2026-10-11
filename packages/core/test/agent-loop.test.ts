@@ -55,10 +55,17 @@ describe('CoreAgentLoop', () => {
     expect(outcome).toEqual({ reason: 'completed', steps: 1 });
     expect(eventTypes(await store.load('s1'))).toEqual([
       'message/user',
+      'model/usage',
       'message/assistant',
       'turn/end',
     ]);
-    expect(sink.types()).toEqual(['text-delta', 'text-delta', 'message/assistant', 'turn/end']);
+    expect(sink.types()).toEqual([
+      'text-delta',
+      'text-delta',
+      'model/usage',
+      'message/assistant',
+      'turn/end',
+    ]);
 
     const [request] = llm.requests;
     expect(request!.model).toBe('fake/model');
@@ -84,8 +91,10 @@ describe('CoreAgentLoop', () => {
     // Event-sourcing: everything replayable from the log, in order (design.md §6.1).
     expect(eventTypes(await store.load('s1'))).toEqual([
       'message/user',
+      'model/usage',
       'tool/call',
       'tool/result',
+      'model/usage',
       'message/assistant',
       'turn/end',
     ]);
@@ -109,9 +118,11 @@ describe('CoreAgentLoop', () => {
 
     // Real-time sink events mirror the log.
     expect(sink.types()).toEqual([
+      'model/usage',
       'tool/call',
       'tool/result',
       'text-delta',
+      'model/usage',
       'message/assistant',
       'turn/end',
     ]);
@@ -205,6 +216,7 @@ describe('CoreAgentLoop', () => {
     expect(sink.types()).toEqual([
       'reasoning-delta',
       'text-delta',
+      'model/usage',
       'message/assistant',
       'turn/end',
     ]);
@@ -223,9 +235,11 @@ describe('CoreAgentLoop', () => {
     const log = await store.load('s1');
     expect(eventTypes(log)).toEqual([
       'message/user',
+      'model/usage',
       'message/assistant',
       'turn/end',
       'message/user',
+      'model/usage',
       'message/assistant',
       'turn/end',
     ]);

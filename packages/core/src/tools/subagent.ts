@@ -1,4 +1,10 @@
-import type { AgentLoop, PermissionPolicy, ToolDefinition } from '@trinity-harness/contracts';
+import type {
+  AgentLoop,
+  PermissionPolicy,
+  ToolDefinition,
+  LoopEvent,
+  ModelUsage,
+} from '@trinity-harness/contracts';
 import { parsePermissionPolicy } from '@trinity-harness/contracts';
 import { newId } from '@trinity-harness/shared';
 import { z } from 'zod';
@@ -46,8 +52,10 @@ export function createSubagentTool(opts: SubagentToolOptions): ToolDefinition {
       // lives inside it (fresh context = nothing replays into the parent).
       const loop: AgentLoop = opts.createLoop();
       let finalText = '';
+      const usage: ModelUsage[] = [];
       const sink = {
-        emit: (event: { type: string; content?: string }): void => {
+        emit: (event: LoopEvent): void => {
+          if (event.type === 'model/usage') usage.push(event.usage);
           if (event.type === 'message/assistant' && typeof event.content === 'string') {
             finalText = event.content; // last assistant message wins
           }
@@ -58,11 +66,17 @@ export function createSubagentTool(opts: SubagentToolOptions): ToolDefinition {
       const childPrompt = args.context
         ? `${args.task}\n\n[parent-agent guidance]\n${args.context}`
         : args.task;
-      const outcome = await loop.run(childId, childPrompt, sink, {
-        signal: ctx.signal,
-        actor: `subagent:${ctx.sessionId}`,
-        policy,
-      });
+      let outcome: Awaited<ReturnType<AgentLoop['run']>>;
+      try {
+        outcome = await loop.run(childId, childPrompt, sink, {
+          signal: ctx.signal,
+          actor: `subagent:${ctx.sessionId}`,
+          tenantId: ctx.tenantId,
+          policy,
+        });
+      } finally {
+        for (const entry of usage) await ctx.recordUsage?.(entry);
+      }
       if (outcome.reason !== 'completed') {
         return {
           value: {

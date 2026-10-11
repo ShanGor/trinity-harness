@@ -1,5 +1,74 @@
 import { z } from 'zod';
 
+const tokenCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+/** Input totals include cache reads/writes; reasoning is a subset of output. */
+export const tokenUsageSchema = z.object({
+  inputTokens: tokenCount.optional(),
+  outputTokens: tokenCount.optional(),
+  uncachedInputTokens: tokenCount.optional(),
+  cacheReadTokens: tokenCount.optional(),
+  cacheWriteTokens: tokenCount.optional(),
+  cacheWrite1hTokens: tokenCount.optional(),
+  reasoningTokens: tokenCount.optional(),
+});
+export type TokenUsage = z.infer<typeof tokenUsageSchema>;
+
+/** Decimal currency units per million tokens, supplied by the operator. */
+const rateSchema = z.string().regex(/^\d{1,9}(\.\d{1,8})?$/);
+export const modelPriceSchema = z.object({
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  version: z.string().min(1).max(100),
+  input: rateSchema,
+  output: rateSchema,
+  cacheRead: rateSchema.optional(),
+  cacheWrite: rateSchema.optional(),
+  cacheWrite1h: rateSchema.optional(),
+  /** Select this tier for requests with at least this many input tokens. */
+  minInputTokens: tokenCount.default(0),
+});
+export type ModelPrice = z.infer<typeof modelPriceSchema>;
+export const modelPricingSchema = z.record(
+  z.string().min(1).max(200),
+  z.array(modelPriceSchema).min(1).max(16),
+);
+export type ModelPricing = z.infer<typeof modelPricingSchema>;
+export const modelPricingEnvSchema = z
+  .string()
+  .max(100_000)
+  .default('{}')
+  .transform((value, ctx) => {
+    try {
+      return modelPricingSchema.parse(JSON.parse(value));
+    } catch {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'MODEL_PRICING must be a JSON object of model price arrays',
+      });
+      return z.NEVER;
+    }
+  });
+
+export const usageCostSchema = z.object({
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  /** Exact decimal amount; only rounded for display. */
+  amount: z
+    .string()
+    .max(64)
+    .regex(/^\d+\.\d{14}$/),
+});
+export type UsageCost = z.infer<typeof usageCostSchema>;
+
+export const modelUsageSchema = z.object({
+  requestId: z.uuid(),
+  promptId: z.uuid(),
+  model: z.string().min(1).max(200),
+  purpose: z.enum(['assistant', 'compaction', 'subagent']),
+  tokens: tokenUsageSchema,
+  pricing: modelPriceSchema.optional(),
+  cost: usageCostSchema.optional(),
+});
+export type ModelUsage = z.infer<typeof modelUsageSchema>;
+
 /**
  * Usage & quota contracts (docs/design.md §17 配额). Token usage is recorded
  * per model request by the Agent Loop into `model_usage` (PG) and aggregated
@@ -73,3 +142,19 @@ export function windowStart(window: QuotaWindow, now: Date): Date {
   d.setUTCDate(1);
   return d;
 }
+
+export const usageSummarySchema = z.object({
+  requests: tokenCount,
+  tokens: tokenUsageSchema,
+  costs: z.array(usageCostSchema),
+  unpricedRequests: tokenCount,
+  models: z.array(
+    z.object({
+      model: z.string(),
+      tokens: tokenUsageSchema,
+      costs: z.array(usageCostSchema),
+      unpricedRequests: tokenCount,
+    }),
+  ),
+});
+export type UsageSummary = z.infer<typeof usageSummarySchema>;

@@ -7,6 +7,7 @@
 import {
   newId,
   type AnswerCitation,
+  type ModelUsage,
   type SurfaceMessage,
   type SessionUpdate,
 } from '@trinity-harness/shared';
@@ -37,6 +38,7 @@ export type ChatItem = {
   error?: boolean;
   awaitingApproval?: boolean;
   citationList?: AnswerCitation[];
+  usage?: ModelUsage[];
 };
 
 export type CommittedUserMessage = {
@@ -289,4 +291,34 @@ export function settleAssistantItems(
       ),
     };
   });
+}
+
+/** Attribute late/replayed usage to the originating user prompt, preserving other responses. */
+export function mergeModelUsage(
+  items: readonly ChatItem[],
+  usage: ModelUsage,
+  newKey: () => string,
+): ChatItem[] {
+  const userIndex = items.findIndex(
+    (item) => item.role === 'user' && item.messageId === usage.promptId,
+  );
+  if (userIndex < 0) return [...items];
+  const next = items[userIndex + 1];
+  if (next?.role === 'assistant') {
+    if (next.usage?.some((entry) => entry.requestId === usage.requestId)) return [...items];
+    return items.map((item) =>
+      item === next ? { ...item, usage: [...(item.usage ?? []), usage] } : item,
+    );
+  }
+  const result = [...items];
+  result.splice(userIndex + 1, 0, {
+    key: newKey(),
+    role: 'assistant',
+    content: '',
+    streaming: true,
+    tools: [],
+    attachments: [],
+    usage: [usage],
+  });
+  return result;
 }

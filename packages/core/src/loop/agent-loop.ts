@@ -17,6 +17,10 @@ import type {
   ToolResult,
   TurnOutcome,
   UsagePort,
+  ModelPricing,
+  ModelUsage,
+  TokenUsage,
+  ToolContextInput,
 } from '@trinity-harness/contracts';
 import {
   BROWSER_LIMITS,
@@ -24,8 +28,9 @@ import {
   turnStepBudgetSchema,
   windowStart,
 } from '@trinity-harness/contracts';
-import { newId } from '@trinity-harness/shared';
+import { sumTokenUsage, newId } from '@trinity-harness/shared';
 
+import { normalizeTokenUsage, priceUsage } from '../llm/usage.js';
 import type { ContextManager } from '../context/context-manager.js';
 import { PolicyToolRegistry } from '../policy-tool-registry.js';
 import {
@@ -94,9 +99,11 @@ export interface AgentLoopOptions {
    * M5: token metering + tenant quota gate (docs/design.md §17). Checked
    * before every model request (fail-closed: store failure or an exceeded
    * quota ends the turn with a friendly error); usage chunks are recorded
-   * per completed model request (best-effort, never breaks the turn).
+   * per attempted model request. Session usage is durable; the tenant quota
+   * projection remains best-effort.
    */
   usage?: UsagePort | undefined;
+  pricing?: ModelPricing | undefined;
 }
 
 function meta(): { eventId: string; at: string } {
@@ -145,7 +152,12 @@ export class CoreAgentLoop implements AgentLoop {
     const actor = runOpts?.actor;
     const tenantId = runOpts?.tenantId;
     const appendOpts = actor !== undefined ? { actor } : undefined;
-    const ctx = { sessionId, workspaceRoot: this.opts.workspaceRoot, signal };
+    const ctx: ToolContextInput = {
+      sessionId,
+      workspaceRoot: this.opts.workspaceRoot,
+      signal,
+      tenantId,
+    };
     // M5 OTel: one span per turn/step/tool/approval (design.md §17). No-op
     // without a registered SDK (@opentelemetry/api global fallthrough).
     const turnSpan = tracer.startSpan('trinity.turn', {
@@ -201,6 +213,42 @@ export class CoreAgentLoop implements AgentLoop {
             )
           : null;
       const promptSeq = runOpts?.promptSeq ?? appendedUser!.from;
+      const promptId = (await store.load(sessionId))[promptSeq - 1]!.eventId;
+      const persistUsage = async (usage: ModelUsage): Promise<void> => {
+        await store.append(sessionId, [{ ...meta(), type: 'model/usage', usage }], appendOpts);
+        sink.emit({ type: 'model/usage', usage });
+      };
+      ctx.recordUsage = (usage) => persistUsage({ ...usage, promptId, purpose: 'subagent' });
+      const recordUsage = async (
+        model: string,
+        purpose: ModelUsage['purpose'],
+        samples: TokenUsage[],
+      ): Promise<void> => {
+        const tokens = normalizeTokenUsage(sumTokenUsage(samples));
+        await persistUsage({
+          requestId: newId(),
+          promptId,
+          model,
+          purpose,
+          tokens,
+          ...priceUsage(model, tokens, this.opts.pricing ?? {}),
+        });
+        const inputTokens = tokens.inputTokens ?? 0;
+        const outputTokens = tokens.outputTokens ?? 0;
+        const tokenAttrs = {
+          'trinity.model': model,
+          ...(tenantId !== undefined ? { 'trinity.tenant_id': tenantId } : {}),
+        };
+        tokenCounter.add(inputTokens, { ...tokenAttrs, 'trinity.token_kind': 'input' });
+        tokenCounter.add(outputTokens, { ...tokenAttrs, 'trinity.token_kind': 'output' });
+        if (this.opts.usage && tenantId && (inputTokens > 0 || outputTokens > 0)) {
+          try {
+            await this.opts.usage.record({ tenantId, sessionId, model, inputTokens, outputTokens });
+          } catch (err) {
+            console.error('[CoreAgentLoop] usage record failed', err);
+          }
+        }
+      };
 
       const checkCancellation = async (): Promise<boolean> =>
         (await store.load(sessionId)).some(
@@ -257,7 +305,16 @@ export class CoreAgentLoop implements AgentLoop {
           // (docs/design.md §6.1 "上下文压力/溢出 → 触发 compaction"). No-op
           // when under budget.
           if (this.opts.context) {
-            await this.opts.context.compact(sessionId, { signal, appendOpts, sink });
+            await this.opts.context.compact(sessionId, {
+              signal,
+              appendOpts,
+              sink,
+              beforeModelCall: async () => {
+                const denied = this.opts.usage && tenantId ? await this.checkQuota(tenantId) : null;
+                if (denied) throw new Error(denied);
+              },
+              recordUsage: (model, samples) => recordUsage(model, 'compaction', samples),
+            });
           }
 
           await this.opts.skills?.prepare({
@@ -361,22 +418,23 @@ export class CoreAgentLoop implements AgentLoop {
             stepSpan.recordException(err as Error);
             stepSpan.setStatus({ code: 2, message: errorMessage(err) });
             stepSpan.end();
+            await recordUsage(this.opts.model, 'assistant', []);
             throw err;
           }
 
           let text = '';
           let reasoningText = '';
           let reasoningSignature: string | undefined;
-          let inputTokens = 0;
-          let outputTokens = 0;
+          const usageSamples: TokenUsage[] = [];
           const toolCalls: ToolCall[] = [];
           try {
             for await (const chunk of chunks) {
-              throwIfAborted();
               if (chunk.kind === 'usage') {
-                inputTokens += chunk.inputTokens;
-                outputTokens += chunk.outputTokens;
-              } else if (chunk.kind === 'text-delta') {
+                usageSamples.push(chunk);
+                continue;
+              }
+              throwIfAborted();
+              if (chunk.kind === 'text-delta') {
                 text += chunk.text;
                 sink.emit({ type: 'text-delta', text: chunk.text });
               } else if (chunk.kind === 'reasoning-delta') {
@@ -401,34 +459,10 @@ export class CoreAgentLoop implements AgentLoop {
             throw err;
           } finally {
             stepSpan.end();
+            await recordUsage(this.opts.model, 'assistant', usageSamples);
           }
 
           if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
-
-          // M5 metering: persist this request's token usage + OTel token
-          // metrics (best-effort — metering must never break the turn,
-          // docs/design.md §17).
-          if (inputTokens > 0 || outputTokens > 0) {
-            const tokenAttrs = {
-              'trinity.model': this.opts.model,
-              ...(tenantId !== undefined ? { 'trinity.tenant_id': tenantId } : {}),
-            };
-            tokenCounter.add(inputTokens, { ...tokenAttrs, 'trinity.token_kind': 'input' });
-            tokenCounter.add(outputTokens, { ...tokenAttrs, 'trinity.token_kind': 'output' });
-          }
-          if (this.opts.usage && tenantId && (inputTokens > 0 || outputTokens > 0)) {
-            try {
-              await this.opts.usage.record({
-                tenantId,
-                sessionId,
-                model: this.opts.model,
-                inputTokens,
-                outputTokens,
-              });
-            } catch (err) {
-              console.error('[CoreAgentLoop] usage record failed', err);
-            }
-          }
 
           if (text.length > 0 || reasoningText.length > 0) {
             const phase = toolCalls.length === 0 ? ('final' as const) : ('progress' as const);
@@ -647,7 +681,16 @@ export class CoreAgentLoop implements AgentLoop {
           // a bounded surface (docs/design.md §6.1 "上下文压力/溢出 → 触发
           // compaction"). No-op when under budget.
           if (this.opts.context) {
-            await this.opts.context.compact(sessionId, { signal, appendOpts, sink });
+            await this.opts.context.compact(sessionId, {
+              signal,
+              appendOpts,
+              sink,
+              beforeModelCall: async () => {
+                const denied = this.opts.usage && tenantId ? await this.checkQuota(tenantId) : null;
+                if (denied) throw new Error(denied);
+              },
+              recordUsage: (model, samples) => recordUsage(model, 'compaction', samples),
+            });
           }
         }
       } catch (err) {

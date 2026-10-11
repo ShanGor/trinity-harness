@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { answerCitationListSchema } from '@trinity-harness/contracts';
+import { modelUsageSchema, answerCitationListSchema } from '@trinity-harness/contracts';
 export {
   answerCitationSchema,
   answerCitationListSchema,
@@ -75,6 +75,7 @@ export const surfaceMessageSchema = z.object({
 export type SurfaceMessage = z.infer<typeof surfaceMessageSchema>;
 
 export const serverEventSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('model/usage'), sessionId: z.string(), usage: modelUsageSchema }),
   z.object({
     type: z.literal('session/update'),
     sessionId: z.string(),

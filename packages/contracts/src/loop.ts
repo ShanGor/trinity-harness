@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ModelUsage } from './usage.js';
 
 export const DEFAULT_TURN_MAX_STEPS = 64;
 export const turnStepBudgetSchema = z.coerce
@@ -15,6 +16,7 @@ import type { AnswerCitation } from './citations.js';
 
 /** Real-time events emitted by the Agent Loop while a turn runs (design.md §6). */
 export type LoopEvent =
+  | { type: 'model/usage'; usage: ModelUsage }
   | { type: 'turn/start'; turn: number }
   | { type: 'text-delta'; text: string }
   | { type: 'reasoning-delta'; text: string }

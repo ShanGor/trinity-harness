@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { modelUsageSchema } from './usage.js';
 
 import { skillSummarySchema, skillSnapshotSchema } from './skills.js';
 import { answerCitationListSchema } from './citations.js';
@@ -35,6 +36,12 @@ const baseFields = {
   /** ISO-8601 UTC timestamp, set by the appending process. */
   at: z.iso.datetime(),
 };
+
+export const modelUsageEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('model/usage'),
+  usage: modelUsageSchema,
+});
 
 export const sessionCreatedEventSchema = z.object({
   ...baseFields,
@@ -155,6 +162,7 @@ export const skillLoadedEventSchema = z.object({
  * See docs/design.md §7.
  */
 export const sessionEventSchema = z.discriminatedUnion('type', [
+  modelUsageEventSchema,
   skillCatalogEventSchema,
   skillLoadedEventSchema,
   sessionCreatedEventSchema,

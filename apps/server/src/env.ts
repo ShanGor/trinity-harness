@@ -1,4 +1,5 @@
 import {
+  modelPricingEnvSchema,
   browserCdpEndpointSchema,
   skillDirectoriesEnvSchema,
   turnStepBudgetSchema,
@@ -29,6 +30,7 @@ const serverEnvSchema = z.object({
   BROWSER_CDP_OWNER_ID: z.uuid().optional(),
   SKILL_DIRS: skillDirectoriesEnvSchema,
   MAX_TURN_STEPS: turnStepBudgetSchema,
+  MODEL_PRICING: modelPricingEnvSchema,
   SYSTEM_PROMPT: z.string().min(1).default('You are Trinity, a software engineering agent.'),
   /** Anthropic extended thinking budget (tokens). */
   REASONING_BUDGET_TOKENS: z.coerce.number().int().positive().optional(),

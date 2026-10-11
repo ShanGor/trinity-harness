@@ -258,6 +258,8 @@ async function acpBlocksToContent(
 /** LoopEvent → ACP-flavored wire events (docs/design.md §11.4). */
 export function toServerEvent(sessionId: string, event: LoopEvent): ServerEvent | null {
   switch (event.type) {
+    case 'model/usage':
+      return { type: 'model/usage', sessionId, usage: event.usage };
     case 'text-delta':
       return {
         type: 'session/update',
@@ -363,6 +365,8 @@ function mediaOf(
 /** SessionEvent (log replay / stream) → wire events, for SSE with seq ids. */
 export function logEventToServerEvent(sessionId: string, event: SessionEvent): ServerEvent | null {
   switch (event.type) {
+    case 'model/usage':
+      return { type: 'model/usage', sessionId, usage: event.usage };
     case 'message/user':
       return {
         type: 'message/committed',
@@ -587,6 +591,8 @@ export async function buildServer(
   const inlineTurns = new Map<string, Set<AbortController>>();
   const inlineJobs = new Set<Promise<unknown>>();
   const runInline = (sessionId: string, run: (signal: AbortSignal) => Promise<unknown>): void => {
+    // Flush the caller's committed prompt before streaming the response.
+    broadcast(sessionId, { type: 'session/turn_status', sessionId, status: 'running' });
     const controller = new AbortController();
     const controllers = inlineTurns.get(sessionId) ?? new Set<AbortController>();
     controllers.add(controller);
@@ -1136,6 +1142,9 @@ export async function buildServer(
       sessionId,
       title: granted.meta?.title ?? '',
       createdAt: granted.meta?.createdAt ?? null,
+      usage: (await deps.store.load(granted.sessionId))
+        .filter((event) => event.type === 'model/usage')
+        .map((event) => event.usage),
       messages,
     };
   });
@@ -1613,6 +1622,17 @@ export async function buildServer(
         }
         return null; // permission_request travels as a client-side REQUEST
       }
+      case 'model/usage':
+        return {
+          method: 'session/update',
+          params: {
+            sessionId,
+            update: {
+              sessionUpdate: 'session_info_update',
+              _meta: { 'trinity.modelUsage': event.usage },
+            },
+          },
+        };
       case 'message/committed':
         return {
           method: 'session/update',
@@ -2149,17 +2169,60 @@ export async function buildServer(
         };
       }
     } else {
-      // Inline mode: in-process broadcast (M1 path, no seq replay).
-      send({
-        type: 'session/update',
-        sessionId,
-        update: { kind: 'agent_thought_chunk', text: '' },
-      });
+      reply.raw.write(': connected\n\n');
+      // Inline execution uses the same durable replay cursor as workers.
+      let cursor = afterSeq;
+      let closed = false;
+      let pending = Promise.resolve();
+      const relay = (live?: ServerEvent, failure?: ServerEvent): void => {
+        pending = pending
+          .then(async () => {
+            if (closed) return;
+            if (live) {
+              send(live);
+              return;
+            }
+            const entries = await deps.store.loadRange(sessionId, { afterSeq: cursor });
+            let errorDelivered = false;
+            for (const { seq, event } of entries) {
+              if (closed) return;
+              const wire = logEventToServerEvent(sessionId, event);
+              if (wire) {
+                sendWithId(seq, serverEventSchema.parse(wire));
+                if (wire.type === 'error') errorDelivered = true;
+              }
+              cursor = seq;
+            }
+            // Runner failures may have no durable terminal event. Reset inherited
+            // EventSource IDs so the client does not discard this notification.
+            if (failure && !errorDelivered && !closed)
+              reply.raw.write(`id:\ndata: ${JSON.stringify(failure)}\n\n`);
+          })
+          .catch((err: unknown) => {
+            if (!closed)
+              reply.raw.write(
+                `id:\ndata: ${JSON.stringify({
+                  type: 'error',
+                  sessionId,
+                  message: `event relay failed: ${err instanceof Error ? err.message : String(err)}`,
+                })}\n\n`,
+              );
+          });
+      };
+      const listener = (event: ServerEvent): void => {
+        const delta =
+          event.type === 'session/update' &&
+          (event.update.kind === 'agent_message_chunk' ||
+            event.update.kind === 'agent_thought_chunk');
+        relay(delta ? event : undefined, event.type === 'error' ? event : undefined);
+      };
       const listeners = subscribers.get(sessionId) ?? new Set();
-      listeners.add(send);
+      listeners.add(listener);
       subscribers.set(sessionId, listeners);
+      relay();
       cleanupRefs.dispose = () => {
-        subscribers.get(sessionId)?.delete(send);
+        closed = true;
+        subscribers.get(sessionId)?.delete(listener);
       };
     }
 

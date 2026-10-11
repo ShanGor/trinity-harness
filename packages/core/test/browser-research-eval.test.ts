@@ -226,8 +226,8 @@ it.skipIf(process.env['TRINITY_RUN_BROWSER_EVAL'] !== '1')(
               return (async function* () {
                 for await (const chunk of stream) {
                   if (chunk.kind === 'usage') {
-                    inputTokens += chunk.inputTokens;
-                    outputTokens += chunk.outputTokens;
+                    inputTokens += chunk.inputTokens ?? 0;
+                    outputTokens += chunk.outputTokens ?? 0;
                   }
                   yield chunk;
                 }

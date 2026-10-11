@@ -374,7 +374,7 @@ Readability 仅为开发期选择器对照依赖，当前保留 semantic extract
 - **表示与反馈**：交互优先 accessibility refs，阅读保留 visible semantic blocks，视觉问题使用截图；内部固定 extractor 在 live tree 上判断可见性后再 clone，不把 hidden body source 当作普通证据。操作返回简短确认及有界 post-action observation，确认驱动执行成功不等于任务目标成功。明确 readiness 与 partial capture，不用 network idle 保证完整性。
 - **身份与生命周期**：初版仅使用会话拥有的 pinned tab。交互 target 必须绑定已交付 snapshot/reference 或 screenshot/viewport，导航、重连、相关 DOM/viewport 变化后拒绝失效目标；不得把旧 ref 重映射到新元素。用户接管时暂停 agent；超时、断连或动作后存储失败返回明确 effect status，未知结果先重新观察，不能重试副作用来恢复日志。
 - **持久化与确定性**：observation 先以不可变 artifact 保存，成功 `tool/result` 记录其引用和实际交付的 block/range/image receipt；无成功 event 的 blob 不是证据。确定性保证覆盖已保存观察的校验、读取、范围解析与 replay，不保证实时网页或模型决策可重复。canonical block text 使用 Unicode code-point 的零基半开区间，UTF-8 byte budget 单独计算。内容 hash 验证 artifact 完整性，不证明网站真实。
-- **上下文预算**：分别限制 capture、response、diagnostics 与 images；软阈值后仅允许 focused reads，硬阈值同样约束 focused reads，并预留 limit diagnostic allowance。receipt 从 PG log 重放，累计唯一/重复交付；所有 artifact retrieval routes 一致鉴权、限额，generic spill 不得改变实际曝光却保留错误 receipt。
+- **上下文预算**：分别限制 capture、response、diagnostics 与 images；软阈值后仅允许 focused reads，硬阈值同样约束 focused reads，并预留 limit diagnostic allowance。response fitting 先计入 continuation，再为正文/receipt 预留最多 2 KiB（不超过当前 response allowance 的一半），裁剪可选 snapshot targets/outline；完整 artifact 不变，snapshot 显式标记 truncated。逐 block fitting 保留已验证能放入 response 的 cursor，最后统一计算 truncation，避免 dense page 首次导航被误报预算耗尽或 block 边界溢出。receipt 从 PG log 重放，累计唯一/重复交付；所有 artifact retrieval routes 一致鉴权、限额，generic spill 不得改变实际曝光却保留错误 receipt。
 - **研究与展示**：新 notes 用 observation/block/range，由服务端按当前 turn 成功交付 receipt 解析原文、URL、callId/evidenceSeq；旧 quote/URL validator 继续支持 legacy events。旧 observation 当前 turn 可授权 reread，保留原 capture time，不冒充 fresh visit。Sources / View evidence 沿用既有 contracts DTO；来源仍不证明 claim 的语义正确。
 - **迁移边界**：search/fetch 若以后可用，适合普通文档且必须遵循相同 evidence contract；当前 core registry 未实现 §8 列出的 web_search/web_fetch，不作为首版前提。不要求 browser subagent。继续保留当前 Bash 描述；只有关闭模型可绕过 wrapper 的 Bash/CDP/全量 artifact 路径后，才可宣布强制预算和动作边界生效。
 
@@ -567,7 +567,7 @@ team_members(team_id, user_id, role, created_at)   -- PK(team_id, user_id)；rol
 session_events(session_id, seq, type, payload jsonb, actor, prev_hash, created_at)  -- append-only
 audit_log(id, tenant_id, user_id, session_id, action, target, result, ip, detail jsonb, created_at)
 approvals(id, session_id, tool_call_id, request jsonb, outcome, decided_by, created_at, decided_at)
-model_usage(id, tenant_id, session_id, model, input_tokens, output_tokens, cost, created_at)
+model_usage(id, tenant_id, session_id, model, input_tokens, output_tokens, created_at)
 api_keys / credentials(id, tenant_id, kind, ciphertext, created_at)
 ```
 
@@ -595,6 +595,10 @@ api_keys / credentials(id, tenant_id, kind, ciphertext, created_at)
 ---
 
 ## 17. 可观测性与配额
+
+- **会话 token / 费用记账**：每次模型请求追加 contracts 的 `model/usage` 事件，保存唯一 requestId、原始 user event 的 promptId、实际 provider/model、用途（assistant/compaction/subagent）、provider-reported input/output totals 与 uncached/cache-read/cache-write/reasoning 子项。输入总数包含 cache buckets，reasoning 是 output 子集，均不得重复相加。未知数据保持 unavailable；失败/取消时保留已收到的 usage，未报告的请求不伪造零消耗。子 agent 在其独立上下文计量/检查 tenant quota，并把 usage 快照归属父 prompt 写回父会话；不重复写配额计量。
+- **费用**：composition roots 从同一 `MODEL_PRICING` JSON（Helm `config.modelPricing`）注入服务端价格，每模型支持按请求 input total 选择 context tier；保存 currency/version/rates 和精确十进制 cost 快照。Cache write 可分 5m/1h；缺少必要 TTL breakdown 或费率时费用 unavailable。金额用 bigint 定点计算（14 位小数），展示时才舍入；不同币种分别累计，不自动汇率换算。配置变化/切模型不重算历史。配置格式与限制见 [usage-accounting.md](usage-accounting.md)。
+- **前端 / 协议**：assistant turn 底部与 session header 显示消费/estimated cost，可展开 token buckets、每模型和 request/rate 明细；requestId 去重确保重放/重连不重复累计，使用 promptId 保持归属，旧日志不补造缺失数据。扩展 wire 事件携带 contracts usage DTO；官方 ACP 通过 `session_info_update._meta["trinity.modelUsage"]` 传递快照，不把累计消费冒充 context occupancy。Inline SSE 同样从事件日志重放、按 seq 发送持久化记录并串行衔接实时 delta；export 包含 usage 快照。`model_usage` 保持租户配额读侧，session_events 是会话费用事实源，不需要改表。
 
 - **OTel**：Loop 每 step 一个 span（模型调用、工具执行、等待审批各自子 span）；指标：token 消耗/成本、工具成功率、审批延迟、队列深度。
 - **配额**：`model_usage` 表按租户聚合（小时/天/月 token 与成本），`beforeModelCall` 拦截点实时判定，超限返回友好错误并可申请提额。

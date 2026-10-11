@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  mergeModelUsage,
   settleAssistantItems,
   setAssistantApproval,
   mergeAssistantChunk,
@@ -305,4 +306,31 @@ it('settles pending tool indicators and preserves unchanged history on terminal 
     tools: [{ status: 'failed', content: 'No result received; the turn has ended.' }],
   });
   expect(settleAssistantItems(result)[2]).toBe(result[2]);
+});
+
+describe('usage attribution', () => {
+  it('merges before output and deduplicates replay without changing other turns', () => {
+    const oldUser = { ...user('old'), messageId: 'old' };
+    const oldAnswer = { ...assistant(), final: true };
+    const prompt = { ...user('current'), messageId: 'current' };
+    const usage = {
+      requestId: 'request',
+      promptId: 'current',
+      model: 'fake/a',
+      purpose: 'assistant' as const,
+      tokens: { inputTokens: 100, outputTokens: 20 },
+    };
+    const merged = mergeModelUsage([oldUser, oldAnswer, prompt], usage, key);
+    expect(merged[0]).toBe(oldUser);
+    expect(merged[1]).toBe(oldAnswer);
+    expect(merged[3]?.usage).toEqual([usage]);
+    expect(mergeModelUsage(merged, usage, key)[3]).toBe(merged[3]);
+    const completed = mergeCommittedAssistantMessage(merged, 'done', key, undefined, {
+      phase: 'final',
+    });
+    expect(completed[3]?.usage).toEqual([usage]);
+    expect(
+      mergeModelUsage(completed, { ...usage, requestId: 'late', promptId: 'old' }, key)[3],
+    ).toBe(completed[3]);
+  });
 });

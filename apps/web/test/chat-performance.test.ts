@@ -663,3 +663,60 @@ it('offers a conversation command prefix and sends it with approval', async () =
   );
   expect(fake.respondApproval).toHaveBeenCalledWith('s0', 'a', 'allowed', ['custom-cli']);
 });
+
+it('shows turn and session costs during usage updates while preserving focus, draft and history', async () => {
+  await click(container.querySelector('.history-item'));
+  await emit({
+    type: 'message/committed',
+    sessionId: 's0',
+    message: { id: '00000000-0000-4000-8000-000000000001', role: 'user', content: 'old' },
+  });
+  await emit({
+    type: 'message/committed',
+    sessionId: 's0',
+    message: { role: 'assistant', phase: 'final', content: 'old answer' },
+  });
+  await emit({
+    type: 'message/committed',
+    sessionId: 's0',
+    message: { id: '00000000-0000-4000-8000-000000000002', role: 'user', content: 'new' },
+  });
+  const textarea = container.querySelector('textarea')!;
+  await act(async () => textarea.focus());
+  await type(textarea, 'Keep draft');
+  fake.markdown.mockClear();
+  const usage = {
+    requestId: '00000000-0000-4000-8000-000000000003',
+    promptId: '00000000-0000-4000-8000-000000000002',
+    model: 'fake/a',
+    purpose: 'assistant' as const,
+    tokens: {
+      inputTokens: 100,
+      uncachedInputTokens: 40,
+      cacheReadTokens: 50,
+      cacheWriteTokens: 10,
+      outputTokens: 20,
+      reasoningTokens: 5,
+    },
+    cost: { currency: 'USD', amount: '0.00031500000000' },
+  };
+  await emit({ type: 'model/usage', sessionId: 's0', usage });
+  await emit({ type: 'model/usage', sessionId: 's0', usage });
+  expect(container.querySelector('[aria-label="Session usage"]')?.textContent).toContain(
+    '120 tokens',
+  );
+  expect(container.querySelector('[aria-label="Session usage"]')?.textContent).toContain(
+    'USD 0.000315',
+  );
+  expect(container.querySelectorAll('[aria-label="Turn usage"]')[1]?.textContent).toContain(
+    '120 tokens',
+  );
+  expect(container.querySelector('textarea')).toBe(textarea);
+  expect(document.activeElement).toBe(textarea);
+  expect(textarea.value).toBe('Keep draft');
+  expect(fake.markdown).not.toHaveBeenCalledWith('old answer');
+  await click(container.querySelectorAll('[aria-label="Turn usage"]')[1]!);
+  expect(document.body.textContent).toContain('Uncached input');
+  expect(document.body.textContent).toContain('Cache write');
+  expect(document.body.textContent).toContain('Of which reasoning');
+});

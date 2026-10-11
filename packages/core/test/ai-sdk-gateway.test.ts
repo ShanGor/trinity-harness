@@ -129,7 +129,13 @@ describe('AiSdkGateway reasoning support', () => {
       { kind: 'reasoning-delta', text: 'Let me think. ' },
       { kind: 'reasoning-delta', text: '', signature: 'sig-1' },
       { kind: 'text-delta', text: 'Hi!' },
-      { kind: 'usage', inputTokens: 1, outputTokens: 2 },
+      {
+        kind: 'usage',
+        inputTokens: 1,
+        outputTokens: 2,
+        uncachedInputTokens: 1,
+        reasoningTokens: 1,
+      },
       { kind: 'finish', reason: 'stop' },
     ]);
   });
@@ -243,5 +249,42 @@ it('encodes persisted screenshot blocks as native tool image content, outside te
   expect(result).toMatchObject({
     type: 'content',
     value: [{ type: 'text' }, { type: 'file', mediaType: 'image/png', data: { type: 'data' } }],
+  });
+});
+
+it('retains exact cache, output and reasoning counts from the SDK', async () => {
+  const gateway = new AiSdkGateway({
+    fake: () =>
+      fakeModel(
+        [
+          ...MINIMAL_OUTPUT.slice(0, -1),
+          {
+            ...FINISH_STOP,
+            usage: {
+              inputTokens: { total: 100, noCache: 40, cacheRead: 50, cacheWrite: 10 },
+              outputTokens: { total: 20, text: 15, reasoning: 5 },
+              raw: { cache_creation: { ephemeral_1h_input_tokens: 5 } },
+            },
+          },
+        ],
+        {},
+      ),
+  });
+  const chunks = [];
+  for await (const chunk of await gateway.stream({
+    ...baseRequest,
+    model: 'fake/a',
+    messages: [{ role: 'user', content: 'hello' }],
+  }))
+    chunks.push(chunk);
+  expect(chunks.find((chunk) => chunk.kind === 'usage')).toEqual({
+    kind: 'usage',
+    inputTokens: 100,
+    outputTokens: 20,
+    uncachedInputTokens: 40,
+    cacheReadTokens: 50,
+    cacheWriteTokens: 10,
+    cacheWrite1hTokens: 5,
+    reasoningTokens: 5,
   });
 });

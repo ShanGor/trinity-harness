@@ -317,3 +317,52 @@
   white-space: pre-wrap;
   color: #58675e;
 }
+
+.usage-trigger {
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary, #64748b);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.usage-trigger:hover {
+  color: #1677ff;
+}
+.usage-details {
+  max-width: min(420px, 80vw);
+  max-height: 65vh;
+  overflow: auto;
+}
+.usage-token-details {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 24px;
+}
+.usage-token-details dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.usage-note {
+  color: #64748b;
+  font-size: 12px;
+}
+.usage-model {
+  margin-top: 10px;
+  overflow-wrap: anywhere;
+}
+.usage-model summary {
+  cursor: pointer;
+}
+.usage-requests {
+  padding-left: 18px;
+}
+.usage-requests li {
+  margin-top: 8px;
+}
+.usage-requests small {
+  display: block;
+  color: #64748b;
+}

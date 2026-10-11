@@ -347,7 +347,7 @@ export function deliver(
       .slice(0, 16)
       .map((b) => ({ blockId: b.id, title: Array.from(b.text).slice(0, 80).join('') })),
     duplicateSuppressed: false,
-    outputTruncated: true,
+    outputTruncated: false,
     blocks: [],
     receipt: [],
     continuation: null,
@@ -373,12 +373,6 @@ export function deliver(
     ...(args.operation === 'screenshot' && observation.image ? { image: observation.image } : {}),
   };
   const fits = (): boolean => Buffer.byteLength(JSON.stringify(result)) <= limit;
-  while (!fits() && result.snapshot?.targets.length) {
-    result.snapshot.targets.pop();
-    result.snapshot.truncated = true;
-  }
-  while (!fits() && result.outline.length) result.outline.pop();
-  if (!fits()) return null;
   let candidates = observation.blocks;
   if (args.operation === 'read_observation') {
     if (
@@ -400,6 +394,19 @@ export function deliver(
       throw new BrowserFailure('INVALID_OUTPUT');
     candidates = candidates.slice(index);
   }
+  // Include the cursor before fitting metadata, even when no block text fits yet.
+  result.continuation = candidates.length
+    ? { blockId: candidates[0]!.id, offset: cursor?.offset ?? 0 }
+    : null;
+  const metadataLimit = limit - (candidates.length ? Math.min(2048, Math.floor(limit / 2)) : 0);
+  const metadataFits = (): boolean => Buffer.byteLength(JSON.stringify(result)) <= metadataLimit;
+  while (!metadataFits() && result.snapshot?.targets.length) {
+    result.snapshot.targets.pop();
+    result.snapshot.truncated = true;
+  }
+  while (!metadataFits() && result.outline.length) result.outline.pop();
+  if (!fits()) return null;
+  let exhausted = true;
   for (const block of candidates) {
     const points = Array.from(block.text);
     let start = cursor?.blockId === block.id ? cursor.offset : 0;
@@ -444,6 +451,7 @@ export function deliver(
     if (next) end = Math.min(end, next.start);
     const item = { id: block.id, kind: block.kind, text: '', start, end: start };
     const range = { blockId: block.id, start, end: start };
+    const previousContinuation = result.continuation;
     result.blocks.push(item);
     result.receipt.push(range);
     const setEnd = (offset: number): void => {
@@ -464,12 +472,18 @@ export function deliver(
     if (low === start) {
       result.blocks.pop();
       result.receipt.pop();
-      result.continuation = { blockId: block.id, offset: start };
+      // The prior cursor was already sized with its delivered block. Resuming at
+      // that block's end also reaches this block, without growing the envelope.
+      result.continuation = previousContinuation;
+      exhausted = false;
       break;
     }
-    if (low < points.length) break;
-    result.continuation = null;
+    if (low < points.length) {
+      exhausted = false;
+      break;
+    }
   }
+  if (exhausted) result.continuation = null;
   result.outputTruncated = result.continuation !== null;
   if (!fits()) return null;
   return result;

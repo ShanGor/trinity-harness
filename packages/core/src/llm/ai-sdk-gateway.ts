@@ -5,6 +5,9 @@ import type {
   LLMRequest,
   StreamChunk,
 } from '@trinity-harness/contracts';
+import { z } from 'zod';
+import { sumTokenUsage } from '@trinity-harness/shared';
+import { tokenUsageSchema } from '@trinity-harness/contracts';
 import type { LanguageModel, ModelMessage, ToolResultPart } from 'ai';
 import { jsonSchema, streamText } from 'ai';
 import { createAnthropic } from '@ai-sdk/anthropic';
@@ -289,11 +292,30 @@ export class AiSdkGateway implements LLMPort {
           };
         }
       }
-      yield {
-        kind: 'usage',
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
-      };
+      // SDK aggregate usage discards raw details; per-step usage retains cache TTLs.
+      const samples = (steps.length ? steps.map((step) => step.usage) : [usage]).map((sample) => {
+        const raw = z
+          .object({
+            cache_creation: z
+              .object({ ephemeral_1h_input_tokens: z.number().int().nonnegative() })
+              .optional(),
+          })
+          .safeParse(sample.raw);
+        return tokenUsageSchema.parse({
+          inputTokens: sample.inputTokens,
+          outputTokens: sample.outputTokens,
+          uncachedInputTokens: sample.inputTokenDetails.noCacheTokens,
+          cacheReadTokens: sample.inputTokenDetails.cacheReadTokens,
+          cacheWriteTokens: sample.inputTokenDetails.cacheWriteTokens,
+          ...(raw.success && raw.data.cache_creation
+            ? { cacheWrite1hTokens: raw.data.cache_creation.ephemeral_1h_input_tokens }
+            : sample.inputTokenDetails.cacheWriteTokens === 0
+              ? { cacheWrite1hTokens: 0 }
+              : {}),
+          reasoningTokens: sample.outputTokenDetails.reasoningTokens,
+        });
+      });
+      yield { kind: 'usage', ...sumTokenUsage(samples) };
       yield { kind: 'finish', reason: mapFinishReason(finishReason) };
     })();
   }

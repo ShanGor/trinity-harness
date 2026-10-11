@@ -83,6 +83,15 @@ describe('createTurnHandler', () => {
       promptSeq: 1,
       policy: parsePermissionPolicy('workspace-write'),
     };
+    await store.append(sessionId, [
+      {
+        type: 'message/user',
+        eventId: crypto.randomUUID(),
+        at: '2026-10-08T00:00:00Z',
+        surfaceOp: 'append',
+        content: [{ kind: 'text', text: 'hi' }],
+      },
+    ]);
     await handle(task);
 
     // Only transient deltas are live; durable events arrive through the log.

@@ -1,4 +1,5 @@
 import {
+  modelPricingEnvSchema,
   browserCdpEndpointSchema,
   skillDirectoriesEnvSchema,
   turnStepBudgetSchema,
@@ -28,6 +29,7 @@ const workerEnvSchema = z.object({
   ADMIN_EMAIL: z.email().default('admin@trinity.local'),
   SKILL_DIRS: skillDirectoriesEnvSchema,
   MAX_TURN_STEPS: turnStepBudgetSchema,
+  MODEL_PRICING: modelPricingEnvSchema,
   SYSTEM_PROMPT: z.string().min(1).default('You are Trinity, a software engineering agent.'),
   REASONING_BUDGET_TOKENS: z.coerce.number().int().positive().optional(),
   REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
