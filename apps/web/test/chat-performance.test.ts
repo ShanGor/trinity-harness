@@ -117,6 +117,106 @@ afterEach(async () => {
 });
 
 describe('chat typing and streaming performance', () => {
+  it('keeps the latest update visible through tool execution without disturbing the draft', async () => {
+    await click(container.querySelector('.history-item'));
+    await emit({ type: 'message/committed', message: { role: 'user', content: 'Fix sign-in' } });
+    await emit({
+      type: 'session/update',
+      update: { kind: 'agent_message_chunk', text: 'Inspecting session handling' },
+    });
+    await emit({
+      type: 'message/committed',
+      message: { role: 'assistant', content: 'Inspecting session handling', phase: 'progress' },
+    });
+    const textarea = container.querySelector('textarea')!;
+    await act(async () => textarea.focus());
+    await type(textarea, 'Keep this draft');
+    textarea.setSelectionRange(4, 4);
+    fake.markdown.mockClear();
+    dateRender.mockClear();
+    await emit({
+      type: 'session/update',
+      update: {
+        kind: 'tool_call',
+        toolCallId: 'inspect',
+        title: 'Read auth.ts',
+        status: 'in_progress',
+      },
+    });
+    const card = container.querySelector('[aria-label="Task progress"]')!;
+    expect(card.closest('details')).toBeNull();
+    expect(card.textContent).toContain('Inspecting session handling');
+    expect(card.textContent).toContain('RunningRead auth.ts');
+    expect(container.querySelector('.turn-activity')?.hasAttribute('open')).toBe(false);
+    await emit({
+      type: 'session/update',
+      update: {
+        kind: 'tool_call',
+        toolCallId: 'inspect',
+        title: 'Read auth.ts',
+        status: 'completed',
+        content: 'Detailed output',
+      },
+    });
+    expect(card.textContent).toContain('CompletedRead auth.ts');
+    expect(card.textContent).not.toContain('Detailed output');
+    expect(container.querySelector('textarea')).toBe(textarea);
+    expect(document.activeElement).toBe(textarea);
+    expect(textarea.value).toBe('Keep this draft');
+    expect(textarea.selectionStart).toBe(4);
+    expect(fake.markdown).not.toHaveBeenCalled();
+    expect(dateRender).not.toHaveBeenCalled();
+    await emit({
+      type: 'message/committed',
+      message: { role: 'assistant', content: 'Sign-in fixed', phase: 'final' },
+    });
+    await emit({ type: 'session/turn_status', status: 'completed' });
+    expect(card.textContent).toBe('Completed1 tool call');
+    expect(container.querySelector('.md')?.textContent).toBe('Sign-in fixed');
+    expect(container.querySelector('.turn-progress')?.textContent).toContain(
+      'Inspecting session handling',
+    );
+  });
+
+  it('bounds parallel tool activity and keeps failures visible while work continues', async () => {
+    await click(container.querySelector('.history-item'));
+    for (let index = 0; index < 6; index++) {
+      await emit({
+        type: 'session/update',
+        update: {
+          kind: 'tool_call',
+          toolCallId: `tool-${index}`,
+          title: `Explore module ${index}`,
+          status: index === 0 ? 'pending' : 'in_progress',
+        },
+      });
+    }
+    const card = container.querySelector('[aria-label="Task progress"]')!;
+    expect(card.querySelectorAll(':scope > .task-progress-tools > li')).toHaveLength(4);
+    expect(card.textContent).toContain('QueuedExplore module 0');
+    const more = card.querySelector('details')!;
+    expect(more.hasAttribute('open')).toBe(false);
+    expect(more.querySelector('summary')?.textContent).toBe('Show 2 more active tool calls');
+    expect(more.querySelectorAll('li')).toHaveLength(2);
+    await click(more.querySelector('summary'));
+    expect(more.hasAttribute('open')).toBe(true);
+    await emit({
+      type: 'session/update',
+      update: {
+        kind: 'tool_call',
+        toolCallId: 'tool-0',
+        title: 'Explore module 0',
+        status: 'failed',
+      },
+    });
+    expect(card.textContent).toContain('1 tool call failed · Agent is continuing');
+    expect(card.querySelector('details')).toBe(more);
+    expect(more.hasAttribute('open')).toBe(true);
+    await emit({ type: 'session/turn_status', status: 'aborted' });
+    expect(card.textContent).toBe('Task stopped6 tool calls');
+    expect(card.querySelector('.task-progress-tools')).toBeNull();
+  });
+
   it('replays a single response with collapsed activity and Trinity-style source evidence', async () => {
     await click(container.querySelector('.history-item'));
     await emit({ type: 'message/committed', message: { role: 'user', content: 'Research' } });
@@ -189,6 +289,9 @@ describe('chat typing and streaming performance', () => {
       },
     });
     expect(document.body.querySelector('.ant-modal')).not.toBeNull();
+    expect(container.querySelector('.task-progress [role="status"]')?.textContent).toBe(
+      'Waiting for your approval',
+    );
     await emit({ type: 'error', message: 'turn failed' });
     const modal = document.body.querySelector<HTMLElement>('.ant-modal');
     expect(
@@ -197,6 +300,10 @@ describe('chat typing and streaming performance', () => {
         modal.closest<HTMLElement>('.ant-modal-wrap')?.style.display === 'none',
     ).toBe(true);
     expect(container.querySelector('.response-streaming')).toBeNull();
+    expect(container.querySelector('.task-progress')?.textContent).toContain(
+      'The task could not finish',
+    );
+    expect(container.querySelector('.task-progress')?.textContent).not.toContain('Waiting');
   });
 
   it('offers Stop during approval and waits for the active worker terminal event', async () => {
@@ -463,7 +570,7 @@ describe('chat typing and streaming performance', () => {
       type: 'session/update',
       update: { kind: 'agent_message_chunk', text: 'In progress' },
     });
-    expect(container.querySelector('.response-streaming')?.textContent).toBe('Responding…');
+    expect(container.querySelector('.response-streaming')?.textContent).toBe('Working');
     expect(container.querySelector('.response-actions')).toBeNull();
     await emit({ type: 'session/turn_status', status: 'completed' });
     expect(container.querySelector('.response-streaming')).toBeNull();

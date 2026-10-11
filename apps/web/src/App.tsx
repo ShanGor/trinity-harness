@@ -37,9 +37,11 @@ import './chat-layout.css';
 import { ResponseActions } from './response-actions';
 import { MessageTimestamp } from './message-timestamp';
 import { AnswerCitationList } from './answer-citations';
+import { TurnProgress } from './turn-progress';
 
 import {
   settleAssistantItems,
+  setAssistantApproval,
   mergeAssistantChunk,
   mergeToolUpdate,
   mergeCommittedAssistantMessage,
@@ -226,7 +228,9 @@ export default function App() {
       if (event.type === 'session/update' && event.update.kind === 'permission_request') {
         // M3 approval flow (docs/design.md §12.2): surface the gate, wait
         // for the human; the Modal answers via respondApproval.
-        if (event.update.status === 'pending') {
+        const awaitingApproval = event.update.status === 'pending';
+        setItems((items) => setAssistantApproval(items, awaitingApproval));
+        if (awaitingApproval) {
           setApproval({
             approvalId: event.update.approvalId,
             toolName: event.update.toolName,
@@ -239,6 +243,10 @@ export default function App() {
         return;
       }
       if (event.type === 'session/turn_status') {
+        if (event.status === 'running' || event.status === 'awaiting_approval') {
+          const awaitingApproval = event.status === 'awaiting_approval';
+          setItems((items) => setAssistantApproval(items, awaitingApproval));
+        }
         if (event.status === 'completed' || event.status === 'aborted') {
           const status = event.status;
           setBusy(false);
@@ -946,9 +954,9 @@ function AssistantContent({ item, content }: { item: ChatItem; content: string }
     <article className="assistant-response" aria-label="Trinity response">
       <div className="response-heading">
         <span className="response-author">Trinity</span>
-        {item.streaming && <span className="response-streaming">Responding…</span>}
         <MessageTimestamp at={item.at} />
       </div>
+      <TurnProgress item={item} />
       {content.length > 0 && (
         <div className="md" style={{ marginBottom: 8 }}>
           <ReactMarkdown
@@ -966,7 +974,7 @@ function AssistantContent({ item, content }: { item: ChatItem; content: string }
       {(item.tools.length > 0 || !!item.activity?.length) && (
         <details className="turn-activity">
           <summary>
-            Activity · {item.activity?.length ?? 0} updates · {item.tools.length} tools
+            Execution details · {item.activity?.length ?? 0} updates · {item.tools.length} tools
           </summary>
           {!!item.activity?.length && (
             <ol className="turn-progress">
@@ -993,8 +1001,6 @@ function AssistantContent({ item, content }: { item: ChatItem; content: string }
           />
         </details>
       )}
-      {item.stopped && <Typography.Text type="secondary">Task stopped.</Typography.Text>}
-      {item.error && <Typography.Text type="secondary">The task could not finish.</Typography.Text>}
       {!item.streaming && (
         <AnswerCitationList citations={item.citationList} renderImage={renderEvidenceImage} />
       )}

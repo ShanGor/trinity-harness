@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   settleAssistantItems,
+  setAssistantApproval,
   mergeAssistantChunk,
   mergeCommittedAssistantMessage,
   mergeCommittedUserMessage,
@@ -34,6 +35,32 @@ const assistant = (): ChatItem => ({
   streaming: true,
   tools: [],
   attachments: [],
+});
+
+describe('setAssistantApproval', () => {
+  it('updates only the active response and clears waiting on resolution or termination', () => {
+    const history = [user('q'), assistant()];
+    const waiting = setAssistantApproval(history, true);
+    expect(waiting[0]).toBe(history[0]);
+    expect(waiting[1]).toMatchObject({ awaitingApproval: true });
+    expect(setAssistantApproval(waiting, true)[1]).toBe(waiting[1]);
+    expect(setAssistantApproval(waiting, false)[1]).toMatchObject({ awaitingApproval: false });
+    for (const status of ['completed', 'aborted', 'error'] as const) {
+      expect(settleAssistantItems(waiting, status)[1]?.awaitingApproval).toBe(false);
+    }
+  });
+
+  it('does not reopen a terminal response or change a user message on late approval events', () => {
+    for (const item of [
+      user('q'),
+      { ...assistant(), final: true },
+      { ...assistant(), stopped: true },
+      { ...assistant(), error: true },
+    ]) {
+      expect(setAssistantApproval([item], true)[0]).toBe(item);
+    }
+    expect(setAssistantApproval([], true)).toEqual([]);
+  });
 });
 
 describe('mergeAssistantChunk', () => {

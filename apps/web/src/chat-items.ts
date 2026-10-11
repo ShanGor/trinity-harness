@@ -35,6 +35,7 @@ export type ChatItem = {
   final?: boolean;
   stopped?: boolean;
   error?: boolean;
+  awaitingApproval?: boolean;
   citationList?: AnswerCitation[];
 };
 
@@ -235,6 +236,23 @@ export function mergeToolUpdate(
   return last?.role === 'assistant' ? [...items.slice(0, -1), item] : [...items, item];
 }
 
+/** Approval state belongs to the active response and cannot reopen a terminal turn. */
+export function setAssistantApproval(
+  items: readonly ChatItem[],
+  awaitingApproval: boolean,
+): ChatItem[] {
+  const last = items.at(-1);
+  if (
+    last?.role !== 'assistant' ||
+    last.final ||
+    last.stopped ||
+    last.error ||
+    !!last.awaitingApproval === awaitingApproval
+  )
+    return [...items];
+  return [...items.slice(0, -1), { ...last, awaitingApproval }];
+}
+
 /** Settle live output and pending tools when their turn ends without results. */
 export function settleAssistantItems(
   items: readonly ChatItem[],
@@ -245,11 +263,18 @@ export function settleAssistantItems(
     const pending = item.tools.some(
       (tool) => tool.status === 'pending' || tool.status === 'in_progress',
     );
-    if (!item.streaming && !pending && !(item.stepCommitted && !item.final)) return item;
+    if (
+      !item.streaming &&
+      !pending &&
+      !item.awaitingApproval &&
+      !(item.stepCommitted && !item.final)
+    )
+      return item;
     const base = status !== 'completed' && !item.final ? archiveAssistantStep(item) : item;
     return {
       ...base,
       streaming: false,
+      awaitingApproval: false,
       final: status === 'completed' && base.content.trim().length > 0,
       stopped: status === 'aborted',
       error: status === 'error',
