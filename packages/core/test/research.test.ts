@@ -39,7 +39,7 @@ const notes: ResearchNotes = {
   openQuestions: ['Does Product B render the same UI?'],
   readyToAnswer: false,
 };
-function observation(name = 'bash', isError = false): SessionEvent[] {
+function observation(name = 'bash', isError = false, document = page): SessionEvent[] {
   return [
     {
       ...meta(),
@@ -57,7 +57,7 @@ function observation(name = 'bash', isError = false): SessionEvent[] {
       callId: 'source',
       isError,
       value: {
-        stdout: JSON.stringify({ success: true, data: { result: page } }),
+        stdout: JSON.stringify({ success: true, data: { result: document } }),
         stderr: '',
         exitCode: isError ? 1 : 0,
       },
@@ -191,6 +191,66 @@ describe('research evidence notes', () => {
         )
       ).isError,
     ).toBe(true);
+  });
+  it('locates bounded verbatim recovery text after punctuation changes and accepts a corrected retry', async () => {
+    const { store, registry } = await assembly();
+    const document = {
+      ...page,
+      text:
+        'Unrelated navigation. '.repeat(80) +
+        '论文标题：Late-life treatment extends lifespan 查看更多 期刊：Nature “原文”',
+    };
+    await store.append('s', observation('bash', false, document));
+    const altered = structuredClone(notes);
+    const source = altered.findings[0]!.sources[0]!;
+    source.quote = '论文标题:Late-life treatment extends lifespan 查看更多 期刊:Nature “原文”';
+    const rejected = await registry.execute(
+      { id: 'bad', name: 'research', args: { action: 'record', notes: altered } },
+      ctx,
+    );
+    expect(rejected).toMatchObject({
+      isError: true,
+      value: {
+        reason: 'quote_mismatch',
+        observedTextExcerpt:
+          '论文标题：Late-life treatment extends lifespan 查看更多 期刊：Nature “原文”',
+      },
+    });
+    const value = rejected.value as { message: string; observedTextExcerpt: string };
+    expect(value.message).toContain('notes.findings[0].sources[0]');
+    expect(value.message).toContain(
+      'Keep note validation and retry commentary out of the final answer',
+    );
+    expect(value.observedTextExcerpt.length).toBeLessThanOrEqual(600);
+    source.quote = value.observedTextExcerpt.replace(' 查看更多 ', '\n查看更多\n');
+    expect(
+      await registry.execute(
+        { id: 'retry', name: 'research', args: { action: 'record', notes: altered } },
+        ctx,
+      ),
+    ).toMatchObject({ isError: false, value: { notes: altered } });
+  });
+  it.each([
+    '论文标题：Example 期刊：Nature',
+    '论文标题:Example 查看更多 期刊:Nature',
+    '论文标题：Example 查看更多 期刊：Nature "原文"',
+  ])('keeps rejecting omitted text or changed punctuation: %s', async (quote) => {
+    const { store, registry } = await assembly();
+    await store.append(
+      's',
+      observation('bash', false, {
+        ...page,
+        text: '论文标题：Example 查看更多 期刊：Nature “原文”',
+      }),
+    );
+    const altered = structuredClone(notes);
+    altered.findings[0]!.sources[0]!.quote = quote;
+    expect(
+      await registry.execute(
+        { id: 'bad', name: 'research', args: { action: 'record', notes: altered } },
+        ctx,
+      ),
+    ).toMatchObject({ isError: true, value: { reason: 'quote_mismatch' } });
   });
   it('bounds notes and rejects empty evidence without manufacturing answers', () => {
     const invalid = structuredClone(notes);

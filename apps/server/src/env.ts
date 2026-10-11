@@ -26,6 +26,7 @@ const serverEnvSchema = z.object({
     )
     .default('anthropic/claude-sonnet-4-20250514'),
   BROWSER_CDP_ENDPOINT: browserCdpEndpointSchema.optional(),
+  BROWSER_CDP_OWNER_ID: z.uuid().optional(),
   SKILL_DIRS: skillDirectoriesEnvSchema,
   MAX_TURN_STEPS: turnStepBudgetSchema,
   SYSTEM_PROMPT: z.string().min(1).default('You are Trinity, a software engineering agent.'),

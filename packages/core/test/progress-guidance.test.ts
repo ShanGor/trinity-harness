@@ -75,6 +75,78 @@ describe('progress guidance', () => {
     expect(progressGuidance([user()], 1, 48, 64)).toContain('final quarter');
     expect(progressGuidance([user()], 1, 64, 64)).toContain('final quarter');
   });
+  it('advises citation recovery after two rejections and clears it after a valid record or new prompt', () => {
+    const rejected = (id: string): SessionEvent[] => [
+      { ...meta(), type: 'tool/call', callId: id, name: 'research', args: { action: 'record' } },
+      {
+        ...meta(),
+        type: 'tool/result',
+        callId: id,
+        isError: true,
+        value: { code: 'RESEARCH_SOURCE_MISMATCH' },
+      },
+    ];
+    const events = [user(), ...rejected('a')];
+    expect(progressGuidance(events, 1, 2, 64, true)).toBeNull();
+    events.push(...rejected('b'));
+    expect(progressGuidance(events, 1, 3, 64, true)).toContain('copy a short contiguous passage');
+    expect(progressGuidance(events, 1, 3, 64, true)).toContain('not a stop request');
+    expect(progressGuidance(events, 1, 3, 64, true)).toContain(
+      'omit internal research bookkeeping',
+    );
+    expect(progressGuidance(events, 1, 3, 64, false)).toBeNull();
+    const status: SessionEvent[] = [
+      {
+        ...meta(),
+        type: 'tool/call',
+        callId: 'status',
+        name: 'research',
+        args: { action: 'status' },
+      },
+      {
+        ...meta(),
+        type: 'tool/result',
+        callId: 'status',
+        isError: false,
+        value: { kind: 'research-notes', promptSeq: 1, notes: null },
+      },
+    ];
+    expect(progressGuidance([...events, ...status], 1, 4, 64, true)).toContain(
+      'rejected repeatedly',
+    );
+    const recorded: SessionEvent[] = [
+      {
+        ...meta(),
+        type: 'tool/call',
+        callId: 'fixed',
+        name: 'research',
+        args: { action: 'record' },
+      },
+      {
+        ...meta(),
+        type: 'tool/result',
+        callId: 'fixed',
+        isError: false,
+        value: {
+          kind: 'research-notes',
+          promptSeq: 1,
+          notes: {
+            question: 'Question',
+            findings: [],
+            openQuestions: ['Unresolved'],
+            readyToAnswer: false,
+          },
+        },
+      },
+    ];
+    expect(progressGuidance([...events, ...recorded], 1, 4, 64, true)).toBeNull();
+    const next = [...events, user()];
+    expect(progressGuidance(next, next.length, 1, 64, true)).toBeNull();
+    const unrelated = events.map((event): SessionEvent =>
+      event.type === 'tool/call' ? { ...event, name: 'other' } : event,
+    );
+    expect(progressGuidance(unrelated, 1, 3, 64, true)).toBeNull();
+  });
   it('projects only the latest active guidance and drops it after completion', () => {
     const events: SessionEvent[] = [
       user(),

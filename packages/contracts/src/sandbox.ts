@@ -17,6 +17,15 @@ export interface ExecOptions {
   signal?: AbortSignal | undefined;
 }
 
+export interface ArgvExecOptions extends ExecOptions {
+  /** Combined stdout/stderr UTF-8 transport cap, enforced while consuming chunks. */
+  maxOutputBytes: number;
+}
+
+export interface BoundedExecResult extends ExecResult {
+  outputOverflow: boolean;
+}
+
 export interface ReadFileResult {
   content: string;
   truncated: boolean;
@@ -52,7 +61,12 @@ export interface OpenProcessOptions {
 
 export interface SandboxPort {
   exec(command: string, opts?: ExecOptions): Promise<ExecResult>;
+  /** No shell. Missing support must fail closed for bounded browser capture. */
+  execArgv?(command: string, args: string[], opts: ArgvExecOptions): Promise<BoundedExecResult>;
   readFile(path: string, opts?: { maxBytes?: number }): Promise<ReadFileResult>;
+  /** Bounded binary capture transfer; implementations reject symlinks and oversize files. */
+  readBytes?(path: string, maxBytes: number): Promise<Uint8Array>;
+  removeFile?(path: string): Promise<void>;
   writeFile(path: string, content: string): Promise<void>;
   /**
    * str-replace semantics (design.md §8): exactly one occurrence must match,

@@ -5,8 +5,10 @@ import type { AnswerCitation } from '@trinity-harness/shared';
 /** The final answer's source summary and evidence drawer, following Trinity's format. */
 export const AnswerCitationList = memo(function AnswerCitationList({
   citations,
+  renderImage,
 }: {
   citations?: AnswerCitation[];
+  renderImage?: (uri: string) => ReactElement;
 }): ReactElement | null {
   const [open, setOpen] = useState(false);
   if (!citations?.length) return null;
@@ -60,6 +62,7 @@ export const AnswerCitationList = memo(function AnswerCitationList({
                   </div>
                 )}
                 {citation.detail && <blockquote>{citation.detail}</blockquote>}
+                {citation.imageUri && renderImage?.(citation.imageUri)}
                 {citation.kind === 'research_claim' && (
                   <ul>
                     {citation.sourceUrls.map((source) => (

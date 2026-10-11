@@ -1,0 +1,1091 @@
+import { describe, expect, it } from 'vitest';
+import {
+  BROWSER_LIMITS,
+  browserArgumentsSchema,
+  browserCaptureSchema,
+  browserErrorSchema,
+  browserObservationSchema,
+  browserResultSchema,
+  type BlobStore,
+  type BrowserAccessPort,
+  type BrowserBinding,
+  type BrowserCapture,
+  type BrowserObservation,
+  type SessionEvent,
+} from '@trinity-harness/contracts';
+import {
+  CoreToolRegistry,
+  MemorySessionStore,
+  createBrowserTool,
+  createReadBlobTool,
+  createResearchTool,
+} from '../src/index.js';
+import { FakeSandbox } from '../src/testing/index.js';
+import {
+  browserArtifactUri,
+  browserHash,
+  canonicalBrowserJson,
+  browserDeliveries,
+} from '../src/tools/browser-artifacts.js';
+import { PNG } from 'pngjs';
+import { toModelMessages } from '../src/loop/to-model-messages.js';
+import { resolveBrowserImage } from '../src/tools/browser-artifacts.js';
+import { deliver } from '../src/tools/browser.js';
+import { resolveBrowserSource } from '../src/tools/browser-evidence.js';
+import { answerGrounding } from '../src/loop/answer-grounding.js';
+
+const meta = () => ({ eventId: crypto.randomUUID(), at: '2026-01-01T00:00:00.000Z' });
+const binding: BrowserBinding = {
+  bindingId: 'binding',
+  tabId: 'tab',
+  documentRevision: 'revision',
+  cliVersion: '1.0.0',
+  browserVersion: 'Chrome-1',
+  cliSession: 'owned-session',
+};
+const surface = {
+  context: {
+    width: 800,
+    height: 600,
+    scrollX: 0,
+    scrollY: 0,
+    devicePixelRatio: 1,
+    locale: 'en-US',
+    timezone: 'UTC',
+  },
+  targets: [
+    {
+      ref: 'r0',
+      role: 'button',
+      name: 'Read more',
+      path: [1, 0],
+      disabled: false,
+      sensitive: false,
+      box: { x: 10, y: 10, width: 100, height: 30 },
+    },
+    {
+      ref: 'r1',
+      role: 'textbox',
+      name: 'Search',
+      path: [1, 1],
+      disabled: false,
+      sensitive: false,
+      box: { x: 10, y: 50, width: 100, height: 30 },
+    },
+  ],
+  truncated: false,
+  privacyDenied: false,
+};
+const capture: BrowserCapture = {
+  schemaVersion: 1,
+  extractorVersion: 'semantic-v1',
+  url: 'https://example.com/article',
+  title: '论文',
+  publishedAt: null,
+  readiness: 'ready',
+  representation: 'article',
+  scope: 'article',
+  exclusions: ['hidden'],
+  captureTruncated: false,
+  blocks: [
+    { id: 'b0', kind: 'heading', sectionId: 'b0', text: '论文标题：Nature “原文” 😀', links: [] },
+    {
+      id: 'b1',
+      kind: 'paragraph',
+      sectionId: 'b0',
+      text: 'Title：Late-life treatment 查看更多 期刊：Nature.',
+      links: [],
+    },
+  ],
+};
+function observation(text?: string): BrowserObservation {
+  const payload = {
+    ...capture,
+    blocks: text === undefined ? capture.blocks : [{ ...capture.blocks[0]!, text }],
+    observationId: 'observation',
+    sessionId: 's',
+    bindingId: binding.bindingId,
+    tabId: binding.tabId,
+    documentRevision: binding.documentRevision,
+    cliVersion: binding.cliVersion,
+    browserVersion: binding.browserVersion,
+    capturedAt: meta().at,
+  };
+  return { ...payload, hash: browserHash(payload) };
+}
+function memoryBlobs(): BlobStore & { data: Map<string, Uint8Array> } {
+  const data = new Map<string, Uint8Array>();
+  return {
+    data,
+    put: async (key, bytes, opts) => {
+      const uri = `blob://${key}`;
+      data.set(uri, bytes);
+      return { key: key!, uri, size: bytes.length, mimeType: opts.mimeType };
+    },
+    get: async (uri) => data.get(uri) ?? null,
+    getMeta: async (uri) =>
+      data.has(uri)
+        ? { key: uri.slice(7), uri, size: data.get(uri)!.length, mimeType: 'application/json' }
+        : null,
+    delete: async (uri) => {
+      data.delete(uri);
+    },
+  };
+}
+async function assembly(
+  access: BrowserAccessPort | undefined = { authorize: async () => binding },
+) {
+  const store = new MemorySessionStore();
+  const blobs = memoryBlobs();
+  const sandbox = new FakeSandbox();
+  const calls: string[][] = [];
+  sandbox.argvHandler = async (_cmd, args, opts) => {
+    expect(opts.maxOutputBytes).toBeLessThanOrEqual(BROWSER_LIMITS.transport);
+    calls.push(args);
+    const value = args.includes('eval')
+      ? {
+          result: args.some((a) => a.includes('el.click()'))
+            ? { applied: true }
+            : args.some((a) => a.includes('requestAnimationFrame'))
+              ? 'ready'
+              : args.some((a) => a.includes('document.elementFromPoint'))
+                ? { allowed: true }
+                : args.some((a) => a.includes('privacyDenied'))
+                  ? surface
+                  : args.some((a) => a.includes('MutationObserver'))
+                    ? 'timed_out'
+                    : capture,
+        }
+      : args.includes('snapshot')
+        ? { snapshot: '- heading "论文"\n- link "source" [ref=e1]' }
+        : {};
+    return {
+      stdout:
+        args[0] === '--version'
+          ? 'agent-browser 1.0.0'
+          : JSON.stringify({ success: true, data: value }),
+      stderr: '',
+      exitCode: 0,
+      outputOverflow: false,
+    };
+  };
+  let observations = 0;
+  const registry = new CoreToolRegistry(sandbox);
+  registry.register(
+    createBrowserTool({
+      store,
+      blobs,
+      access,
+      now: () => new Date(meta().at),
+      newId: () => (++observations === 1 ? 'observation' : `observation${observations}`),
+    }),
+  );
+  await store.append('s', [
+    {
+      ...meta(),
+      type: 'message/user',
+      surfaceOp: 'append',
+      content: [{ kind: 'text', text: 'research' }],
+    },
+  ]);
+  const run = async (id: string, args: unknown, sessionId = 's', permissionGranted = false) => {
+    await store.append(sessionId, [
+      { ...meta(), type: 'tool/call', name: 'browser', callId: id, args },
+    ]);
+    const result = await registry.execute(
+      { id, name: 'browser', args },
+      { sessionId, workspaceRoot: '/ws', permissionGranted },
+    );
+    await store.append(sessionId, [{ ...meta(), type: 'tool/result', callId: id, ...result }]);
+    return result;
+  };
+  return { store, blobs, sandbox, registry, calls, run };
+}
+
+describe('browser contracts and capture', () => {
+  it.each(['javascript:alert(1)', 'file:///etc/passwd', 'https://user:secret@example.com/'])(
+    'rejects unsafe URL %s',
+    (url) => {
+      expect(browserArgumentsSchema.safeParse({ operation: 'navigate', url }).success).toBe(false);
+    },
+  );
+  it('rejects unsupported operations and malformed/oversized capture', () => {
+    expect(browserArgumentsSchema.safeParse({ operation: 'eval', script: 'evil()' }).success).toBe(
+      false,
+    );
+    for (const altered of [
+      { ...capture, schemaVersion: 2 },
+      { ...capture, blocks: [{ ...capture.blocks[0], text: 'x'.repeat(64_001) }] },
+    ])
+      expect(browserCaptureSchema.safeParse(altered).success).toBe(false);
+  });
+  it('captures via bounded argv, persists immutable data and exact receipts', async () => {
+    const { run, blobs, calls, store } = await assembly();
+    const result = await run('capture', { operation: 'get_page_text' });
+    expect(result.isError).toBe(false);
+    const value = browserResultSchema.parse(result.value);
+    expect(value.receipt).toEqual(
+      capture.blocks.map((b) => ({ blockId: b.id, start: 0, end: Array.from(b.text).length })),
+    );
+    expect(value).toMatchObject({ saved: false, captureTruncated: false, outputTruncated: false });
+    expect(calls.at(-1)?.slice(0, 5)).toEqual([
+      '--session',
+      'owned-session',
+      '--json',
+      '--pin-tab',
+      'eval',
+    ]);
+    const artifact = browserObservationSchema.parse(
+      JSON.parse(new TextDecoder().decode(blobs.data.get(value.artifactUri))),
+    );
+    expect(artifact.hash).toBe(browserHash(artifact));
+    expect(browserDeliveries(await store.load('s'), 's')).toHaveLength(1);
+    expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThanOrEqual(BROWSER_LIMITS.overview);
+  });
+  it('does not expose live operations without a boundary', async () => {
+    const { store, blobs, sandbox } = await assembly();
+    const registry = new CoreToolRegistry(sandbox);
+    registry.register(createBrowserTool({ store, blobs, now: () => new Date(meta().at) }));
+    expect(registry.schemas()[0]?.parameters.type).toBe('object');
+    expect(JSON.stringify(registry.schemas())).not.toContain('navigate');
+    expect(
+      (
+        await registry.execute(
+          { id: 'x', name: 'browser', args: { operation: 'navigate', url: capture.url } },
+          { sessionId: 's', workspaceRoot: '/ws' },
+        )
+      ).isError,
+    ).toBe(true);
+  });
+  it('denies missing operation/site authorization before effects', async () => {
+    const { run, calls } = await assembly({
+      authorize: async () => {
+        throw new Error('denied');
+      },
+    });
+    expect(await run('denied', { operation: 'navigate', url: capture.url })).toMatchObject({
+      isError: true,
+      value: { code: 'NOT_AUTHORIZED', effect: 'none' },
+    });
+    expect(calls).toHaveLength(0);
+  });
+  it('rechecks redirects and reports unknown navigation outcome', async () => {
+    let count = 0;
+    const { run } = await assembly({
+      authorize: async () => {
+        if (++count > 1) throw new Error('redirect denied');
+        return binding;
+      },
+    });
+    expect(await run('redirect', { operation: 'navigate', url: capture.url })).toMatchObject({
+      isError: true,
+      value: { code: 'NOT_AUTHORIZED', effect: 'unknown' },
+    });
+  });
+  it('validates accessibility envelope and returns read-only observation', async () => {
+    const { run } = await assembly();
+    expect(await run('snapshot', { operation: 'read_page', filter: 'interactive' })).toMatchObject({
+      isError: false,
+      value: { blocks: [{ kind: 'accessibility' }] },
+    });
+  });
+  it.each(['get_page_text', 'read_page'] as const)(
+    'rejects a same-URL reload during %s without persisting mixed evidence',
+    async (operation) => {
+      let count = 0;
+      const { run, blobs } = await assembly({
+        authorize: async () => ({
+          ...binding,
+          documentRevision:
+            ++count === (operation === 'read_page' ? 3 : 2) ? 'reloaded' : 'revision',
+        }),
+      });
+      expect(await run('reload', { operation })).toMatchObject({
+        isError: true,
+        value: { code: 'STALE_TARGET' },
+      });
+      expect(blobs.data.size).toBe(0);
+    },
+  );
+  it.each(['invalid', 'overflow', 'storage', 'version'])(
+    'bounds %s failures without leaking output',
+    async (kind) => {
+      const { run, sandbox, blobs } = await assembly();
+      if (kind === 'storage')
+        blobs.put = async () => {
+          throw new Error('private failure');
+        };
+      else {
+        const old = sandbox.argvHandler!;
+        sandbox.argvHandler = async (c, a, o) =>
+          a[0] === '--version' && kind !== 'version'
+            ? old(c, a, o)
+            : {
+                stdout: kind === 'version' ? 'wrong version' : 'private malformed output',
+                stderr: 'secret',
+                exitCode: 0,
+                outputOverflow: kind === 'overflow',
+              };
+      }
+      const result = await run('bad', { operation: 'get_page_text' });
+      expect(result.isError).toBe(true);
+      expect(browserErrorSchema.safeParse(result.value).success).toBe(true);
+      expect(JSON.stringify(result)).not.toContain('private');
+      expect(JSON.stringify(result)).not.toContain('secret');
+      expect(Buffer.byteLength(JSON.stringify(result.value))).toBeLessThanOrEqual(
+        BROWSER_LIMITS.diagnostic,
+      );
+      if (kind === 'storage') expect(result).toMatchObject({ value: { code: 'PERSIST_FAILED' } });
+    },
+  );
+  it('cancels before any effects', async () => {
+    const { registry, calls } = await assembly();
+    expect(
+      (
+        await registry.execute(
+          { id: 'x', name: 'browser', args: { operation: 'get_page_text' } },
+          { sessionId: 's', workspaceRoot: '/ws', signal: AbortSignal.abort() },
+        )
+      ).isError,
+    ).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('bounded saved reading and evidence', () => {
+  it('canonicalizes sorted object keys and preserves duplicate blocks and punctuation', () => {
+    expect(canonicalBrowserJson({ b: 2, a: 1 })).toBe(canonicalBrowserJson({ a: 1, b: 2 }));
+    const saved = observation();
+    expect(browserHash({ ...saved, title: 'changed' })).not.toBe(saved.hash);
+    expect(saved.blocks[0]!.text).toContain('：');
+  });
+  it('slices large Unicode blocks with exact half-open receipts and pagination', () => {
+    const saved = observation('😀论文：'.repeat(5000));
+    const first = deliver(
+      saved,
+      { operation: 'read_observation', observationId: saved.observationId },
+      'first',
+      2048,
+    )!;
+    expect(first.outputTruncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(2048);
+    expect(first.blocks[0]!.text).toBe(
+      Array.from(saved.blocks[0]!.text)
+        .slice(first.blocks[0]!.start, first.blocks[0]!.end)
+        .join(''),
+    );
+    const second = deliver(
+      saved,
+      {
+        operation: 'read_observation',
+        observationId: saved.observationId,
+        cursor: first.continuation!,
+      },
+      'second',
+      2048,
+      [first],
+    )!;
+    expect(second.blocks[0]!.start).toBe(first.blocks[0]!.end);
+    expect(browserResultSchema.safeParse(first).success).toBe(true);
+  });
+  it('restores saved reads without executing CLI and suppresses duplicate deliveries', async () => {
+    const { run, calls, store, blobs } = await assembly();
+    await run('capture', { operation: 'get_page_text' });
+    const effects = calls.length;
+    const duplicate = await run('duplicate', {
+      operation: 'read_observation',
+      observationId: 'observation',
+    });
+    expect(duplicate).toMatchObject({
+      isError: false,
+      value: { blocks: [], receipt: [], saved: true },
+    });
+    expect(calls).toHaveLength(effects);
+    await store.append('s', [
+      {
+        ...meta(),
+        type: 'message/user',
+        surfaceOp: 'append',
+        content: [{ kind: 'text', text: 'next turn' }],
+      },
+    ]);
+    // A newly constructed registry has no worker-local observation cache.
+    const registry = new CoreToolRegistry(new FakeSandbox());
+    registry.register(createBrowserTool({ store, blobs, now: () => new Date(meta().at) }));
+    const reread = await registry.execute(
+      {
+        id: 'reread',
+        name: 'browser',
+        args: { operation: 'search_observation', observationId: 'observation', query: '期刊：' },
+      },
+      { sessionId: 's', workspaceRoot: '/ws' },
+    );
+    expect(reread).toMatchObject({
+      isError: false,
+      value: { saved: true, capturedAt: meta().at, blocks: [{ id: 'b1' }] },
+    });
+  });
+  it('rejects cross-session, fork-copied, missing and corrupt artifacts', async () => {
+    const { run, store, blobs } = await assembly();
+    await run('capture', { operation: 'get_page_text' });
+    await store.append('fork', await store.load('s'));
+    for (const session of ['other', 'fork'])
+      expect(
+        (await run('x', { operation: 'read_observation', observationId: 'observation' }, session))
+          .isError,
+      ).toBe(true);
+    const uri = browserArtifactUri('s', 'observation');
+    const original = blobs.data.get(uri)!;
+    blobs.data.delete(uri);
+    expect(
+      (await run('missing', { operation: 'read_observation', observationId: 'observation' }))
+        .isError,
+    ).toBe(true);
+    const corrupt = JSON.parse(new TextDecoder().decode(original));
+    corrupt.blocks[0].text = 'changed';
+    blobs.data.set(uri, new TextEncoder().encode(JSON.stringify(corrupt)));
+    expect(
+      (await run('corrupt', { operation: 'read_observation', observationId: 'observation' }))
+        .isError,
+    ).toBe(true);
+  });
+  it('resolves exact block quotes and final source provenance without retyping', async () => {
+    const { run, store, blobs, registry } = await assembly();
+    await run('capture', { operation: 'get_page_text' });
+    registry.register(createResearchTool(store, blobs));
+    const args = {
+      action: 'record',
+      notes: {
+        question: 'What did the source say?',
+        findings: [
+          {
+            claim: 'The source uses original punctuation.',
+            relation: 'context',
+            sources: [{ observationId: 'observation', blockId: 'b1' }],
+          },
+        ],
+        openQuestions: [],
+        readyToAnswer: true,
+      },
+    };
+    const result = await registry.execute(
+      { id: 'notes', name: 'research', args },
+      { sessionId: 's', workspaceRoot: '/ws' },
+    );
+    expect(result).toMatchObject({
+      isError: false,
+      value: {
+        notes: {
+          findings: [
+            {
+              sources: [
+                {
+                  quote: capture.blocks[1]!.text,
+                  url: capture.url,
+                  callId: 'capture',
+                  evidenceSeq: 3,
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    await store.append('s', [
+      { ...meta(), type: 'tool/call', callId: 'notes', name: 'research', args },
+      { ...meta(), type: 'tool/result', callId: 'notes', ...result },
+    ]);
+    expect(await answerGrounding(await store.load('s'), 1, 's', blobs)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'web_source',
+          observationId: 'observation',
+          callId: 'capture',
+          evidenceSeq: 3,
+        }),
+        expect.objectContaining({
+          kind: 'research_claim',
+          sourceUrls: [capture.url],
+          detail: capture.blocks[1]!.text,
+        }),
+      ]),
+    );
+  });
+  it('rejects unseen ranges, previous-turn references and uncommitted orphan blobs', async () => {
+    const { store, blobs, run } = await assembly();
+    const saved = observation('😀'.repeat(2000));
+    await blobs.put('browser/s/observation.json', new TextEncoder().encode(JSON.stringify(saved)), {
+      mimeType: 'application/json',
+    });
+    const reference = { observationId: 'observation', blockId: 'b0', start: 1900, end: 1910 };
+    await expect(
+      resolveBrowserSource(reference, await store.load('s'), 1, 's', blobs),
+    ).rejects.toThrow();
+    const partial = deliver(
+      saved,
+      { operation: 'get_page_text', mode: 'article' },
+      'partial',
+      1500,
+    )!;
+    await store.append('s', [
+      {
+        ...meta(),
+        type: 'tool/call',
+        name: 'browser',
+        callId: 'partial',
+        args: { operation: 'get_page_text' },
+      },
+      { ...meta(), type: 'tool/result', callId: 'partial', isError: false, value: partial },
+    ]);
+    await expect(
+      resolveBrowserSource(reference, await store.load('s'), 1, 's', blobs),
+    ).rejects.toThrow('not exposed');
+    const resolved = await resolveBrowserSource(
+      { ...reference, start: 1, end: 3 },
+      await store.load('s'),
+      1,
+      's',
+      blobs,
+    );
+    expect(resolved.quote).toBe('😀😀');
+    await store.append('s', [
+      {
+        ...meta(),
+        type: 'message/user',
+        surfaceOp: 'append',
+        content: [{ kind: 'text', text: 'new' }],
+      },
+    ]);
+    await expect(
+      resolveBrowserSource(
+        { ...reference, start: 1, end: 3 },
+        await store.load('s'),
+        4,
+        's',
+        blobs,
+      ),
+    ).rejects.toThrow();
+    expect(
+      (
+        await run('reread', {
+          operation: 'read_observation',
+          observationId: 'observation',
+          cursor: { blockId: 'b0', offset: 1900 },
+        })
+      ).isError,
+    ).toBe(false);
+    expect(
+      (await resolveBrowserSource(reference, await store.load('s'), 4, 's', blobs)).quote,
+    ).toBe('😀'.repeat(10));
+  });
+  it('closes focused reads at the cumulative hard ceiling recovered from events', async () => {
+    const { store, blobs, run } = await assembly();
+    const saved = observation('x'.repeat(4000));
+    await blobs.put('browser/s/observation.json', new TextEncoder().encode(JSON.stringify(saved)), {
+      mimeType: 'application/json',
+    });
+    const events: SessionEvent[] = [];
+    for (let i = 0; i < 20; i++) {
+      const callId = `c${i}`;
+      const value = deliver(
+        saved,
+        { operation: 'read_observation', observationId: 'observation' },
+        callId,
+        8192,
+      )!;
+      events.push(
+        { ...meta(), type: 'tool/call', name: 'browser', callId, args: {} },
+        { ...meta(), type: 'tool/result', callId, isError: false, value },
+      );
+    }
+    await store.append('s', events);
+    expect(
+      await run('limited', { operation: 'read_observation', observationId: 'observation' }),
+    ).toMatchObject({ isError: true, value: { code: 'LIMIT_REACHED', recovery: 'conclude' } });
+  });
+  it('blocks browser artifacts through generic blob retrieval, including traversal aliases', async () => {
+    const { registry } = await assembly();
+    registry.register(createReadBlobTool(memoryBlobs()));
+    for (const uri of [
+      'blob://browser/s/observation.json',
+      'blob://other/../browser/s/observation.json',
+      'blob://%62rowser/s/observation.json',
+    ])
+      expect(
+        (
+          await registry.execute(
+            { id: 'blob', name: 'read_blob', args: { uri } },
+            { sessionId: 's', workspaceRoot: '/ws' },
+          )
+        ).isError,
+      ).toBe(true);
+  });
+});
+
+it('bounds malformed argument diagnostics without echoing model keys', async () => {
+  const { registry } = await assembly();
+  const result = await registry.execute(
+    {
+      id: 'malformed',
+      name: 'browser',
+      args: { operation: 'get_page_text', ['secret'.repeat(10000)]: 'value' },
+    },
+    { sessionId: 's', workspaceRoot: '/ws' },
+  );
+  expect(result).toMatchObject({
+    isError: true,
+    value: { code: 'INVALID_ARGUMENTS', effect: 'none' },
+  });
+  expect(Buffer.byteLength(JSON.stringify(result.value))).toBeLessThanOrEqual(
+    BROWSER_LIMITS.diagnostic,
+  );
+  expect(JSON.stringify(result.value)).not.toContain('secret');
+});
+
+it('requires focused retrieval at the soft ceiling while preserving a hard ceiling', async () => {
+  const { store, blobs, run, calls } = await assembly();
+  const saved = observation('x'.repeat(3000));
+  await blobs.put('browser/s/observation.json', new TextEncoder().encode(JSON.stringify(saved)), {
+    mimeType: 'application/json',
+  });
+  for (let i = 0; i < 10; i++) {
+    const callId = `old${i}`;
+    const value = deliver(
+      saved,
+      { operation: 'read_observation', observationId: saved.observationId },
+      callId,
+      8192,
+    )!;
+    await store.append('s', [
+      { ...meta(), type: 'tool/call', name: 'browser', callId, args: {} },
+      { ...meta(), type: 'tool/result', callId, isError: false, value },
+    ]);
+  }
+  expect(await run('broad', { operation: 'get_page_text' })).toMatchObject({
+    isError: true,
+    value: { code: 'LIMIT_REACHED', recovery: 'focused_read' },
+  });
+  expect(calls).toHaveLength(0);
+  expect(
+    await run('focused', {
+      operation: 'read_observation',
+      observationId: 'observation',
+      blockIds: ['b0'],
+    }),
+  ).toMatchObject({ isError: false, value: { duplicateSuppressed: true } });
+});
+
+it('reports navigation persistence failure as an unknown effect, without retrying it', async () => {
+  const { run, blobs, calls } = await assembly();
+  blobs.put = async () => {
+    throw new Error('storage failed');
+  };
+  expect(await run('navigate', { operation: 'navigate', url: capture.url })).toMatchObject({
+    isError: true,
+    value: { code: 'PERSIST_FAILED', effect: 'unknown' },
+  });
+  expect(calls.filter((args) => args.includes('open'))).toHaveLength(1);
+});
+
+it('rejects invalid saved ranges, unknown blocks, and forbidden script arguments', async () => {
+  const { run } = await assembly();
+  await run('capture', { operation: 'get_page_text' });
+  for (const [i, args] of [
+    {
+      operation: 'read_observation',
+      observationId: 'observation',
+      cursor: { blockId: 'b0', offset: 10000 },
+    },
+    { operation: 'read_observation', observationId: 'observation', blockIds: ['missing'] },
+    { operation: 'get_page_text', script: 'document.cookie' },
+  ].entries())
+    expect((await run(`invalid-${i}`, args)).isError).toBe(true);
+});
+
+it('does not return unrelated suffixes when literal search hits were already exposed', () => {
+  const saved = observation('prefix '.repeat(80) + 'needle' + ' suffix'.repeat(100));
+  const args = {
+    operation: 'search_observation' as const,
+    observationId: saved.observationId,
+    query: 'needle',
+  };
+  const first = deliver(saved, args, 'first', 8192)!;
+  expect(first.blocks[0]!.text).toContain('needle');
+  const duplicate = deliver(saved, args, 'second', 8192, [first])!;
+  expect(duplicate.blocks).toEqual([]);
+  expect(duplicate.duplicateSuppressed).toBe(true);
+});
+
+it('does not recover notes whose referenced artifact has become unavailable', async () => {
+  const { run, registry, store, blobs } = await assembly();
+  await run('capture', { operation: 'get_page_text' });
+  registry.register(createResearchTool(store, blobs));
+  const args = {
+    action: 'record',
+    notes: {
+      question: 'question',
+      findings: [
+        {
+          claim: 'claim',
+          relation: 'context',
+          sources: [{ observationId: 'observation', blockId: 'b0' }],
+        },
+      ],
+      openQuestions: [],
+      readyToAnswer: true,
+    },
+  };
+  const result = await registry.execute(
+    { id: 'notes', name: 'research', args },
+    { sessionId: 's', workspaceRoot: '/ws' },
+  );
+  expect(result.isError).toBe(false);
+  await store.append('s', [
+    { ...meta(), type: 'tool/call', name: 'research', callId: 'notes', args },
+    { ...meta(), type: 'tool/result', callId: 'notes', ...result },
+  ]);
+  blobs.data.delete(browserArtifactUri('s', 'observation'));
+  expect(
+    await registry.execute(
+      { id: 'status', name: 'research', args: { action: 'status' } },
+      { sessionId: 's', workspaceRoot: '/ws' },
+    ),
+  ).toMatchObject({ isError: true, value: { code: 'RESEARCH_SOURCE_MISMATCH' } });
+});
+
+describe('scoped browser interactions and screenshots', () => {
+  it('requires per-call authorization before effects and applies only an exposed ref', async () => {
+    const { run, calls } = await assembly();
+    const first = browserResultSchema.parse((await run('page', { operation: 'read_page' })).value);
+    expect(first.snapshot?.targets.map((t) => t.ref)).toContain('r0');
+    const before = calls.length;
+    expect(
+      await run('denied', { operation: 'click', snapshotId: first.observationId, ref: 'r0' }),
+    ).toMatchObject({ isError: true, value: { code: 'NOT_AUTHORIZED', effect: 'none' } });
+    expect(calls).toHaveLength(before);
+    const fresh = browserResultSchema.parse((await run('fresh', { operation: 'read_page' })).value);
+    const applied = await run(
+      'click',
+      { operation: 'click', snapshotId: fresh.observationId, ref: 'r0' },
+      's',
+      true,
+    );
+    expect(applied).toMatchObject({
+      isError: false,
+      value: { effect: 'applied', snapshot: { snapshotId: 'observation3' } },
+    });
+    expect(
+      calls.some((a) => a.includes('click') && a.includes('html > :nth-child(2) > :nth-child(1)')),
+    ).toBe(true);
+    expect(
+      await run(
+        'reuse',
+        { operation: 'click', snapshotId: fresh.observationId, ref: 'r0' },
+        's',
+        true,
+      ),
+    ).toMatchObject({ isError: true, value: { code: 'STALE_TARGET' } });
+  });
+  it('activates native controls using only the checked fixed DOM operation', async () => {
+    const { run, calls, sandbox } = await assembly();
+    const old = sandbox.argvHandler!;
+    sandbox.argvHandler = async (c, a, o) =>
+      a.some((v) => v.includes('privacyDenied'))
+        ? {
+            stdout: JSON.stringify({
+              success: true,
+              data: {
+                ...surface,
+                targets: surface.targets.map((t) => ({ ...t, activation: 'dom' })),
+              },
+            }),
+            stderr: '',
+            exitCode: 0,
+            outputOverflow: false,
+          }
+        : old(c, a, o);
+    const first = browserResultSchema.parse((await run('page', { operation: 'read_page' })).value);
+    expect(
+      await run(
+        'activate',
+        { operation: 'click', snapshotId: first.observationId, ref: 'r0' },
+        's',
+        true,
+      ),
+    ).toMatchObject({ isError: false, value: { effect: 'applied' } });
+    const activation = calls.find((a) => a.some((v) => v.includes('el.click()')));
+    expect(activation?.at(-1)).toContain('target occluded');
+    expect(activation?.at(-1)).toContain('html > :nth-child(2) > :nth-child(1)');
+    expect(calls.some((a) => a.includes('click') || a.includes('press'))).toBe(false);
+  });
+  it.each(['scroll', 'target', 'viewport', 'disabled', 'sensitive'] as const)(
+    'rejects changed %s before an action',
+    async (change) => {
+      const { run, calls, sandbox } = await assembly();
+      const first = browserResultSchema.parse(
+        (await run('page', { operation: 'read_page' })).value,
+      );
+      const old = sandbox.argvHandler!;
+      sandbox.argvHandler = async (c, a, o) =>
+        a.some((v) => v.includes('privacyDenied'))
+          ? {
+              stdout: JSON.stringify({
+                success: true,
+                data: {
+                  ...surface,
+                  context: {
+                    ...surface.context,
+                    ...(change === 'scroll'
+                      ? { scrollY: 100 }
+                      : change === 'viewport'
+                        ? { width: 900 }
+                        : {}),
+                  },
+                  targets: surface.targets.map((t) => ({
+                    ...t,
+                    ...(change === 'target'
+                      ? { name: 'Replaced' }
+                      : change === 'disabled'
+                        ? { disabled: true }
+                        : change === 'sensitive'
+                          ? { sensitive: true }
+                          : {}),
+                  })),
+                },
+              }),
+              stderr: '',
+              exitCode: 0,
+              outputOverflow: false,
+            }
+          : old(c, a, o);
+      const before = calls.filter((a) => a.includes('click')).length;
+      expect(
+        await run(
+          'bad',
+          { operation: 'click', snapshotId: first.observationId, ref: 'r0' },
+          's',
+          true,
+        ),
+      ).toMatchObject({ isError: true, value: { code: 'STALE_TARGET', effect: 'none' } });
+      expect(calls.filter((a) => a.includes('click'))).toHaveLength(before);
+    },
+  );
+  it('focuses a validated field before key input, and bounds fill/scroll arguments', async () => {
+    const { run, calls } = await assembly();
+    const first = browserResultSchema.parse((await run('page', { operation: 'read_page' })).value);
+    const second = browserResultSchema.parse(
+      (
+        await run(
+          'fill',
+          { operation: 'fill', snapshotId: first.observationId, ref: 'r1', text: 'a; $(secret)' },
+          's',
+          true,
+        )
+      ).value,
+    );
+    expect(calls.find((a) => a.includes('fill'))?.at(-1)).toBe('a; $(secret)');
+    const third = browserResultSchema.parse(
+      (
+        await run(
+          'key',
+          { operation: 'key', snapshotId: second.observationId, ref: 'r1', key: 'Enter' },
+          's',
+          true,
+        )
+      ).value,
+    );
+    expect(calls.slice(-6).some((a) => a.includes('press'))).toBe(true);
+    expect(
+      await run(
+        'scroll',
+        { operation: 'scroll', snapshotId: third.observationId, direction: 'down', pixels: 500 },
+        's',
+        true,
+      ),
+    ).toMatchObject({ isError: false });
+    expect(
+      browserArgumentsSchema.safeParse({
+        operation: 'fill',
+        snapshotId: 's',
+        ref: 'r',
+        text: 'x'.repeat(4001),
+      }).success,
+    ).toBe(false);
+    expect(
+      browserArgumentsSchema.safeParse({
+        operation: 'scroll',
+        snapshotId: 's',
+        direction: 'down',
+        pixels: 10000,
+      }).success,
+    ).toBe(false);
+  });
+  it('reports unknown effects when a driver fails and invalidates prior targets', async () => {
+    const { run, sandbox } = await assembly();
+    const first = browserResultSchema.parse((await run('page', { operation: 'read_page' })).value);
+    const old = sandbox.argvHandler!;
+    sandbox.argvHandler = async (c, a, o) =>
+      a.includes('click')
+        ? { stdout: '', stderr: 'private error', exitCode: 1, outputOverflow: false }
+        : old(c, a, o);
+    expect(
+      await run(
+        'failed',
+        { operation: 'click', snapshotId: first.observationId, ref: 'r0' },
+        's',
+        true,
+      ),
+    ).toMatchObject({ isError: true, value: { effect: 'unknown', code: 'DRIVER_FAILED' } });
+    expect(
+      await run(
+        'retry',
+        { operation: 'click', snapshotId: first.observationId, ref: 'r0' },
+        's',
+        true,
+      ),
+    ).toMatchObject({ isError: true, value: { code: 'STALE_TARGET' } });
+  });
+  it('scopes a read using a delivered target without accepting model selectors', async () => {
+    const { run, calls } = await assembly();
+    const first = browserResultSchema.parse(
+      (await run('page', { operation: 'read_page', filter: 'all' })).value,
+    );
+    expect(
+      await run('scope', {
+        operation: 'get_page_text',
+        scope: { snapshotId: first.observationId, ref: 'r0' },
+      }),
+    ).toMatchObject({ isError: false, value: { scope: 'snapshot-subtree' } });
+    expect(
+      calls
+        .filter((a) => a.includes('eval'))
+        .some((a) => a.some((v) => v.includes('const scopePath = [1,0]'))),
+    ).toBe(true);
+  });
+  it('persists readiness timeouts with usable partial evidence', async () => {
+    const { run } = await assembly();
+    expect(
+      await run('navigate', {
+        operation: 'navigate',
+        url: capture.url,
+        readiness: { text: 'Not yet ready', timeoutMs: 100 },
+      }),
+    ).toMatchObject({
+      isError: false,
+      value: {
+        readiness: 'timed_out',
+        readinessCondition: { text: 'Not yet ready', timeoutMs: 100 },
+      },
+    });
+  });
+  it('captures bounded cropped images, replays multimodal receipts and rejects corrupt/cross-session bytes', async () => {
+    const { run, sandbox, blobs, store } = await assembly();
+    const png = PNG.sync.write(new PNG({ width: 800, height: 600 }));
+    const old = sandbox.argvHandler!;
+    sandbox.argvHandler = async (c, a, o) => {
+      const i = a.indexOf('screenshot');
+      if (i >= 0) sandbox.binaryFiles.set(a[i + 1]!, png);
+      return old(c, a, o);
+    };
+    const result = browserResultSchema.parse(
+      (
+        await run('shot', {
+          operation: 'screenshot',
+          crop: { x: 5, y: 5, width: 200, height: 100 },
+        })
+      ).value,
+    );
+    expect(result.image).toMatchObject({ width: 200, height: 100, crop: { x: 5, y: 5 }, scale: 1 });
+    expect(result.receipt).toEqual([]);
+    expect(sandbox.binaryFiles.size).toBe(0);
+    const events = await store.load('s');
+    expect(toModelMessages(events).at(-1)?.blocks).toEqual([
+      { kind: 'image', uri: result.image!.uri, mimeType: 'image/png' },
+    ]);
+    expect(await resolveBrowserImage(blobs, events, 's', result.image!.uri)).toBeDefined();
+    await expect(resolveBrowserImage(blobs, events, 'other', result.image!.uri)).rejects.toThrow(
+      'authorized',
+    );
+    const clicked = await run(
+      'coordinate',
+      { operation: 'click', snapshotId: result.observationId, point: { x: 15, y: 15 } },
+      's',
+      true,
+    );
+    expect(clicked.isError).toBe(false);
+    blobs.data.get(result.image!.uri)![0] = 0;
+    await expect(resolveBrowserImage(blobs, events, 's', result.image!.uri)).rejects.toThrow(
+      'integrity',
+    );
+  });
+  it('marks delayed paint as partial visual evidence and refuses coordinate input', async () => {
+    const { run, sandbox } = await assembly();
+    const png = PNG.sync.write(new PNG({ width: 800, height: 600 }));
+    const old = sandbox.argvHandler!;
+    sandbox.argvHandler = async (c, a, o) => {
+      const i = a.indexOf('screenshot');
+      if (i >= 0) sandbox.binaryFiles.set(a[i + 1]!, png);
+      return a.some((v) => v.includes('requestAnimationFrame'))
+        ? {
+            stdout: JSON.stringify({ success: true, data: { result: 'timed_out' } }),
+            stderr: '',
+            exitCode: 0,
+            outputOverflow: false,
+          }
+        : old(c, a, o);
+    };
+    const result = browserResultSchema.parse(
+      (await run('shot', { operation: 'screenshot' })).value,
+    );
+    expect(result.readiness).toBe('partial');
+    expect(result.exclusions.join(' ')).toContain('pixels may lag the DOM');
+    expect(result.image).toBeDefined();
+    expect(
+      await run(
+        'coordinate',
+        { operation: 'click', snapshotId: result.observationId, point: { x: 10, y: 10 } },
+        's',
+        true,
+      ),
+    ).toMatchObject({ isError: true, value: { code: 'STALE_TARGET', effect: 'none' } });
+  });
+  it('charges screenshot counts through committed receipts across tool calls', async () => {
+    const { run, sandbox } = await assembly();
+    const png = PNG.sync.write(new PNG({ width: 800, height: 600 }));
+    const old = sandbox.argvHandler!;
+    let captures = 0;
+    sandbox.argvHandler = async (c, a, o) => {
+      const i = a.indexOf('screenshot');
+      if (i >= 0) {
+        captures++;
+        sandbox.binaryFiles.set(a[i + 1]!, png);
+      }
+      return old(c, a, o);
+    };
+    for (let i = 0; i < BROWSER_LIMITS.imagesPerTurn; i++)
+      expect(await run('shot' + i, { operation: 'screenshot' })).toMatchObject({ isError: false });
+    expect(await run('over', { operation: 'screenshot' })).toMatchObject({
+      isError: true,
+      value: { code: 'LIMIT_REACHED' },
+    });
+    expect(captures).toBe(BROWSER_LIMITS.imagesPerTurn);
+  });
+  it('refuses sensitive capture and image limits without exposing private paths', async () => {
+    const { run, sandbox } = await assembly();
+    const old = sandbox.argvHandler!;
+    sandbox.argvHandler = async (c, a, o) =>
+      a.some((v) => v.includes('privacyDenied'))
+        ? {
+            stdout: JSON.stringify({ success: true, data: { ...surface, privacyDenied: true } }),
+            stderr: '',
+            exitCode: 0,
+            outputOverflow: false,
+          }
+        : old(c, a, o);
+    expect(await run('private', { operation: 'screenshot' })).toMatchObject({
+      isError: true,
+      value: { code: 'PRIVACY_DENIED' },
+    });
+    expect(sandbox.binaryFiles.size).toBe(0);
+  });
+});

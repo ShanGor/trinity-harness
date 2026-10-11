@@ -38,6 +38,7 @@ import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { mkdir } from 'node:fs/promises';
 import { z } from 'zod';
+import { resolveBrowserImage } from '@trinity-harness/core';
 
 import { parsePermissionPolicy, tenantQuotaSchema, windowStart } from '@trinity-harness/contracts';
 
@@ -1273,6 +1274,32 @@ export async function buildServer(
   // ---- M4: attachments & blob storage (docs/design.md §10) ------------------
 
   if (deps.blobs) {
+    app.get('/api/sessions/:sessionId/browser-images/:observationId', async (req, reply) => {
+      const sessionId = await sessionIdOf(req, reply);
+      if (!sessionId) return;
+      const granted = await authorizeSession(sessionId, req.identity, reply);
+      if (!granted) return;
+      const observationId = (req.params as Record<string, string>)['observationId'] ?? '';
+      if (!/^[A-Za-z0-9_-]{1,200}$/.test(observationId))
+        return reply.code(400).send({ error: 'invalid observation' });
+      const uri = `blob://browser/${encodeURIComponent(sessionId)}/${observationId}.png`;
+      try {
+        const bytes = await resolveBrowserImage(
+          deps.blobs!,
+          await deps.store.load(sessionId),
+          sessionId,
+          uri,
+          false,
+        );
+        return reply
+          .header('content-type', 'image/png')
+          .header('cache-control', 'private, no-store')
+          .header('x-content-type-options', 'nosniff')
+          .send(Buffer.from(bytes));
+      } catch {
+        return reply.code(404).send({ error: 'authorized screenshot unavailable' });
+      }
+    });
     // Raw binary upload (application/octet-stream body); the attachment MIME
     // type travels in the query string so no multipart parser is needed.
     app.addContentTypeParser(
@@ -1332,8 +1359,13 @@ export async function buildServer(
     // unguessable UUIDs; ownership hardening (per-session ACL) is M5+.
     app.get('/api/blobs/*', async (req, reply) => {
       const key = (req.params as Record<string, string>)['*'] ?? '';
-      if (!key || key.includes('..')) {
+      if (!key || key.includes('..') || key.includes('\\')) {
         return reply.code(400).send({ error: 'invalid blob key' });
+      }
+      if (key.split('/').includes('browser')) {
+        return reply
+          .code(403)
+          .send({ error: 'browser observations require authorized bounded saved reads' });
       }
       const meta = await deps.blobs!.getMeta(`blob://${key}`);
       const data = meta ? await deps.blobs!.get(meta.uri) : null;

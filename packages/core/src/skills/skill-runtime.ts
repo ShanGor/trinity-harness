@@ -62,9 +62,11 @@ export class SkillRuntime implements SkillRuntimePort {
       `Runtime session: ${sessionId}. Use this current identifier for session isolation.`,
       ...(this.options.browserCdpEndpoint
         ? [
-            `Browser CDP endpoint: ${JSON.stringify(this.options.browserCdpEndpoint)}. For agent-browser actions, pass --cdp with this endpoint and --pin-tab together with --session trinity-${sessionId} on every command. Attach to this browser; if unavailable, report the failure instead of launching a replacement. Preserve the user-owned Chrome.`,
+            'A browser connection is configured for this deployment. Use the browser tool operations advertised in this turn; the adapter manages connection and session-tab setup. Start browsing with browser, without CLI checks, shell commands or extraction scripts. If only saved operations are advertised, use saved observations and report that live access is unavailable. On connection or authorization failure, report it instead of launching a replacement. Preserve the user-owned Chrome.',
           ]
-        : []),
+        : [
+            'No browser endpoint is configured. Use saved browser observations only; do not launch managed Chrome or auto-discover a replacement browser. Managed Chrome deployment is a TODO.',
+          ]),
       'Before acting on a task that names or clearly matches a skill, call skill with its exact name to load its instructions. Load referenced resources with skill(name, resource) when needed.',
       'Skills supply instructions; use existing tools to execute actions under the current permission policy.',
       ...skills.map((skill) =>

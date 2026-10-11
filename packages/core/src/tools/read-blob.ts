@@ -34,6 +34,17 @@ export function createReadBlobTool(blobStore: BlobStore): ToolDefinition {
           isError: true,
         };
       }
+      let key: string;
+      try {
+        key = decodeURIComponent(args.uri.slice(BLOB_URI_SCHEME.length));
+      } catch {
+        return { value: { message: 'Invalid blob URI' }, isError: true };
+      }
+      if (key.split('/').includes('browser') || key.split('/').includes('..') || key.includes('\\'))
+        return {
+          value: { message: 'Browser evidence requires bounded browser read_observation' },
+          isError: true,
+        };
       const data = await blobStore.get(args.uri);
       if (data === null) {
         return { value: { message: `blob not found: ${args.uri}` }, isError: true };

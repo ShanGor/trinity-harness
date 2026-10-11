@@ -21,6 +21,10 @@ export interface ToolResult<V = unknown> {
 
 export interface ToolContext {
   sessionId: string;
+  /** Server-assigned originating call; never taken from model arguments. */
+  callId?: string;
+  /** Set by the Loop only after per-call policy/approval succeeds. */
+  permissionGranted?: boolean;
   workspaceRoot: string;
   signal?: AbortSignal | undefined;
   /**

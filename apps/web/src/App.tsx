@@ -995,13 +995,19 @@ function AssistantContent({ item, content }: { item: ChatItem; content: string }
       )}
       {item.stopped && <Typography.Text type="secondary">Task stopped.</Typography.Text>}
       {item.error && <Typography.Text type="secondary">The task could not finish.</Typography.Text>}
-      {!item.streaming && <AnswerCitationList citations={item.citationList} />}
+      {!item.streaming && (
+        <AnswerCitationList citations={item.citationList} renderImage={renderEvidenceImage} />
+      )}
       {!item.streaming && content.trim().length > 0 && <ResponseActions content={content} />}
     </article>
   );
 }
 
 /** M4: renders message attachments — images inline, files as links. */
+function renderEvidenceImage(uri: string): ReactElement {
+  return <AttachmentItem attachment={{ kind: 'image', uri, mimeType: 'image/png' }} size={480} />;
+}
+
 function AttachmentList({ attachments }: { attachments: AttachmentView[] }) {
   if (attachments.length === 0) return null;
   return (

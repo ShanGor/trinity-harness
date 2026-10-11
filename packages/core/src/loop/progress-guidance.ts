@@ -1,4 +1,8 @@
-import { researchResultSchema, type SessionEvent } from '@trinity-harness/contracts';
+import {
+  browserResultSchema,
+  researchResultSchema,
+  type SessionEvent,
+} from '@trinity-harness/contracts';
 import { browserCommand, researchPageFromOutput } from '../tools/research.js';
 
 /** Observations only: repeated output is not a judgment that the task has failed. */
@@ -17,17 +21,45 @@ export function progressGuidance(
   const pagesSinceNotes = new Set<string>();
   let researchRecorded = false;
   let readyToAnswer = false;
+  let citationFailures = 0;
+  let focusedReadAdvice: string | null = null;
   for (const event of events.slice(promptSeq)) {
     if (event.type === 'tool/call') calls.set(event.callId, event);
     if (event.type !== 'tool/result') continue;
     const call = calls.get(event.callId);
+    if (call?.name === 'research') {
+      const value = event.value as { code?: unknown } | null;
+      if (event.isError && value?.code === 'RESEARCH_SOURCE_MISMATCH') citationFailures += 1;
+    }
     if (call?.name === 'research' && !event.isError) {
       const result = researchResultSchema.safeParse(event.value);
       if (result.success && result.data.promptSeq === promptSeq && result.data.notes) {
+        citationFailures = 0;
         researchRecorded = result.data.notes.findings.length > 0;
         readyToAnswer = result.data.notes.readyToAnswer;
         if (researchRecorded) pagesSinceNotes.clear();
       }
+    }
+    if (call?.name === 'browser') {
+      const parsed = browserResultSchema.safeParse(event.value);
+      if (!event.isError && parsed.success) {
+        failures = 0;
+        pages.add(parsed.data.url);
+        pagesSinceNotes.add(parsed.data.url);
+        const signature = JSON.stringify(
+          parsed.data.blocks.map((block) => ({ kind: block.kind, text: block.text })),
+        );
+        if (parsed.data.blocks.length === 0 || seen.has(signature)) repeated += 1;
+        else {
+          repeated = 0;
+          seen.add(signature);
+        }
+        focusedReadAdvice =
+          parsed.data.outputTruncated && parsed.data.continuation
+            ? `The browser overview is incomplete. Continue the saved observation with ${JSON.stringify({ operation: 'read_observation', observationId: parsed.data.observationId, cursor: parsed.data.continuation })}, or use search_observation with a literal term for the missing claim. get_page_text creates a fresh capture and repeats the beginning; it does not paginate. A saved artifact may contain unexposed evidence, but only delivered ranges can be cited.`
+            : null;
+      } else failures += 1;
+      continue;
     }
     if (call?.name !== 'bash') continue;
     const command = browserCommand((call.args as { command?: unknown } | null)?.command);
@@ -69,6 +101,11 @@ export function progressGuidance(
     }
   }
   const advice: string[] = [];
+  if (focusedReadAdvice) advice.push(focusedReadAdvice);
+  if (researchAvailable && citationFailures >= 2)
+    advice.push(
+      "Research citations have been rejected repeatedly. Prefer a delivered browser observation/block/range reference to resolve exact text without retyping. For legacy sources, change the quote, not just the claim: copy a short contiguous passage directly from the observed excerpt, preserving punctuation, or remove the unsupported finding and record the remaining notes. Check that each passage supports its claim. Successful browser reads remain usable. This is recovery advice, not a stop request. The final answer should address the user's question and evidence limits; omit internal research bookkeeping, retry plans, and complaints about the validator.",
+    );
   if (researchAvailable && pages.size >= 2 && !researchRecorded)
     advice.push(
       'Evidence checkpoint: you have collected multiple article extracts. Before expanding the search, use research to state the exact user question, record source-backed findings and identify remaining gaps. Preserve the requested feature and product surface: general protocol/tool integration, app distribution, and rendering an interactive app UI are different claims. A useful qualified answer is better than continuing unrelated searches.',

@@ -246,7 +246,11 @@ export class AcpClient {
 
   /** Fetch an attachment with the same bearer authentication as other API calls. */
   async fetchBlob(uri: string, signal?: AbortSignal): Promise<Blob> {
-    const res = await fetch(this.blobUrl(uri), {
+    const screenshot = /^blob:\/\/browser\/([^/]+)\/([A-Za-z0-9_-]{1,200})\.png$/.exec(uri);
+    const url = screenshot
+      ? `${this.baseUrl}/api/sessions/${encodeURIComponent(decodeURIComponent(screenshot[1]!))}/browser-images/${screenshot[2]}`
+      : this.blobUrl(uri);
+    const res = await fetch(url, {
       headers: this.authHeaders(),
       ...(signal ? { signal } : {}),
     });

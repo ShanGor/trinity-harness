@@ -216,3 +216,9 @@
 ## Blockers
 
 _None._
+
+## Browser research implementation (2026-10-09)
+
+Implemented the typed adapter, bounded argv capture, immutable hashed observations, focused saved reading/search, exact delivery receipts, cumulative successful-delivery limits, ordered failure skipping and research block references. Server/worker composition enables live reading through `TrustedCdpBrowserAccess` when BROWSER_CDP_ENDPOINT is configured (existing Chrome 9222 on this machine); otherwise saved reads only. Owner validation, actual target ID replay and endpoint discovery checks preserve the user browser. Legacy Bash remains available with its existing limitations; trusted CDP makes no network/cookie isolation guarantee. Managed Chrome stays a deployment-guide TODO.
+
+Completed scoped targets, checked interactions/coordinates, readiness, cropped PNG budgets, multimodal replay, authenticated visual evidence UI, Readability fixture comparison and a repeated 24-run controlled model comparison. Reading citation-note rejections decreased, but input tokens increased and final quoting/caveat quality still failed rollout targets; see `browser-research-evaluation-results.md`. Remaining deployment work: enforced network/profile/privacy boundaries, global shared-browser input/takeover coordination, closing alternate routes before strict guarantees, and automated orphan GC. Managed Chrome remains a deployment TODO. See [browser-research-improvement-plan.md](./browser-research-improvement-plan.md) for the explicit implementation boundary.

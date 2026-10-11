@@ -174,3 +174,13 @@ it('reports a failed turn without treating progress as its final answer', () => 
   expect(messages[1]?.content).toContain('without a final answer');
   expect(messages[1]?.content).toContain('step limit reached');
 });
+
+it('repairs an interrupted browser navigation with an error and never invents exposure receipts', () => {
+  const messages = toModelMessages([
+    user('browse'),
+    call('interrupted-browser', 'browser', { operation: 'navigate', url: 'https://example.com/' }),
+  ]);
+  const result = messages.find((message) => message.toolCallId === 'interrupted-browser');
+  expect(result?.content).toContain('TOOL_INTERRUPTED');
+  expect(result?.content).not.toContain('receipt');
+});

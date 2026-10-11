@@ -18,7 +18,12 @@ import type {
   TurnOutcome,
   UsagePort,
 } from '@trinity-harness/contracts';
-import { turnStepBudgetSchema, windowStart } from '@trinity-harness/contracts';
+import {
+  BROWSER_LIMITS,
+  browserErrorSchema,
+  turnStepBudgetSchema,
+  windowStart,
+} from '@trinity-harness/contracts';
 import { newId } from '@trinity-harness/shared';
 
 import type { ContextManager } from '../context/context-manager.js';
@@ -31,6 +36,7 @@ import {
   turnDuration,
   turnSteps,
 } from '../telemetry.js';
+import { browserDiagnosticBytes, resolveBrowserImage } from '../tools/browser-artifacts.js';
 import { matchesCommandPrefix } from '../tools/command-prefix.js';
 import { progressGuidance } from './progress-guidance.js';
 import { toModelMessages } from './to-model-messages.js';
@@ -155,7 +161,7 @@ export class CoreAgentLoop implements AgentLoop {
     let detail: string | undefined;
     try {
       // M3: policy gating (docs/design.md §12). No policy ⇒ M2 behavior.
-      const gate = runOpts?.policy ? new PolicyToolRegistry(tools, runOpts.policy) : null;
+      const gate = new PolicyToolRegistry(tools, runOpts?.policy);
       const researchAvailable = tools.schemas().some((tool) => tool.name === 'research');
 
       const throwIfAborted = (): void => {
@@ -292,7 +298,16 @@ export class CoreAgentLoop implements AgentLoop {
           }
           // M4: per-step system augmentation (LSP diagnostics injection, §9).
           const augmented = await this.opts.augmentSystem?.(sessionId);
-          const concluding = steps === this.maxSteps;
+          const browserBudgetExhausted = history.slice(promptSeq).some((event) => {
+            if (event.type !== 'tool/result' || !event.isError) return false;
+            const parsed = browserErrorSchema.safeParse(event.value);
+            return parsed.success && parsed.data.recovery === 'conclude';
+          });
+          const diagnosticsExhausted =
+            browserDiagnosticBytes(history, promptSeq) >=
+            BROWSER_LIMITS.diagnosticTurn - BROWSER_LIMITS.callsPerStep * BROWSER_LIMITS.diagnostic;
+          const concluding =
+            steps === this.maxSteps || browserBudgetExhausted || diagnosticsExhausted;
           const conclusion = concluding
             ? 'This is the final step of the turn. Produce your final answer now using the evidence already collected. State uncertainties and incomplete work explicitly; do not claim success without evidence. Cite retrieved sources when relevant. Do not call tools.'
             : undefined;
@@ -310,7 +325,18 @@ export class CoreAgentLoop implements AgentLoop {
             messages: toModelMessages(history),
             tools: concluding ? [] : tools.schemas(),
             signal,
-            ...(this.opts.resolveBlob !== undefined ? { resolveBlob: this.opts.resolveBlob } : {}),
+            ...(this.opts.resolveBlob !== undefined
+              ? {
+                  resolveBlob: async (uri: string): Promise<Uint8Array> => {
+                    if (uri.startsWith('blob://browser/')) {
+                      if (!this.opts.spill?.store)
+                        throw new Error('Browser image store unavailable');
+                      return resolveBrowserImage(this.opts.spill.store, history, sessionId, uri);
+                    }
+                    return this.opts.resolveBlob!(uri);
+                  },
+                }
+              : {}),
           };
 
           // M5 quota gate (docs/design.md §17 "beforeModelCall 拦截点实时判定"):
@@ -470,7 +496,7 @@ export class CoreAgentLoop implements AgentLoop {
           const waves: ToolCall[][] = [];
           let pending: ToolCall[] = [];
           for (const call of toolCalls) {
-            if (tools.concurrencyOf(call.name) === 'exclusive') {
+            if (call.name === 'browser' || tools.concurrencyOf(call.name) === 'exclusive') {
               if (pending.length > 0) {
                 waves.push(pending);
                 pending = [];
@@ -484,6 +510,8 @@ export class CoreAgentLoop implements AgentLoop {
             waves.push(pending);
           }
 
+          let browserFailed = false;
+          let browserCalls = 0;
           for (const wave of waves) {
             throwIfAborted();
             await store.append(
@@ -507,6 +535,23 @@ export class CoreAgentLoop implements AgentLoop {
             const presolved = new Map<string, ToolResult>();
             const executable: ToolCall[] = [];
             for (const call of wave) {
+              if (
+                call.name === 'browser' &&
+                (browserFailed || ++browserCalls > BROWSER_LIMITS.callsPerStep)
+              ) {
+                presolved.set(call.id, {
+                  isError: true,
+                  value: {
+                    kind: 'browser-error-v1',
+                    code: 'NOT_EXECUTED',
+                    operation: 'browser',
+                    effect: 'none',
+                    message:
+                      'An earlier browser operation failed or the step call limit was reached. Inspect its result before proceeding.',
+                  },
+                });
+                continue;
+              }
               let decision = gate?.decide(call) ?? 'allowed';
               if (decision === 'ask' && call.name === 'bash') {
                 const grants = (await store.load(sessionId)).filter(
@@ -553,7 +598,7 @@ export class CoreAgentLoop implements AgentLoop {
             if (executable.length > 0) {
               const pooled = await this.runWave(
                 executable,
-                (call) => this.executeTool(call, ctx, tools),
+                (call) => this.executeTool(call, { ...ctx, permissionGranted: true }, tools),
                 throwIfAborted,
               );
               for (const [i, call] of executable.entries()) {
@@ -562,6 +607,8 @@ export class CoreAgentLoop implements AgentLoop {
             }
 
             const results = wave.map((call) => presolved.get(call.id) ?? executed.get(call.id)!);
+            if (wave.some((call, i) => call.name === 'browser' && results[i]!.isError))
+              browserFailed = true;
 
             // M4 spill (docs/design.md §7): oversized results are stored in the
             // BlobStore and only a reference + preview hits the append-only log.
@@ -697,7 +744,7 @@ export class CoreAgentLoop implements AgentLoop {
     result: ToolResult,
   ): Promise<ToolResult> {
     const spill = this.opts.spill;
-    if (!spill || call.name === 'skill') return result;
+    if (!spill || call.name === 'skill' || call.name === 'browser') return result;
     let serialized: string;
     try {
       serialized = typeof result.value === 'string' ? result.value : JSON.stringify(result.value);
@@ -852,7 +899,12 @@ export class CoreAgentLoop implements AgentLoop {
    */
   private async executeTool(
     call: ToolCall,
-    ctx: { sessionId: string; workspaceRoot: string; signal?: AbortSignal },
+    ctx: {
+      sessionId: string;
+      workspaceRoot: string;
+      signal?: AbortSignal;
+      permissionGranted?: boolean;
+    },
     tools: ToolRegistry,
   ): Promise<ToolResult> {
     const span = tracer.startSpan('trinity.tool', {

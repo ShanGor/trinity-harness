@@ -208,3 +208,34 @@ describe('buildServer M4', () => {
     expect(body.error?.code).toBe(-32602);
   });
 });
+
+it('refuses generic HTTP access to browser evidence artifacts', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'trinity-browser-api-'));
+  const blobs = new LocalBlobStore(root);
+  await blobs.put('browser/s/observation.json', new TextEncoder().encode('private evidence'), {
+    mimeType: 'application/json',
+  });
+  const app = await buildServer({
+    store: new MemorySessionStore(),
+    workspaceRoot: root,
+    blobs,
+    createLoop: () =>
+      new CoreAgentLoop({
+        store: new MemorySessionStore(),
+        tools: new CoreToolRegistry(new FakeSandbox()),
+        llm: new FakeLLM(() => textChunks('done')),
+        model: 'fake/model',
+        workspaceRoot: root,
+      }),
+  });
+  try {
+    for (const path of ['browser/s/observation.json', '%62rowser/s/observation.json']) {
+      const result = await app.inject({ method: 'GET', url: `/api/blobs/${path}` });
+      expect(result.statusCode).toBe(403);
+      expect(result.body).not.toContain('private evidence');
+    }
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

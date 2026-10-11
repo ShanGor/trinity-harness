@@ -99,3 +99,7 @@ node scripts/load-test.mjs 50
 - [ ] Rollback plan: previous image tag + `helm rollback <release> <rev>`;
       DB migrations 0000–0004 are backward-compatible for the M5 server/worker
       pair (new columns/tables are additive-only).
+
+## Browser deployment
+
+Existing owner-controlled CDP is the supported live-reading mode; see [deployment-guide.md](./deployment-guide.md) for endpoint/owner configuration and the opt-in local fixture check. Managed Chrome provisioning and enforced browser-network/privacy isolation remain deployment TODOs; they are not automatic fallbacks or current guarantees.

@@ -12,6 +12,14 @@ const base = {
   detail: z.string().max(1000).optional(),
   callId: z.string().min(1).max(200),
   evidenceSeq: z.number().int().positive(),
+  observationId: z.string().max(200).optional(),
+  blockId: z.string().max(200).optional(),
+  start: z.number().int().nonnegative().optional(),
+  end: z.number().int().positive().optional(),
+  artifactUri: z.string().max(500).optional(),
+  capturedAt: z.iso.datetime().optional(),
+  /** Committed screenshot provenance; it does not authorize a verbatim text quote. */
+  imageUri: z.string().max(500).optional(),
 };
 
 /** Grounding categories follow Trinity's Sources / View evidence presentation. */

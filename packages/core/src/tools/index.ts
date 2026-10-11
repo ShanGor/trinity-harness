@@ -4,3 +4,6 @@ export * from './read-blob.js';
 export * from './lsp-tools.js';
 export * from './subagent.js';
 export * from './research.js';
+export * from './browser.js';
+export * from './browser-cdp.js';
+export { resolveBrowserImage, browserHash } from './browser-artifacts.js';

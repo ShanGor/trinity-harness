@@ -237,3 +237,25 @@ describe('AcpClient', () => {
     }
   });
 });
+
+it('fetches screenshots through the authenticated session evidence route', async () => {
+  const original = globalThis.fetch;
+  const { impl, calls } = fakeFetch({
+    'GET http://x/api/sessions/session/browser-images/observation': (init) => {
+      expect(new Headers(init?.headers).get('authorization')).toBe('Bearer secret');
+      return new Response(new Uint8Array([137, 80, 78, 71]), {
+        headers: { 'content-type': 'image/png' },
+      });
+    },
+  });
+  globalThis.fetch = impl;
+  try {
+    const client = new AcpClient({ baseUrl: 'http://x', token: 'secret' });
+    expect((await client.fetchBlob('blob://browser/session/observation.png')).type).toBe(
+      'image/png',
+    );
+    expect(calls).toEqual(['GET http://x/api/sessions/session/browser-images/observation']);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

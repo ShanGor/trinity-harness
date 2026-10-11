@@ -10,6 +10,10 @@ import {
   createLspTools,
   createReadBlobTool,
   createResearchTool,
+  createBrowserTool,
+  TrustedCdpBrowserAccess,
+  isCdpSessionOwner,
+  ScryptPasswordHasher,
   createSkillTool,
   FileSkillCatalog,
   SkillRuntime,
@@ -29,6 +33,7 @@ import {
   createPool,
   PgApprovalStore,
   PgSessionMetaStore,
+  PgUserStore,
   PgSessionStore,
   PgUsageStore,
 } from '@trinity-harness/db';
@@ -83,6 +88,7 @@ async function main(): Promise<void> {
     browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
   });
   const metas = new PgSessionMetaStore(db);
+  const browserUsers = new PgUserStore(db, new ScryptPasswordHasher());
   // M5: token metering — the loop records usage and gates model calls on the
   // tenant quota before every request (docs/design.md §17).
   const usage = new PgUsageStore(db);
@@ -125,6 +131,28 @@ async function main(): Promise<void> {
     const registry = new CoreToolRegistry(sandbox);
     registry.register(createSkillTool(skills));
     registry.register(createResearchTool(store, blobStore));
+    registry.register(
+      createBrowserTool({
+        store,
+        blobs: blobStore,
+        now: () => new Date(),
+        access: env.BROWSER_CDP_ENDPOINT
+          ? new TrustedCdpBrowserAccess({
+              endpoint: env.BROWSER_CDP_ENDPOINT,
+              sandbox,
+              store,
+              authorizeSession: (sessionId, signal) =>
+                isCdpSessionOwner(
+                  sessionId,
+                  metas,
+                  browserUsers,
+                  { id: env.BROWSER_CDP_OWNER_ID, email: env.ADMIN_EMAIL },
+                  signal,
+                ),
+            })
+          : undefined,
+      }),
+    );
     for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
       registry.register(tool);
     }
@@ -151,6 +179,9 @@ async function main(): Promise<void> {
           childRegistry.register(createReadBlobTool(blobStore));
           childRegistry.register(createSkillTool(childSkills));
           childRegistry.register(createResearchTool(childStore, blobStore));
+          childRegistry.register(
+            createBrowserTool({ store: childStore, blobs: blobStore, now: () => new Date() }),
+          );
           if (lsp) {
             for (const tool of createLspTools(lsp)) childRegistry.register(tool);
           }

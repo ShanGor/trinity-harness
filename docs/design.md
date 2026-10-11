@@ -152,24 +152,24 @@ trinity-harness/
 
 ### 5.1 模块总览
 
-| 模块                    | 职责                                                                     | 关键依赖（仅 contracts）                                  |
-| ----------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------- |
-| `LLM Gateway`           | 统一模型访问：流式、工具调用、多模态、重试、计量                         | `ModelProvider`                                           |
-| `Agent Loop`            | turn/step 驱动、工具调度、并发控制、取消                                 | `ToolRegistry`、`SessionStore`、`LLMPort`、`ApprovalPort` |
-| `Tool Runtime`          | 工具注册、参数校验、执行管线（pre/execute/post）                         | `SandboxPort`                                             |
-| `Session Core`          | 事件溯源日志、消息投影、压缩（compaction）、fork                         | `EventBus`                                                |
-| `Context Manager`       | 上下文压力检测、压缩、溢出文件化（spill）                                | `LLMPort`、`SessionStore`                                 |
-| `Skill Runtime`         | SKILL.md 发现、渐进加载、显式调用、资源读取与指令快照回放（core/skills） | `SkillCatalogPort`、`SkillRuntimePort`、`SessionStore`    |
-| `LSP Service`           | 语言服务接入：诊断、符号、跳转、格式化                                   | （对 Loop 暴露为工具）                                    |
-| `Permission & Approval` | 工具审批、策略判定、审批持久化                                           | `EventBus`                                                |
-| `Audit`                 | 全链路审计事件采集与查询                                                 | `EventBus`                                                |
-| `Multimodal`            | 图片/文档解析、附件存储、内容分块                                        | `BlobStore`                                               |
-| `Sandbox`               | 命令执行与文件系统隔离（先容器内，预留 gVisor/Firecracker）              | —                                                         |
-| `Observability`         | OTel 埋点（api 全局）+ SDK 引导（OTLP/Prometheus 导出）                  | `@opentelemetry/api`                                      |
-| `Identity & Tenant`     | 用户、租户、RBAC、配额                                                   | PostgreSQL                                                |
-| `Event Bus`             | Redis Stream 封装：发布、消费组、重放                                    | Redis                                                     |
-| `API Server`            | REST/SSE 网关、`/acp` HTTP binding、会话控制、配置                       | 以上全部（通过 DI）                                       |
-| `ACP Adapter`           | ACP 协议 ↔ 内部服务的翻译层                                              | `API Server`（内部 SDK）                                  |
+| 模块                    | 职责                                                                                    | 关键依赖（仅 contracts）                                        |
+| ----------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `LLM Gateway`           | 统一模型访问：流式、工具调用、多模态、重试、计量                                        | `ModelProvider`                                                 |
+| `Agent Loop`            | turn/step 驱动、工具调度、并发控制、取消                                                | `ToolRegistry`、`SessionStore`、`LLMPort`、`ApprovalPort`       |
+| `Tool Runtime`          | 工具注册、参数校验、执行管线（pre/execute/post）；有界 browser reading；上线边界见 §8.2 | `SandboxPort`、`BrowserAccessPort`、`BlobStore`、`SessionStore` |
+| `Session Core`          | 事件溯源日志、消息投影、压缩（compaction）、fork                                        | `EventBus`                                                      |
+| `Context Manager`       | 上下文压力检测、压缩、溢出文件化（spill）                                               | `LLMPort`、`SessionStore`                                       |
+| `Skill Runtime`         | SKILL.md 发现、渐进加载、显式调用、资源读取与指令快照回放（core/skills）                | `SkillCatalogPort`、`SkillRuntimePort`、`SessionStore`          |
+| `LSP Service`           | 语言服务接入：诊断、符号、跳转、格式化                                                  | （对 Loop 暴露为工具）                                          |
+| `Permission & Approval` | 工具审批、策略判定、审批持久化                                                          | `EventBus`                                                      |
+| `Audit`                 | 全链路审计事件采集与查询                                                                | `EventBus`                                                      |
+| `Multimodal`            | 图片/文档解析、附件存储、内容分块                                                       | `BlobStore`                                                     |
+| `Sandbox`               | 命令执行与文件系统隔离（先容器内，预留 gVisor/Firecracker）                             | —                                                               |
+| `Observability`         | OTel 埋点（api 全局）+ SDK 引导（OTLP/Prometheus 导出）                                 | `@opentelemetry/api`                                            |
+| `Identity & Tenant`     | 用户、租户、RBAC、配额                                                                  | PostgreSQL                                                      |
+| `Event Bus`             | Redis Stream 封装：发布、消费组、重放                                                   | Redis                                                           |
+| `API Server`            | REST/SSE 网关、`/acp` HTTP binding、会话控制、配置                                      | 以上全部（通过 DI）                                             |
+| `ACP Adapter`           | ACP 协议 ↔ 内部服务的翻译层                                                             | `API Server`（内部 SDK）                                        |
 
 ### 5.2 接口定义示例（`packages/contracts`）
 
@@ -273,8 +273,8 @@ turn/end (completed | max-tokens | blocked | aborted | error)
 ```
 
 - 默认 turn budget 为 **64 model steps**（server/worker 的 `MAX_TURN_STEPS` 可配置 1..1024）（显式子 agent budget 仍独立，默认 worker child 为 16）；最后一步禁用工具用于最终回答。工具运行次数和 model step 分别计量，不把审批等待当成 model step。
-- **研究执行**：仍使用 Skill Runtime + Bash/Sandbox 调用 agent-browser，不新增浏览器/MCP 执行通道。bundled skill 的 DOM extractor 一次提取有界正文、URL、标题、明确 publication metadata 和正文链接；无 metadata 时日期为 null，不从侧栏猜测。`research` tool 位于既有 Tool Runtime，composition root 注入 SessionStore/BlobStore，contracts 定义 Zod DTO。它记录问题范围、claims、支持/反证/背景引用、未决问题与是否足够作答；引用必须来自当前 prompt 后成功的 agent-browser tool/result，URL 和 quote 同时匹配结构化提取结果。校验保证观察来源，不保证网站真实或 claim 语义正确；页面始终是未信任数据。notes 通过普通 tool/call/result append-only 留痕，重启可 replay；spill 后按当前 session/call 的受限 blob URI 恢复（最多 500 KB），不跨 session 读取；不建立内存账本或新表，不额外联网。完成 turn 后 notes 随内部工具历史退出后续 context，最终回答须自带关键结论/引用。
-- **进度反馈**：Loop 内纯函数从当前 prompt 的 tool events 检测三次连续浏览器失败/空 read，以及当前页面上三次重复 read（忽略变动的 accessibility refs）。重复输出只能说明观察没有变化，不等价于任务停滞；只提示换读取方式/来源或总结，不自动停止或重复副作用。在多个来源已提取但未记录 notes 时要求 evidence checkpoint，notes 后每新增两个来源要求更新结论/未决问题，notes 标记 ready 时提示回答；到 budget 最后四分之一提示收敛；guidance 变化追加 `turn/guidance`，模型只见当前 prompt 的最新 guidance，进展恢复时清除旧提示。compaction 不压缩活动 turn；历史 UI 不把 guidance 当作普通回复。
+- **研究执行**：默认 live 使用 Skill Runtime + Bash/Sandbox；typed browser 只读 adapter 和 saved evidence 路径见 §8.2，live capability 按部署边界 fail-closed。bundled skill 的 DOM extractor 一次提取有界正文、URL、标题、明确 publication metadata 和正文链接；无 metadata 时日期为 null，不从侧栏猜测。`research` tool 位于既有 Tool Runtime，composition root 注入 SessionStore/BlobStore，contracts 定义 Zod DTO。它记录问题范围、claims、支持/反证/背景引用、未决问题与是否足够作答；引用必须来自当前 prompt 后成功的 agent-browser tool/result，URL 和 quote 同时匹配结构化提取结果。校验保证观察来源，不保证网站真实或 claim 语义正确；页面始终是未信任数据。引文不匹配时返回具体 finding/source 位置及最多 600 字符的原文片段；仅为定位诊断按稳定文字片段寻找附近正文，接受条件仍为 URL 与逐字引文匹配（只忽略空白差异），不自动修正或认可 claim。notes 通过普通 tool/call/result append-only 留痕，重启可 replay；spill 后按当前 session/call 的受限 blob URI 恢复（最多 500 KB），不跨 session 读取；不建立内存账本或新表，不额外联网。完成 turn 后 notes 随内部工具历史退出后续 context，最终回答须自带关键结论/引用。
+- **进度反馈**：Loop 内纯函数从当前 prompt 的 tool events 检测三次连续浏览器失败/空 read，以及当前页面上三次重复 read（忽略变动的 accessibility refs）。重复输出只能说明观察没有变化，不等价于任务停滞；只提示换读取方式/来源或总结，不自动停止或重复副作用。在多个来源已提取但未记录 notes 时要求 evidence checkpoint，notes 后每新增两个来源要求更新结论/未决问题，notes 标记 ready 时提示回答；两次 research 引文校验失败后提示直接复制短的连续原文或移除不支持的 finding，成功记录 notes 后清除；该提示不强制停止，最终回答不应包含内部记账/重试说明。到 budget 最后四分之一提示收敛；guidance 变化追加 `turn/guidance`，模型只见当前 prompt 的最新 guidance，进展恢复时清除旧提示。compaction 不压缩活动 turn；历史 UI 不把 guidance 当作普通回复。
 - Turn 的最后一个允许 step 预留为无工具的最终回答：基于已有证据总结，并明确未完成工作/证据缺口；防止耗尽全部 step 后只有进度消息。模型仍请求工具时不执行超预算副作用。
 
 ### 6.2 Loop 伪代码
@@ -303,6 +303,8 @@ while (msg = inbox.claim()):            // inbox = 用户消息 + 工具延期�
 | **拦截点（Loop 外置）** | `beforeStep` / `beforeModelCall` / `beforeToolExecute` / `afterToolExecute` 四个拦截点，权限、审计、脱敏、限流均实现为拦截器注册，Loop 本体零侵入。 |
 | **LLM 适配**            | 由 `LLM Gateway` 内部用 Vercel AI SDK 的 provider 机制实现 `LLMPort`；重试、fallback 模型、token 计量在此层完成。                                   |
 
+typed `browser` 无论 registry 的 concurrency 设置都形成独占 wave；同 step 首次执行错误或策略拒绝后，后续 browser calls 只记录 `NOT_EXECUTED`，不执行也不再发审批。无关工具保持原调度规则，下一 step 重置失败状态。每 step 最多执行 16 次 browser 调用。取消仍通过既有 terminal/torn-tail 配对。browser 结果跳过 generic spill，保留最终实际交付 receipt；硬曝光上限触发下一 step 的无工具结论路径。
+
 ---
 
 ## 7. 会话持久化：事件溯源
@@ -330,6 +332,7 @@ while (msg = inbox.claim()):            // inbox = 用户消息 + 工具延期�
 | `read_file` / `write_file` / `edit_file` | edit 采用 str-replace 语义（强制模型先读再改，减少误改）                                            |
 | `glob` / `grep`                          | 代码检索（rg 后端）                                                                                 |
 | `web_search` / `web_fetch`               | 联网能力（可配置关闭）                                                                              |
+| `browser`                                | saved read/search；live capture 仅在注入满足 §12 的 BrowserAccessPort 时启用，见 §8.2               |
 | `research`                               | 有界的研究问题、claims/引用与未决问题；工具结果留痕，来源校验使用当前 turn 的成功 browser read 结果 |
 | `todo`                                   | 任务规划                                                                                            |
 | `lsp_*`                                  | `lsp_diagnostics` / `lsp_symbols` / `lsp_hover` / `lsp_rename`                                      |
@@ -346,7 +349,36 @@ Skill 是 Markdown 指令包，执行能力仍来自已有工具。借鉴 dsh �
 - **格式与发现**：标准 `SKILL.md` YAML frontmatter（name、description），可选 `disable-model-invocation`、`user-invocable`。无效文件只产生不含正文的诊断，并从可调用 catalog 中移除。服务无会话内存状态，每 step 从来源重新发现；file hash 标识版本。已加载且仍可由模型调用的活跃 skill 在来源版本变化时追加新的 `skill/loaded` 快照；旧 tool/result 在模型投影中标记为已被取代，历史日志不修改，避免更新后会话继续执行旧指令。
 - **渐进加载**：模型先看到 name/description 的 catalog，根据任务选择调用 `skill(name)` 加载完整正文；此接口只加载指令，不执行 skill 中的命令。`skill(name, resource)` 按需读取同目录文本资源，执行脚本仍经 Bash/Sandbox 和现有审批。用户可用 `$skill-name` 显式加载，未知、禁用或策略拒绝时明确失败；明确调用的正文在首个模型请求前入日志；同一 prompt 的显式指令超过 128 KiB 时原子拒绝。`skill: ask` 的摘要仍可发现，模型加载经普通审批；显式加载未取得审批时拒绝。
 - **持久化**：catalog 变化追加 `skill/catalog`（摘要与渲染后的指令），显式加载追加 `skill/loaded`（完整版本快照）；模型加载的正文/资源在普通 `tool/result` 中记录。所有 model-visible skill 内容均可从 PG log 重放，不依赖重启后文件内容。最新 catalog 在 compaction 后重新投影；已加载 skill 按最近使用顺序，在 128 KiB 指令预留预算内保留最新版本快照，避免摘要遗失操作规范或无限累积旧指令；更旧快照仍在日志中，可按需再次加载。当前 session 标识在 catalog 中持久化，fork 后刷新，避免浏览器隔离复用父会话标识。历史 skill 内容不进入 UI 普通聊天消息。未完成的 skill call 在回放投影中合成可重试中断错误，不自动执行或假装已加载。
-- **发布**：发行版安装 `skills/agent-browser/SKILL.md`，支持使用现有 Bash 工具调用 CLI 进行浏览和研究。server/worker Docker 镜像包含 skill 目录。管理员可显式配置 `BROWSER_CDP_ENDPOINT`（无凭据的端口或 HTTP/WebSocket URL）；该连接目标随 catalog 入日志，server/worker/subagent 一致注入。skill 要求每条命令带命名 session、`--cdp`、`--pin-tab`，连接失败不退回独立 headless 浏览器，也不关闭用户 Chrome。未配置时不自动发现宿主浏览器；共享 CDP 仅隔离 tab，cookies/auth 仍共享，因此仅用于显式信任的专用部署，不作为租户隔离机制。Sandbox minimal env 保留 `XDG_RUNTIME_DIR`，保证 CLI daemon socket 目录一致。CLI/浏览器二进制和网络许可是独立部署前提；本地已安装的 CLI 可经 worker 的 PATH 调用，skill 加载不赋予额外执行权限。
+- **发布**：发行版安装 `skills/agent-browser/SKILL.md`，默认指引模型使用当前 schema 公布的 typed `browser` operations。catalog 只描述部署已配置连接及 adapter 管理连接/tab，不向普通任务提供 CLI 命令模板；skill 中的阅读、交互与研究示例全部使用 typed operations。CLI troubleshooting 保留为按显式 operator 请求加载的 `references/cli-diagnostics.md`，现有 Bash 权限不变。server/worker Docker 镜像包含 skill 目录。管理员显式配置 `BROWSER_CDP_ENDPOINT`；adapter 负责命名 session、`--cdp`、`--pin-tab`，连接失败不启动替代浏览器、不关闭用户 Chrome。子 agent 或受限 registry 只使用自身 schema 公布的 saved/live 能力，不从部署已配置连接推断 live 权限。未配置时仅 saved reads，不自动发现或启动 managed Chrome（部署指南 TODO）。共享 CDP 仅隔离 tab，cookies/auth 仍共享，不作为租户隔离机制。Sandbox minimal env 保留 `XDG_RUNTIME_DIR`；底层 CLI 与浏览器安装及网络许可仍为独立部署前提，skill 不赋予执行权限。
+
+---
+
+### 8.2 Browser / Research：typed 交互与上线门槛
+
+详细方案与分阶段验收见 [browser-research-improvement-plan.md](./browser-research-improvement-plan.md)。`core/tools/browser*` 已实现 typed browser：contracts 的 operation DTO、Sandbox argv/流式字节上限、CLI capture adapter、canonical hash artifact、按 block/section/cursor 读取、literal search、实际曝光 receipt、软/硬 turn budget、同 step 失败跳过及 research block 引用。server/worker 在显式配置 `BROWSER_CDP_ENDPOINT` 时装配 `TrustedCdpBrowserAccess`，公布 navigate/read_page/get_page_text、scoped snapshots、click/fill/key/scroll 和截图；未配置则仅 saved read/search。本机使用已有 CDP Chrome 9222，不启动 managed Chrome（部署指南 TODO）。现有 Skill + Bash 仍为 legacy live 路径，不具备整个部署的强制 browser 预算/隔离保证。
+
+只读 artifact 使用 `blob://browser/<encoded-session>/<observation-id>.json`，schema/extractor version 均校验；hash 为排序 object keys、保留 array 顺序的 JSON，去掉 hash 字段后做 SHA-256。block text 的 range 是 Unicode code-point 零基半开区间。授权由同 session 成功 tool/call/result 决定，fork 复制的父会话 receipts 不授予读取权；不跨会话继承 browser binding。每次 saved retrieval 重验大小/schema/hash。capture time 不变，saved 标记区分历史观察与 live visit。`read_blob` 和通用 HTTP blob endpoint 拒绝 browser 命名空间；默认保留所有 browser artifact，未引用 orphan 不授予证据权，也不自动删除（部署 GC 尚待实现）。
+
+`BrowserAccessPort.authorize` 区分 `trusted-cdp` 与未来 `enforced` 部署。当前按用户要求使用 trusted CDP：逐次校验已认证个人会话属于配置 owner（`BROWSER_CDP_OWNER_ID`，缺省为 `ADMIN_EMAIL` 对应账号），拒绝团队/其他用户/其他 tenant/关闭会话；M1 无鉴权模式仅用于同一机器的可信本地使用。effect 前后校验连接与最终 URL；CLI 固定支持 0.38.x，端口/HTTP discovery 与实际 WebSocket URL 按 host/port/security/path 正确比对。命名 session/--cdp/--pin-tab 每次都传；从 committed receipt 恢复实际 CDP targetId 后按 ID 绑定，不向模型返回其他 tab inventory、不重开用户 Chrome。绑定来源是本会话事件，fork 不继承控制权。trusted CDP 保留共享 cookies/账户及现有 Bash 的限制，不声称 egress、隐私或整个部署隔离。未来 enforced 模式的网络、下载、隐私、takeover 与替代控制路径关闭要求仍须部署侧实现；managed Chrome 留在 [deployment-guide.md](./deployment-guide.md) TODO。
+
+当前实现包括只读 DOM role/name/path 投影与原生 accessibility 文本、scoped r refs、checked click/fill/key/scroll、viewport/cropped PNG、可选可见文本 readiness、Readability 对照 fixture 与显式 opt-in live/model 对照 runner。target path 仅保存在 hash artifact 内，不让模型提供 selector。native button/link 用固定、经校验的 DOM click 激活，避免当前 CDP CLI pointer acknowledgment 未触发 visible outcome 的问题；其他 ref/坐标仍走 checked pointer 路径，未知效果不得自动重试。DOM click 不提供 trusted user gesture；需要该手势的网站必须显式请求 pointer/key 并重新观察。截图等待 compositor frame 超时仍保存实际 pixels，但标记 partial、提示可能落后 DOM，并拒绝从该 image 发起坐标操作。执行前重新提取 fingerprint（角色/名称/path/geometry、viewport/scroll/locale/timezone）并校验最近 committed live snapshot、实际 binding/tab/document；失败或未知 outcome 使旧 target 失效。此校验不会将 live DOM/CDP 竞争变成原子事务：共享 Chrome 的用户/并行输入仍可能改变效果，readiness 和 post-action observation 说明实际覆盖，不声称 deterministic browsing。
+
+browser 动作默认逐操作 ask；`browser.click` / `.fill` / `.key` / `.scroll` 是显式策略项，`browser: allowed` 和 Bash executable grant 不授予这些动作权限，tool deny 优先。Loop 在持久化审批结果或显式策略允许后才注入 `permissionGranted`。无策略的本地动作同样 fail-closed 走审批。截图使用 `pngjs` 做有界 PNG 解码/crop，2 MiB/张、2048×2048、4 张/turn、6 MiB/turn；只从 bounded Sandbox binary transfer 读入，临时文件 finally 删除。image hash/size/crop/scale 与 observation、successful receipt 一起提交；gateway 按现有 image content path 编码，不把 base64 放进 tool JSON。model resolver 重验当前 turn receipt/session/hash；UI 专用 `/api/sessions/:sessionId/browser-images/:observationId` 经会话鉴权后可展示 retained evidence，generic blob API 继续拒绝 browser namespace。截图不会建立 canonical text blocks/quotes。敏感 URL 与已识别的敏感/可编辑控制无法安全捕获时拒绝；这不是任意私密页面的完整自动脱敏保证。
+
+Readability 仅为开发期选择器对照依赖，当前保留 semantic extractor 的精确 code/table/标点结构，不把 Readability 重写的 textContent 变成 canonical evidence。自动化 GC 未开启：所有 event/citation 引用及未提交 orphan 默认保留；部署必须依据完整保留日志引用集合，在超过最长执行/恢复窗口后清理确认无引用的 browser blobs，不能从 Redis 截断或 fork 副本推断所有权。下列边界仍是 trusted CDP 之外的部署目标：
+
+参考 Anthropic 的 [browser use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/browser-use-tool) 与 [SDK 指南](https://platform.claude.com/docs/en/agents-and-tools/tool-use/browser-use-sdk)，采用按任务选择表示、有序执行与应用端校验的模式；具体的持久化、预算、授权和引用规则由 Trinity 定义。保持 Vercel AI SDK 的 provider-neutral custom tool，不引入供应商专属执行通道。
+
+- **能力归属**：typed `browser` 是既有 Tool Runtime 的内置工具，adapter 位于 `core/tools`，DTO/Zod schema 置于 contracts；依赖 SandboxPort、BlobStore、SessionStore，由 apps composition root 装配。不新增独立 browser service 或 plugin framework。先补足 Sandbox 的 argv/输出流上限能力，避免 `exec` 全量累积后再裁剪。
+- **最小接口**：`operation` 判别联合；先实现 navigate、只读 scoped accessibility `read_page`、visible `get_page_text`，再加入 saved read/search、受限 screenshot 与 click/fill/scroll/key。每次只请求一个 operation；同 step 浏览器调用按序运行，首次错误/拒绝后剩余 browser calls 返回 `NOT_EXECUTED`。禁用任意 model-authored JS、原始 CDP、文件上传和全量诊断输出。
+- **表示与反馈**：交互优先 accessibility refs，阅读保留 visible semantic blocks，视觉问题使用截图；内部固定 extractor 在 live tree 上判断可见性后再 clone，不把 hidden body source 当作普通证据。操作返回简短确认及有界 post-action observation，确认驱动执行成功不等于任务目标成功。明确 readiness 与 partial capture，不用 network idle 保证完整性。
+- **身份与生命周期**：初版仅使用会话拥有的 pinned tab。交互 target 必须绑定已交付 snapshot/reference 或 screenshot/viewport，导航、重连、相关 DOM/viewport 变化后拒绝失效目标；不得把旧 ref 重映射到新元素。用户接管时暂停 agent；超时、断连或动作后存储失败返回明确 effect status，未知结果先重新观察，不能重试副作用来恢复日志。
+- **持久化与确定性**：observation 先以不可变 artifact 保存，成功 `tool/result` 记录其引用和实际交付的 block/range/image receipt；无成功 event 的 blob 不是证据。确定性保证覆盖已保存观察的校验、读取、范围解析与 replay，不保证实时网页或模型决策可重复。canonical block text 使用 Unicode code-point 的零基半开区间，UTF-8 byte budget 单独计算。内容 hash 验证 artifact 完整性，不证明网站真实。
+- **上下文预算**：分别限制 capture、response、diagnostics 与 images；软阈值后仅允许 focused reads，硬阈值同样约束 focused reads，并预留 limit diagnostic allowance。receipt 从 PG log 重放，累计唯一/重复交付；所有 artifact retrieval routes 一致鉴权、限额，generic spill 不得改变实际曝光却保留错误 receipt。
+- **研究与展示**：新 notes 用 observation/block/range，由服务端按当前 turn 成功交付 receipt 解析原文、URL、callId/evidenceSeq；旧 quote/URL validator 继续支持 legacy events。旧 observation 当前 turn 可授权 reread，保留原 capture time，不冒充 fresh visit。Sources / View evidence 沿用既有 contracts DTO；来源仍不证明 claim 的语义正确。
+- **迁移边界**：search/fetch 若以后可用，适合普通文档且必须遵循相同 evidence contract；当前 core registry 未实现 §8 列出的 web_search/web_fetch，不作为首版前提。不要求 browser subagent。继续保留当前 Bash 描述；只有关闭模型可绕过 wrapper 的 Bash/CDP/全量 artifact 路径后，才可宣布强制预算和动作边界生效。
+
+安全前置条件见 §12：权限属于每个 operation 的实际目标，网络限制属于 browser 所在环境；既有 CLI prefix grant 不自动授权 typed browser 行为。量化收益通过固定任务的分阶段重复对照测量，不预先声明百分比。
 
 ---
 
@@ -490,6 +522,8 @@ PG 是唯一事实源：即使 Redis Stream 被截断、SSE 连接中断，任�
 3. **Sandbox**：v1 在容器内运行（K8s Pod 内嵌套隔离 + 文件系统只读挂载 + 网络策略）；预留接口切换 gVisor / Firecracker microVM；越权操作必须经审批后升级。
 4. **RBAC**：租户 → 角色（admin/developer/viewer）→ 会话与工具策略；密钥（模型 API Key 等）由服务端统一托管（K8s Secret + 信封加密），**永不下发前端**。
 5. **输入输出安全**：prompt 注入提示、工具结果大小上限、出站网络 egress 白名单。
+
+**Browser 改进的上线安全边界（trusted CDP / 未来 enforced 部署，§8.2）**：导航只接受解析后的无凭据 HTTP(S) URL，逐操作校验实际目标与持久化授权，明确区分站点读取、填写与提交/购买/发送等行为。browser 所在网络边界须默认拒绝未授权出站，覆盖重定向、子资源、脚本请求、WebSockets、service workers、DNS 解析后的目标 IP，并限制 private/link-local/loopback 与控制端点；worker 的 NetworkPolicy 不能代表远端 CDP Chrome 的出站限制。这些是未来 enforced 部署的门槛；当前明确配置的 trusted CDP 使用现有权限与 owner 校验，不宣称具备上述网络边界。managed research profile 不实现、不启动，留作部署指南 TODO；显式用户 CDP 仅限同一认证 owner/trust domain，pinned tab 不隔离 cookies/accounts。下载默认阻止或隔离，上传禁用；敏感 URL、表单值与截图区域在持久化前处理。模型可直连 browser control 或经 Bash 绕过 adapter 时，不得宣称已有隔离/预算保证。
 
 ---
 

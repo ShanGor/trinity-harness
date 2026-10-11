@@ -149,3 +149,199 @@ describe('CoreAgentLoop tool concurrency (M2)', () => {
     expect(g.state.maxInFlight).toBeGreaterThan(1);
   });
 });
+
+it.each(['execution', 'denied', 'rejected'])(
+  'skips later browser calls after %s failure, keeps pairs and unrelated tools',
+  async (mode) => {
+    const store = new MemorySessionStore();
+    const registry = new CoreToolRegistry(new FakeSandbox());
+    const effects: string[] = [];
+    let approvals = 0;
+    registry.register({
+      name: 'browser',
+      description: 'browser',
+      parameters: z.object({}),
+      concurrency: 'exclusive',
+      execute: async (_args, ctx) => {
+        effects.push(ctx.callId!);
+        return { isError: true, value: { code: 'failed' } };
+      },
+    });
+    registry.register({
+      name: 'other',
+      description: 'other',
+      parameters: z.object({}),
+      execute: async () => {
+        effects.push('other');
+        return { isError: false, value: 'ok' };
+      },
+    });
+    const loop = new CoreAgentLoop({
+      store,
+      tools: registry,
+      workspaceRoot: '/ws',
+      model: 'fake/model',
+      approvals: {
+        request: async (req) => {
+          approvals++;
+          return { approvalId: req.approvalId, outcome: 'rejected', decidedBy: 'u' };
+        },
+      },
+      llm: new FakeLLM(
+        () => [
+          toolCallChunk('b1', 'browser', {}),
+          toolCallChunk('other', 'other', {}),
+          toolCallChunk('b2', 'browser', {}),
+          finish,
+        ],
+        () => [{ kind: 'text-delta', text: 'done' }, finish],
+      ),
+    });
+    await loop.run(
+      's',
+      'go',
+      { emit: () => {} },
+      mode === 'execution'
+        ? undefined
+        : {
+            policy: {
+              onAsk: 'ask',
+              allowWorkspaceInternalBash: false,
+              tools: { browser: mode === 'denied' ? 'denied' : 'ask' },
+            },
+          },
+    );
+    expect(effects).toEqual(mode === 'execution' ? ['b1', 'other'] : ['other']);
+    expect(approvals).toBe(mode === 'rejected' ? 1 : 0);
+    const results = (await store.load('s')).filter((e) => e.type === 'tool/result');
+    expect(results.map((e) => e.callId)).toEqual(['b1', 'other', 'b2']);
+    expect(results[2]).toMatchObject({
+      isError: true,
+      value: { code: 'NOT_EXECUTED', effect: 'none' },
+    });
+  },
+);
+
+it('resets browser failure ordering between model steps and avoids browser spill', async () => {
+  const store = new MemorySessionStore();
+  const registry = new CoreToolRegistry(new FakeSandbox());
+  let count = 0;
+  registry.register({
+    name: 'browser',
+    description: 'browser',
+    parameters: z.object({}),
+    concurrency: 'exclusive',
+    execute: async () => ({ isError: ++count === 1, value: { count } }),
+  });
+  const loop = new CoreAgentLoop({
+    store,
+    tools: registry,
+    workspaceRoot: '/ws',
+    model: 'fake/model',
+    spill: {
+      store: {
+        put: async () => {
+          throw new Error('browser must not spill');
+        },
+        get: async () => null,
+        getMeta: async () => null,
+        delete: async () => {},
+      },
+      thresholdBytes: 1,
+    },
+    llm: new FakeLLM(
+      () => [toolCallChunk('b1', 'browser', {}), finish],
+      () => [toolCallChunk('b2', 'browser', {}), finish],
+      () => [{ kind: 'text-delta', text: 'done' }, finish],
+    ),
+  });
+  await loop.run('s', 'go', { emit: () => {} });
+  expect(count).toBe(2);
+  expect(
+    (await store.load('s')).filter((e) => e.type === 'tool/result').map((e) => e.value),
+  ).toEqual([{ count: 1 }, { count: 2 }]);
+});
+
+it('uses the conclusion path after the browser hard delivery ceiling', async () => {
+  const store = new MemorySessionStore();
+  const registry = new CoreToolRegistry(new FakeSandbox());
+  registry.register({
+    name: 'browser',
+    description: 'browser',
+    parameters: z.object({}),
+    execute: async () => ({
+      isError: true,
+      value: {
+        kind: 'browser-error-v1',
+        code: 'LIMIT_REACHED',
+        operation: 'read_observation',
+        effect: 'none',
+        message: 'limit',
+        recovery: 'conclude',
+      },
+    }),
+  });
+  const llm = new FakeLLM(
+    () => [toolCallChunk('b', 'browser', {}), finish],
+    () => [{ kind: 'text-delta', text: 'Collected evidence is limited.' }, finish],
+  );
+  const loop = new CoreAgentLoop({
+    store,
+    tools: registry,
+    workspaceRoot: '/ws',
+    model: 'fake/model',
+    llm,
+  });
+  expect((await loop.run('s', 'go', { emit: () => {} })).reason).toBe('completed');
+  expect(llm.requests[1]!.tools).toEqual([]);
+});
+
+it.each(['missing', 'allowed', 'rejected'] as const)(
+  'gates typed browser actions with a %s approval channel before exposing execution authority',
+  async (mode) => {
+    const store = new MemorySessionStore();
+    const tools = new CoreToolRegistry(new FakeSandbox());
+    let executed = false;
+    tools.register({
+      name: 'browser',
+      description: 'browser',
+      parameters: z.object({ operation: z.literal('click') }),
+      execute: async (_args, ctx) => {
+        expect(ctx.permissionGranted).toBe(true);
+        expect(
+          (await store.load('s')).some(
+            (e) => e.type === 'approval/resolved' && e.outcome === 'allowed',
+          ),
+        ).toBe(true);
+        executed = true;
+        return { value: 'applied', isError: false };
+      },
+    });
+    const loop = new CoreAgentLoop({
+      store,
+      tools,
+      workspaceRoot: '/ws',
+      model: 'fake/model',
+      ...(mode === 'missing'
+        ? {}
+        : {
+            approvals: {
+              request: async (req) => ({
+                approvalId: req.approvalId,
+                outcome: mode,
+                decidedBy: 'owner',
+              }),
+            },
+          }),
+      llm: new FakeLLM(
+        () => [toolCallChunk('action', 'browser', { operation: 'click' }), finish],
+        () => [{ kind: 'text-delta', text: 'done' }, finish],
+      ),
+    });
+    await loop.run('s', 'go', { emit: () => {} });
+    expect(executed).toBe(mode === 'allowed');
+    expect((await store.load('s')).find((e) => e.type === 'tool/result')).toMatchObject({
+      isError: mode !== 'allowed',
+    });
+  },
+);

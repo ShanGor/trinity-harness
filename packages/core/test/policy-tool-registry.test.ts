@@ -88,3 +88,29 @@ describe('PolicyToolRegistry', () => {
     expect(registry.concurrencyOf('anything')).toBe(core.concurrencyOf('anything'));
   });
 });
+
+it('asks for each browser action independently of broad browser or CLI grants', () => {
+  const inner = new CoreToolRegistry(new FakeSandbox());
+  const registry = new PolicyToolRegistry(inner, {
+    ...parsePermissionPolicy('workspace-write'),
+    tools: { browser: 'allowed' },
+  });
+  for (const operation of ['click', 'fill', 'key', 'scroll'])
+    expect(registry.decide(call('browser', { operation }))).toBe('ask');
+  expect(registry.decide(call('browser', { operation: 'get_page_text' }))).toBe('allowed');
+  expect(
+    new PolicyToolRegistry(inner, undefined).decide(call('browser', { operation: 'click' })),
+  ).toBe('ask');
+  expect(
+    new PolicyToolRegistry(inner, {
+      ...parsePermissionPolicy('workspace-write'),
+      tools: { 'browser.click': 'allowed' },
+    }).decide(call('browser', { operation: 'click' })),
+  ).toBe('allowed');
+  expect(
+    new PolicyToolRegistry(inner, {
+      ...parsePermissionPolicy('danger-full-access'),
+      tools: { '*': 'allowed', browser: 'denied', 'browser.click': 'allowed' },
+    }).decide(call('browser', { operation: 'click' })),
+  ).toBe('denied');
+});

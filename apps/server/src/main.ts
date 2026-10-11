@@ -10,6 +10,9 @@ import {
   createLspTools,
   createReadBlobTool,
   createResearchTool,
+  createBrowserTool,
+  TrustedCdpBrowserAccess,
+  isCdpSessionOwner,
   createSkillTool,
   FileSkillCatalog,
   SkillRuntime,
@@ -100,6 +103,37 @@ async function main(): Promise<void> {
       });
       registry.register(createSkillTool(skills));
       registry.register(createResearchTool(store, blobStore));
+      registry.register(
+        createBrowserTool({
+          store,
+          blobs: blobStore,
+          now: () => new Date(),
+          access: env.BROWSER_CDP_ENDPOINT
+            ? new TrustedCdpBrowserAccess({
+                endpoint: env.BROWSER_CDP_ENDPOINT,
+                sandbox,
+                store,
+                authorizeSession: async (sessionId, signal) => {
+                  if (databaseUrl)
+                    return auth
+                      ? isCdpSessionOwner(
+                          sessionId,
+                          auth.metas,
+                          auth.users,
+                          { id: env.BROWSER_CDP_OWNER_ID, email: env.ADMIN_EMAIL },
+                          signal,
+                        )
+                      : false;
+                  const events = await store.load(sessionId);
+                  return (
+                    events.some((event) => event.type === 'message/user') &&
+                    !events.some((event) => event.type === 'session/closed')
+                  );
+                },
+              })
+            : undefined,
+        }),
+      );
       for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
         registry.register(tool);
       }

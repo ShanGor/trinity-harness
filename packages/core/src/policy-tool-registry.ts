@@ -11,6 +11,7 @@ import type {
 import { matchesCommandPrefix } from './tools/command-prefix.js';
 
 import { classifyBashCommand } from './tools/bash-classifier.js';
+import { browserActionOperations } from '@trinity-harness/contracts';
 
 /**
  * Policy-gating decorator over a {@link ToolRegistry} (docs/design.md §12.1,
@@ -21,8 +22,8 @@ import { classifyBashCommand } from './tools/bash-classifier.js';
  * - `ask`     → return an `ask` verdict; the CALLER (Agent Loop) owns the
  *   human-in-the-loop round trip — a registry must never block on I/O.
  *
- * No policy (undefined) ⇒ transparent pass-through, preserving the M1/M2
- * behavior for tests and inline mode.
+ * No policy preserves M1/M2 behavior except browser actions, which require
+ * per-operation approval even in inline mode.
  */
 export class PolicyToolRegistry implements ToolRegistry {
   constructor(
@@ -45,6 +46,17 @@ export class PolicyToolRegistry implements ToolRegistry {
   /** Policy decision for one call; 'ask' means the loop must gate it. */
   decide(call: ToolCall): PermissionDecision {
     const policy = this.policy;
+    if (call.name === 'browser') {
+      const operation = (call.args as { operation?: unknown } | null)?.operation;
+      if (
+        typeof operation === 'string' &&
+        browserActionOperations.some((value) => value === operation)
+      ) {
+        if (policy?.tools['browser'] === 'denied' || policy?.tools['*'] === 'denied')
+          return 'denied';
+        return policy?.tools[`browser.${operation}`] ?? policy?.tools['*'] ?? 'ask';
+      }
+    }
     if (!policy) return 'allowed';
     const decision =
       policy.tools[call.name] ?? policy.tools['*'] ?? (call.name === 'bash' ? 'ask' : 'allowed');

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { browserSourceSchema } from './browser.js';
 
 const sourceUrlSchema = z
   .url()
@@ -28,18 +29,43 @@ export const researchNotesSchema = z.object({
         relation: z.enum(['supports', 'contradicts', 'context']),
         sources: z
           .array(
-            z.object({
-              callId: z
-                .string()
-                .min(1)
-                .max(200)
-                .optional()
-                .describe(
-                  'Optional extraction call ID; omitted IDs are resolved by exact observed URL and quote',
-                ),
-              url: sourceUrlSchema,
-              quote: z.string().trim().min(1).max(600),
-            }),
+            z
+              .object({
+                callId: z
+                  .string()
+                  .min(1)
+                  .max(200)
+                  .optional()
+                  .describe(
+                    'Optional extraction call ID; omitted IDs are resolved by exact observed URL and quote',
+                  ),
+                ...browserSourceSchema.partial().shape,
+                artifactUri: z.string().max(500).optional(),
+                capturedAt: z.iso.datetime().optional(),
+                evidenceSeq: z.number().int().positive().optional(),
+                url: sourceUrlSchema.or(z.literal('')).default(''),
+                quote: z
+                  .string()
+                  .trim()
+                  .max(600)
+                  .describe(
+                    'Copy a short contiguous passage verbatim from the extracted text. Preserve punctuation, including fullwidth ： and curly quotes. Do not paraphrase, translate, or omit intervening text. Whitespace differences are accepted.',
+                  )
+                  .default(''),
+              })
+              .refine(
+                (source) =>
+                  source.observationId && source.blockId
+                    ? (source.start === undefined && source.end === undefined) ||
+                      (source.start !== undefined &&
+                        source.end !== undefined &&
+                        source.end > source.start)
+                    : !source.observationId &&
+                      !source.blockId &&
+                      source.url.length > 0 &&
+                      source.quote.trim().length > 0,
+                'Use an observation/block reference or an observed URL and nonempty quote',
+              ),
           )
           .min(1)
           .max(3),

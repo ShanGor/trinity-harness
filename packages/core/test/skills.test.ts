@@ -15,7 +15,9 @@ import {
   CoreAgentLoop,
   CoreToolRegistry,
   createSkillTool,
+  createBrowserTool,
   FileSkillCatalog,
+  LocalBlobStore,
   MemorySessionStore,
   SkillRuntime,
   toModelMessages,
@@ -137,6 +139,80 @@ describe('FileSkillCatalog', () => {
 });
 
 describe('SkillRuntime and model projection', () => {
+  it.each([true, false])(
+    'advertises the current browser capabilities in a fresh session (live=%s)',
+    async (live) => {
+      const store = new MemorySessionStore();
+      const runtime = new SkillRuntime(
+        new FileSkillCatalog({
+          bundledDirectories: [path.resolve(import.meta.dirname, '../../../skills')],
+        }),
+        store,
+        {
+          now: () => new Date('2026-01-01T00:00:00.000Z'),
+          browserCdpEndpoint: live ? '9222' : undefined,
+        },
+      );
+      const registry = new CoreToolRegistry(new FakeSandbox());
+      registry.register(createSkillTool(runtime));
+      registry.register(bashTool);
+      registry.register(
+        createBrowserTool({
+          store,
+          blobs: new LocalBlobStore(path.join(root, 'blobs')),
+          now: () => new Date('2026-01-01T00:00:00.000Z'),
+          ...(live
+            ? {
+                access: {
+                  authorize: async () => {
+                    throw new Error('No live actions in schema test');
+                  },
+                },
+              }
+            : {}),
+        }),
+      );
+      const llm = new FakeLLM(
+        (request) => {
+          expect(request.tools?.find((tool) => tool.name === 'browser')?.parameters).toMatchObject({
+            properties: {
+              operation: {
+                enum: live
+                  ? expect.arrayContaining([
+                      'navigate',
+                      'get_page_text',
+                      'read_page',
+                      'read_observation',
+                    ])
+                  : ['read_observation', 'search_observation'],
+              },
+            },
+          });
+          expect(request.tools?.some((tool) => tool.name === 'bash')).toBe(true);
+          expect(JSON.stringify(request.messages)).not.toContain('--cdp');
+          return toolCallThenFinish('load', 'skill', { name: 'agent-browser' });
+        },
+        (request) => {
+          expect(JSON.stringify(request.messages)).toContain('Use the advertised `browser` tool');
+          expect(JSON.stringify(request.messages)).not.toContain('agent-browser --');
+          return textChunks('Browser capabilities inspected.');
+        },
+      );
+      const loop = new CoreAgentLoop({
+        llm,
+        model: 'fake/model',
+        tools: registry,
+        store,
+        skills: runtime,
+        workspaceRoot: root,
+      });
+      expect((await loop.run('fresh', 'Read a website', { emit: () => undefined })).reason).toBe(
+        'completed',
+      );
+      llm.assertExhausted();
+    },
+  );
+
   it('advertises summaries, loads through the normal tool path, and executes via sandbox', async () => {
     await put('.agents/skills/browser/SKILL.md', markdown());
     const store = new MemorySessionStore();
@@ -398,8 +474,13 @@ describe('SkillRuntime and model projection', () => {
       expect.objectContaining({ name: 'agent-browser', source: 'bundled' }),
     ]);
     const skill = await catalog.load(root, 'agent-browser');
-    expect(skill.body).toContain('agent-browser skills get core');
-    expect(skill.body).toContain('--session');
+    expect(skill.body).toContain('Use the advertised `browser` tool');
+    expect(skill.body).not.toContain('agent-browser --');
+    expect(skill.body).not.toContain('scripts/extract-page.js');
+    expect(skill.body).toContain('references/cli-diagnostics.md');
+    expect(await catalog.readResource(skill, 'references/cli-diagnostics.md')).toContain(
+      'agent-browser skills get core',
+    );
   });
 
   it('bounds compacted instruction retention and refreshes an explicit reactivation', async () => {
@@ -470,7 +551,7 @@ describe('SkillRuntime and model projection', () => {
     expect(JSON.stringify(messages)).toContain('PRIVATE INSTRUCTIONS');
   });
 
-  it('persists the explicit CDP connection target without auto-discovering host browsers', async () => {
+  it('advertises wrapper routing and saved-only fallback without exposing CLI setup', async () => {
     const store = new MemorySessionStore();
     const catalog = new FileSkillCatalog();
     const runtime = new SkillRuntime(catalog, store, {
@@ -479,14 +560,20 @@ describe('SkillRuntime and model projection', () => {
     });
     await runtime.prepare({ sessionId: 's', workspaceRoot: root });
     const instructions = toModelMessages(await store.load('s'))[0]!.content;
-    expect(instructions).toContain('Browser CDP endpoint: "9222"');
-    expect(instructions).toContain('--pin-tab');
-    expect(instructions).toContain('--session trinity-s');
+    expect(instructions).toContain('Use the browser tool operations advertised in this turn');
+    expect(instructions).toContain('without CLI checks, shell commands or extraction scripts');
+    expect(instructions).toContain('If only saved operations are advertised');
+    expect(instructions).not.toContain('--cdp');
+    expect(instructions).not.toContain('--session');
+    expect(instructions).not.toContain('9222');
     expect(instructions).toContain('instead of launching a replacement');
     expect(instructions).toContain('Preserve the user-owned Chrome');
     await new SkillRuntime(catalog, store).prepare({ sessionId: 's', workspaceRoot: root });
     expect(toModelMessages(await store.load('s'))[0]!.content).not.toContain(
-      'Browser CDP endpoint',
+      'A browser connection is configured',
+    );
+    expect(toModelMessages(await store.load('s'))[0]!.content).toContain(
+      'do not launch managed Chrome',
     );
     for (const value of [
       '9222',

@@ -5,7 +5,7 @@ import type {
   LLMRequest,
   StreamChunk,
 } from '@trinity-harness/contracts';
-import type { LanguageModel, ModelMessage } from 'ai';
+import type { LanguageModel, ModelMessage, ToolResultPart } from 'ai';
 import { jsonSchema, streamText } from 'ai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
@@ -123,6 +123,26 @@ async function toAiMessages(
       });
       continue;
     }
+    const media = m.blocks?.filter((block) => block.kind === 'image') ?? [];
+    const output: ToolResultPart['output'] = media.length
+      ? {
+          type: 'content',
+          value: [
+            { type: 'text', text: m.content },
+            ...(await Promise.all(
+              media.map(async (block) => {
+                if (block.kind !== 'image' || !block.uri.startsWith(BLOB_SCHEME) || !resolveBlob)
+                  throw new Error('Tool image requires an authorized blob resolver');
+                return {
+                  type: 'file' as const,
+                  data: { type: 'data' as const, data: await resolveBlob(block.uri) },
+                  mediaType: block.mimeType ?? 'image/png',
+                };
+              }),
+            )),
+          ],
+        }
+      : { type: 'text', value: m.content };
     out.push({
       role: 'tool',
       content: [
@@ -130,7 +150,7 @@ async function toAiMessages(
           type: 'tool-result',
           toolCallId: m.toolCallId ?? '',
           toolName: m.toolName ?? '',
-          output: { type: 'text', value: m.content },
+          output,
         },
       ],
     });

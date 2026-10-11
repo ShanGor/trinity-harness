@@ -4,6 +4,7 @@ import {
   citationContext,
   isCompacted,
   skillResultSchema,
+  browserResultSchema,
   type SkillSnapshot,
   compactionSummaryText,
   type ConversationMessage,
@@ -202,6 +203,20 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
           content: JSON.stringify(value),
           toolCallId: event.callId,
           toolName: toolNames.get(event.callId),
+          ...(!event.isError &&
+          toolNames.get(event.callId) === 'browser' &&
+          browserResultSchema.safeParse(value).success &&
+          browserResultSchema.parse(value).image
+            ? {
+                blocks: [
+                  {
+                    kind: 'image' as const,
+                    uri: browserResultSchema.parse(value).image!.uri,
+                    mimeType: 'image/png',
+                  },
+                ],
+              }
+            : {}),
         });
         break;
       }

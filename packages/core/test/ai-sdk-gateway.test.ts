@@ -210,3 +210,38 @@ describe('AiSdkGateway reasoning support', () => {
     });
   });
 });
+
+it('encodes persisted screenshot blocks as native tool image content, outside text JSON', async () => {
+  const captured: CapturedCall = {};
+  const gateway = new AiSdkGateway({ fake: () => fakeModel(MINIMAL_OUTPUT, captured) });
+  for await (const chunk of await gateway.stream({
+    ...baseRequest,
+    model: 'fake/image',
+    messages: [
+      { role: 'user', content: 'Read image' },
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'shot', name: 'browser', args: { operation: 'screenshot' } }],
+      },
+      {
+        role: 'tool',
+        toolCallId: 'shot',
+        toolName: 'browser',
+        content: '{"image":{"uri":"blob://browser/s/shot.png"}}',
+        blocks: [{ kind: 'image', uri: 'blob://browser/s/shot.png', mimeType: 'image/png' }],
+      },
+    ],
+    resolveBlob: async () => new Uint8Array([137, 80, 78, 71]),
+  }))
+    void chunk;
+  const prompt = captured.options?.['prompt'] as {
+    role: string;
+    content: { output?: unknown }[];
+  }[];
+  const result = prompt.find((m) => m.role === 'tool')?.content[0]?.output;
+  expect(result).toMatchObject({
+    type: 'content',
+    value: [{ type: 'text' }, { type: 'file', mediaType: 'image/png', data: { type: 'data' } }],
+  });
+});

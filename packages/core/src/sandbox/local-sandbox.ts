@@ -1,9 +1,12 @@
 import { spawn } from 'node:child_process';
 import { glob as fsGlob } from 'node:fs/promises';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, open, unlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import path from 'node:path';
 
 import type {
+  ArgvExecOptions,
+  BoundedExecResult,
   EditFileResult,
   ExecOptions,
   ExecResult,
@@ -86,14 +89,57 @@ export class LocalSandbox implements SandboxPort {
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<ExecResult> {
+    const { stdout, stderr, exitCode } = await this.runProcess(
+      'bash',
+      ['-c', command],
+      opts,
+      MAX_BUFFER,
+    );
+    return { stdout, stderr, exitCode };
+  }
+
+  async execArgv(
+    command: string,
+    args: string[],
+    opts: ArgvExecOptions,
+  ): Promise<BoundedExecResult> {
+    if (
+      !Number.isSafeInteger(opts.maxOutputBytes) ||
+      opts.maxOutputBytes < 1 ||
+      opts.maxOutputBytes > MAX_BUFFER
+    )
+      throw new Error('invalid process output limit');
+    const result = await this.runProcess(command, args, opts, opts.maxOutputBytes);
+    const truncate = (value: string, bytes: number): string => {
+      const points = Array.from(value);
+      let low = 0,
+        high = points.length;
+      while (low < high) {
+        const mid = Math.ceil((low + high) / 2);
+        if (Buffer.byteLength(points.slice(0, mid).join('')) <= bytes) low = mid;
+        else high = mid - 1;
+      }
+      return points.slice(0, low).join('');
+    };
+    const stdout = truncate(result.stdout, opts.maxOutputBytes);
+    const stderr = truncate(result.stderr, opts.maxOutputBytes - Buffer.byteLength(stdout));
+    return { ...result, stdout, stderr };
+  }
+
+  private async runProcess(
+    command: string,
+    args: string[],
+    opts: ExecOptions | undefined,
+    maxBytes: number,
+  ): Promise<BoundedExecResult> {
     const cwd = opts?.cwd ? this.resolve(opts.cwd) : this.workspaceRoot;
     const signals = [
       AbortSignal.timeout(opts?.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS),
       ...(opts?.signal ? [opts.signal] : []),
     ];
     const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
-    return new Promise<ExecResult>((resolvePromise) => {
-      const child = spawn('bash', ['-c', command], {
+    return new Promise<BoundedExecResult>((resolvePromise) => {
+      const child = spawn(command, args, {
         cwd,
         env: this.childEnv(opts?.env),
         detached: process.platform !== 'win32',
@@ -102,6 +148,7 @@ export class LocalSandbox implements SandboxPort {
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
       let bytes = 0;
+      let outputOverflow = false;
       let failure: string | undefined;
       let settled = false;
       let escalation: AbortSignal | undefined;
@@ -129,6 +176,7 @@ export class LocalSandbox implements SandboxPort {
         signal.removeEventListener('abort', onAbort);
         escalation?.removeEventListener('abort', forceKill);
         resolvePromise({
+          outputOverflow,
           stdout: Buffer.concat(stdout).toString('utf8'),
           stderr:
             Buffer.concat(stderr).toString('utf8') ||
@@ -138,10 +186,11 @@ export class LocalSandbox implements SandboxPort {
         });
       };
       const capture = (target: Buffer[], chunk: Buffer): void => {
-        const remaining = Math.max(MAX_BUFFER - bytes, 0);
+        const remaining = Math.max(maxBytes - bytes, 0);
         target.push(chunk.subarray(0, remaining));
         bytes += chunk.byteLength;
-        if (bytes > MAX_BUFFER) {
+        if (bytes > maxBytes) {
+          outputOverflow = true;
           failure = 'command output exceeded the buffer limit';
           kill('SIGKILL');
         }
@@ -170,6 +219,30 @@ export class LocalSandbox implements SandboxPort {
       content: slice.toString('utf8'),
       truncated: buf.byteLength > maxBytes,
     };
+  }
+
+  async readBytes(relativePath: string, maxBytes: number): Promise<Uint8Array> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > STAT_MAX_BYTES)
+      throw new Error('invalid binary file limit');
+    const file = await open(this.resolve(relativePath), constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size > maxBytes) throw new Error('binary file exceeds limit');
+      const bytes = Buffer.alloc(maxBytes + 1);
+      const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+      if (bytesRead > maxBytes) throw new Error('binary file exceeds limit');
+      return bytes.subarray(0, bytesRead);
+    } finally {
+      await file.close();
+    }
+  }
+
+  async removeFile(relativePath: string): Promise<void> {
+    try {
+      await unlink(this.resolve(relativePath));
+    } catch (err) {
+      if (!(err instanceof Error && 'code' in err && err.code === 'ENOENT')) throw err;
+    }
   }
 
   async writeFile(relativePath: string, content: string): Promise<void> {

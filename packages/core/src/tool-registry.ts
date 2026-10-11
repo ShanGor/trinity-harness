@@ -9,6 +9,7 @@ import type {
   ToolSchema,
 } from '@trinity-harness/contracts';
 import { z } from 'zod';
+import { browserErrorSchema } from '@trinity-harness/contracts';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -56,6 +57,17 @@ export class CoreToolRegistry implements ToolRegistry {
     }
     const parsed = def.parameters.safeParse(call.args);
     if (!parsed.success) {
+      if (call.name === 'browser')
+        return {
+          isError: true,
+          value: browserErrorSchema.parse({
+            kind: 'browser-error-v1',
+            code: 'INVALID_ARGUMENTS',
+            operation: 'browser',
+            effect: 'none',
+            message: 'Invalid or disabled browser operation arguments.',
+          }),
+        };
       return {
         value: {
           message: `invalid arguments for ${call.name}`,
@@ -70,8 +82,24 @@ export class CoreToolRegistry implements ToolRegistry {
     ];
     const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals as AbortSignal[]);
     try {
-      return await def.execute(parsed.data, { ...ctx, sandbox: this.sandbox, signal });
+      return await def.execute(parsed.data, {
+        ...ctx,
+        callId: call.id,
+        sandbox: this.sandbox,
+        signal,
+      });
     } catch (err) {
+      if (call.name === 'browser')
+        return {
+          isError: true,
+          value: browserErrorSchema.parse({
+            kind: 'browser-error-v1',
+            code: signal.aborted ? 'CANCELLED' : 'DRIVER_FAILED',
+            operation: 'browser',
+            effect: 'unknown',
+            message: 'Browser execution failed. Reobserve before retrying effects.',
+          }),
+        };
       return {
         value: {
           message: err instanceof Error ? err.message : String(err),

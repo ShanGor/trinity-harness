@@ -1,4 +1,6 @@
 import type {
+  ArgvExecOptions,
+  BoundedExecResult,
   EditFileResult,
   ExecResult,
   LongRunningProcess,
@@ -14,6 +16,15 @@ import type {
  */
 export class FakeSandbox implements SandboxPort {
   readonly files = new Map<string, string>();
+  readonly binaryFiles = new Map<string, Uint8Array>();
+  async readBytes(path: string, maxBytes: number): Promise<Uint8Array> {
+    const bytes = this.binaryFiles.get(path);
+    if (!bytes || bytes.length > maxBytes) throw new Error('binary file unavailable');
+    return bytes;
+  }
+  async removeFile(path: string): Promise<void> {
+    this.binaryFiles.delete(path);
+  }
   execHandler: (command: string) => ExecResult = (command) => ({
     stdout: '',
     stderr: `FakeSandbox: no handler for: ${command}`,
@@ -26,6 +37,19 @@ export class FakeSandbox implements SandboxPort {
 
   async exec(command: string): Promise<ExecResult> {
     return this.execHandler(command);
+  }
+
+  argvHandler:
+    | ((command: string, args: string[], opts: ArgvExecOptions) => Promise<BoundedExecResult>)
+    | undefined;
+
+  async execArgv(
+    command: string,
+    args: string[],
+    opts: ArgvExecOptions,
+  ): Promise<BoundedExecResult> {
+    if (!this.argvHandler) throw new Error('FakeSandbox: no bounded argv handler');
+    return this.argvHandler(command, args, opts);
   }
 
   async readFile(path: string, opts?: { maxBytes?: number }): Promise<ReadFileResult> {
