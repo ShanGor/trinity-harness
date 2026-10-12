@@ -72,7 +72,7 @@ An enterprise-grade, multi-user, browser ↔ server AI Agent platform (core scen
 
 ### 4.4 Frontend
 
-- Usage accounting is projected from append-only `model/usage` events with request/prompt IDs and per-request model/price snapshots. Keep cache reads/writes separate from uncached input, count reasoning only within output, preserve unavailable buckets/prices, and never reprice historical requests when a model/config changes. See `docs/usage-accounting.md` and design §17.
+- Usage accounting is projected from append-only `model/usage` events with request/prompt IDs and per-request model/price snapshots. Keep cache reads/writes separate from uncached input, count reasoning only within output, preserve unavailable buckets/prices, and never reprice historical requests when a model/config changes. Both server and agent-worker load the single price catalog from the fixed `config/models.yaml` path; do not add environment-variable or Helm-value pricing sources. See `docs/usage-accounting.md` and design §17.
 
 - Components consume ACP message types; antd components map 1:1 to ACP messages (see `docs/design.md` §11.5); do not invent a second private protocol.
 - SSE client logic lives in `packages/client-acp` (reconnection, backoff, Last-Event-ID, gap detection); UI components must not each hand-roll their own EventSource.

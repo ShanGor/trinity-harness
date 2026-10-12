@@ -1,0 +1,45 @@
+# Model prices are keyed by the exact routed provider/model identifier.
+# Rates are decimal strings in native currency units per million tokens.
+# These are direct-provider standard/list rates checked on 2026-10-12; update
+# the version when the provider changes a rate or when this deployment uses a
+# different billing arrangement. Unlisted models have unavailable cost.
+models:
+  # Kimi API model ID: kimi-k3. The gateway uses the API's default 5m cache TTL
+  # (¥20/M writes); this route does not configure the optional 1h TTL. Source:
+  # https://platform.kimi.com/docs/guide/context-caching
+  openai/kimi-k3:
+    - currency: CNY
+      version: official-2026-10-12
+      input: '20'
+      output: '100'
+      cacheRead: '2'
+      cacheWrite: '20'
+
+  # MiniMax-M3 standard tier via the Anthropic-compatible route. The API rate
+  # table publishes input/output/cache-read only; no cache-write rate is listed.
+  # Priority requests cost 1.5x and need a separate route/rate if enabled.
+  # Source: https://platform.minimax.io/docs/pricing/overview
+  anthropic/MiniMax-M3:
+    - currency: USD
+      version: official-2026-10-12-standard
+      input: '0.3'
+      output: '1.2'
+      cacheRead: '0.06'
+      minInputTokens: 0
+    - currency: USD
+      version: official-2026-10-12-standard
+      input: '0.6'
+      output: '2.4'
+      cacheRead: '0.12'
+      minInputTokens: 512001
+
+  # DeepSeek API model ID deepseek-flash = DeepSeek-V4.1-Flash. The API has
+  # peak/off-peak rates; use peak rates here because this catalog has no time
+  # schedule and should not understate usage. Off-peak rates are half.
+  # Source: https://api-docs.deepseek.com/quick_start/pricing
+  openai/deepseek-flash:
+    - currency: USD
+      version: official-2026-10-12-peak
+      input: '0.3'
+      output: '1.2'
+      cacheRead: '0.006'

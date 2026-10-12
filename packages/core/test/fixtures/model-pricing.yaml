@@ -1,0 +1,10 @@
+models:
+  fake-provider/fake-model:
+    - currency: USD
+      version: test-contract-v1
+      input: '1.25'
+      output: '4.5'
+      cacheRead: '0.125'
+      cacheWrite: '1.5'
+      cacheWrite1h: '2'
+      minInputTokens: 100

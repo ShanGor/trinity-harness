@@ -32,21 +32,7 @@ export const modelPricingSchema = z.record(
   z.array(modelPriceSchema).min(1).max(16),
 );
 export type ModelPricing = z.infer<typeof modelPricingSchema>;
-export const modelPricingEnvSchema = z
-  .string()
-  .max(100_000)
-  .default('{}')
-  .transform((value, ctx) => {
-    try {
-      return modelPricingSchema.parse(JSON.parse(value));
-    } catch {
-      ctx.addIssue({
-        code: 'custom',
-        message: 'MODEL_PRICING must be a JSON object of model price arrays',
-      });
-      return z.NEVER;
-    }
-  });
+export const modelPricingConfigSchema = z.object({ models: modelPricingSchema }).strict();
 
 export const usageCostSchema = z.object({
   currency: z.string().regex(/^[A-Z]{3}$/),

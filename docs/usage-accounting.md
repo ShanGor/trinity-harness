@@ -6,13 +6,23 @@ Session totals sum request consumption across turns, including reported compacti
 
 ## Configure prices
 
-Set `MODEL_PRICING` on the **server and agent worker** to a JSON object keyed by the exact routed `provider/model-id`. Each value is an array of price tiers. All rates are **decimal strings in currency units per million tokens**. The following is an illustrative configuration, not a published model price:
+Configure all prices in the single `config/models.yaml` file. It is loaded from that fixed path by both the server and agent worker and included in their Docker images. The `models` map is keyed by the exact routed `provider/model-id`; each value is an array of price tiers. All rates are **quoted decimal strings in currency units per million tokens**. For example:
 
-```dotenv
-MODEL_PRICING='{"provider/model-id":[{"currency":"USD","version":"contract-2026-10","input":"2","output":"10","cacheRead":"0.2","cacheWrite":"2.5"}]}'
+```yaml
+models:
+  provider/model-id:
+    - currency: USD
+      version: operator-rate-v1
+      input: '2'
+      output: '10'
+      cacheRead: '0.2'
+      cacheWrite: '2.5'
+      minInputTokens: 0
 ```
 
-For Helm, set the equivalent object under `config.modelPricing`; it is serialized into the shared ConfigMap. Restart the relevant workloads after changing configuration. New requests save the selected rate snapshot alongside their cost. No default provider prices are assumed: proxies, negotiated contracts and deployments may use different rates.
+The checked-in catalog contains direct-provider reference rates for Kimi K3, MiniMax M3, and DeepSeek V4.1 Flash. Rates are snapshots dated in the YAML; update them when provider prices change, and replace them when a proxy, discount, priority tier, or account-specific contract changes the actual rate. A model without an entry has unavailable cost. Update the file and redeploy the server and worker images when rates change. New requests save the selected rate snapshot alongside their cost, so existing sessions are never repriced.
+
+The catalog keeps prices in each provider's published currency; totals in different currencies remain separate. DeepSeek's configured rates use its peak schedule because the catalog cannot represent time-based rates. Kimi K2.8 Preview is available through the Kimi Code subscription/quota product as `kimi-for-coding`, not with a published per-token API rate, so it is intentionally not assigned a money rate. MiniMax M3's public pricing table does not list a cache-write price; requests reporting cache writes therefore have unavailable cost rather than an assumed rate.
 
 Each tier supports:
 

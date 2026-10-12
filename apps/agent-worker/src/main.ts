@@ -188,7 +188,7 @@ async function main(): Promise<void> {
           return new CoreAgentLoop({
             llm,
             model: env.MODEL,
-            pricing: env.MODEL_PRICING,
+            pricing: env.modelPricing,
             systemPrompt: env.SYSTEM_PROMPT,
             tools: childRegistry,
             store: childStore,
@@ -232,7 +232,7 @@ async function main(): Promise<void> {
       new CoreAgentLoop({
         llm,
         model: env.MODEL,
-        pricing: env.MODEL_PRICING,
+        pricing: env.modelPricing,
         maxSteps: env.MAX_TURN_STEPS,
         systemPrompt: env.SYSTEM_PROMPT,
         tools: assemblyFor(workspaceRoot).registry,

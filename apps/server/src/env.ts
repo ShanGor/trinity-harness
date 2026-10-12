@@ -1,8 +1,8 @@
 import {
-  modelPricingEnvSchema,
   browserCdpEndpointSchema,
   skillDirectoriesEnvSchema,
   turnStepBudgetSchema,
+  type ModelPricing,
 } from '@trinity-harness/contracts';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -10,6 +10,7 @@ import path from 'node:path';
 import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
 
+import { loadModelPricingConfig } from '@trinity-harness/core';
 import { loadEnv } from '@trinity-harness/shared';
 
 const serverEnvSchema = z.object({
@@ -30,7 +31,6 @@ const serverEnvSchema = z.object({
   BROWSER_CDP_OWNER_ID: z.uuid().optional(),
   SKILL_DIRS: skillDirectoriesEnvSchema,
   MAX_TURN_STEPS: turnStepBudgetSchema,
-  MODEL_PRICING: modelPricingEnvSchema,
   SYSTEM_PROMPT: z.string().min(1).default('You are Trinity, a software engineering agent.'),
   /** Anthropic extended thinking budget (tokens). */
   REASONING_BUDGET_TOKENS: z.coerce.number().int().positive().optional(),
@@ -68,7 +68,7 @@ const serverEnvSchema = z.object({
   SANDBOX_ENV_MODE: z.enum(['minimal', 'inherit']).default('minimal'),
 });
 
-export type ServerEnv = z.infer<typeof serverEnvSchema>;
+export type ServerEnv = z.infer<typeof serverEnvSchema> & { modelPricing: ModelPricing };
 
 export function loadServerEnv(): ServerEnv {
   // Load .env from the repo root first, then the app dir (local overrides).
@@ -92,5 +92,8 @@ export function loadServerEnv(): ServerEnv {
         .join('; ')}`,
     );
   }
-  return result.data;
+  return {
+    ...result.data,
+    modelPricing: loadModelPricingConfig(new URL('../../../config/models.yaml', import.meta.url)),
+  };
 }

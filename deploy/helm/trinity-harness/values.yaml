@@ -100,8 +100,6 @@ workspace:
     size: 10Gi
 
 config:
-  # Rates per million tokens, keyed by exact provider/model-id (see docs/usage-accounting.md).
-  modelPricing: {}
   model: 'anthropic/claude-sonnet-4-20250514'
   systemPrompt: 'You are Trinity, a software engineering agent.'
   defaultPermissionPolicy: 'workspace-write'

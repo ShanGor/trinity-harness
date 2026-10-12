@@ -177,7 +177,7 @@ async function main(): Promise<void> {
   const m4LoopExtras = (workspaceRoot: string): ConstructorParameters<typeof CoreAgentLoop>[0] => ({
     llm,
     model: env.MODEL,
-    pricing: env.MODEL_PRICING,
+    pricing: env.modelPricing,
     maxSteps: env.MAX_TURN_STEPS,
     systemPrompt: env.SYSTEM_PROMPT,
     tools: assemblyFor(workspaceRoot).registry,

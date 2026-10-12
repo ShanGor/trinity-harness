@@ -597,7 +597,7 @@ api_keys / credentials(id, tenant_id, kind, ciphertext, created_at)
 ## 17. 可观测性与配额
 
 - **会话 token / 费用记账**：每次模型请求追加 contracts 的 `model/usage` 事件，保存唯一 requestId、原始 user event 的 promptId、实际 provider/model、用途（assistant/compaction/subagent）、provider-reported input/output totals 与 uncached/cache-read/cache-write/reasoning 子项。输入总数包含 cache buckets，reasoning 是 output 子集，均不得重复相加。未知数据保持 unavailable；失败/取消时保留已收到的 usage，未报告的请求不伪造零消耗。子 agent 在其独立上下文计量/检查 tenant quota，并把 usage 快照归属父 prompt 写回父会话；不重复写配额计量。
-- **费用**：composition roots 从同一 `MODEL_PRICING` JSON（Helm `config.modelPricing`）注入服务端价格，每模型支持按请求 input total 选择 context tier；保存 currency/version/rates 和精确十进制 cost 快照。Cache write 可分 5m/1h；缺少必要 TTL breakdown 或费率时费用 unavailable。金额用 bigint 定点计算（14 位小数），展示时才舍入；不同币种分别累计，不自动汇率换算。配置变化/切模型不重算历史。配置格式与限制见 [usage-accounting.md](usage-accounting.md)。
+- **费用**：server 与 agent-worker 从固定默认路径 `config/models.yaml` 读取同一份 YAML 价格目录，按精确 `provider/model-id` 匹配；Zod 启动校验，不通过环境变量或 Helm values 重复配置。每模型支持按请求 input total 选择 context tier；保存 currency/version/rates 和精确十进制 cost 快照。Cache write 可分 5m/1h；缺少必要 TTL breakdown 或费率时费用 unavailable。金额用 bigint 定点计算（14 位小数），展示时才舍入；不同币种分别累计，不自动汇率换算。配置变化/切模型不重算历史。配置格式与限制见 [usage-accounting.md](usage-accounting.md)。
 - **前端 / 协议**：assistant turn 底部与 session header 显示消费/estimated cost，可展开 token buckets、每模型和 request/rate 明细；requestId 去重确保重放/重连不重复累计，使用 promptId 保持归属，旧日志不补造缺失数据。扩展 wire 事件携带 contracts usage DTO；官方 ACP 通过 `session_info_update._meta["trinity.modelUsage"]` 传递快照，不把累计消费冒充 context occupancy。Inline SSE 同样从事件日志重放、按 seq 发送持久化记录并串行衔接实时 delta；export 包含 usage 快照。`model_usage` 保持租户配额读侧，session_events 是会话费用事实源，不需要改表。
 
 - **OTel**：Loop 每 step 一个 span（模型调用、工具执行、等待审批各自子 span）；指标：token 消耗/成本、工具成功率、审批延迟、队列深度。

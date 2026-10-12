@@ -1,0 +1,6 @@
+models:
+  fake-provider/fake-model:
+    - currency: USD
+      version: test-contract-v1
+      input: 1.25
+      output: '4.5'

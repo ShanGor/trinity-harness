@@ -1,10 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  modelPricingEnvSchema,
-  modelPricingSchema,
-  type TokenUsage,
-  type SessionEvent,
-} from '@trinity-harness/contracts';
+import { modelPricingSchema, type TokenUsage, type SessionEvent } from '@trinity-harness/contracts';
 import { summarizeUsage } from '@trinity-harness/shared';
 import {
   CoreAgentLoop,
@@ -92,8 +87,6 @@ describe('request accounting and pricing', () => {
     ).toBeUndefined();
     expect(priceUsage('unknown', sample, pricing)).toEqual({});
     expect(priceUsage('fake/a', { ...sample, inputTokens: 99 }, pricing).cost).toBeUndefined();
-    expect(modelPricingEnvSchema.safeParse('{bad').success).toBe(false);
-    expect(modelPricingEnvSchema.parse(undefined)).toEqual({});
     const configured = modelPricingSchema.parse(pricing);
     const snapshot = priceUsage('fake/a', sample, configured);
     configured['fake/a']![0]!.input = '999';

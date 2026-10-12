@@ -1,8 +1,8 @@
 import {
-  modelPricingEnvSchema,
   browserCdpEndpointSchema,
   skillDirectoriesEnvSchema,
   turnStepBudgetSchema,
+  type ModelPricing,
 } from '@trinity-harness/contracts';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -10,6 +10,7 @@ import path from 'node:path';
 import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
 
+import { loadModelPricingConfig } from '@trinity-harness/core';
 import { loadEnv } from '@trinity-harness/shared';
 
 const workerEnvSchema = z.object({
@@ -29,7 +30,6 @@ const workerEnvSchema = z.object({
   ADMIN_EMAIL: z.email().default('admin@trinity.local'),
   SKILL_DIRS: skillDirectoriesEnvSchema,
   MAX_TURN_STEPS: turnStepBudgetSchema,
-  MODEL_PRICING: modelPricingEnvSchema,
   SYSTEM_PROMPT: z.string().min(1).default('You are Trinity, a software engineering agent.'),
   REASONING_BUDGET_TOKENS: z.coerce.number().int().positive().optional(),
   REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
@@ -51,7 +51,7 @@ const workerEnvSchema = z.object({
   SANDBOX_ENV_MODE: z.enum(['minimal', 'inherit']).default('minimal'),
 });
 
-export type WorkerEnv = z.infer<typeof workerEnvSchema>;
+export type WorkerEnv = z.infer<typeof workerEnvSchema> & { modelPricing: ModelPricing };
 
 export function loadWorkerEnv(): WorkerEnv & { DATABASE_URL: string; REDIS_URL: string } {
   for (const candidate of [
@@ -74,5 +74,10 @@ export function loadWorkerEnv(): WorkerEnv & { DATABASE_URL: string; REDIS_URL: 
         .join('; ')}`,
     );
   }
-  return { ...result.data, DATABASE_URL: base.DATABASE_URL, REDIS_URL: process.env['REDIS_URL'] };
+  return {
+    ...result.data,
+    modelPricing: loadModelPricingConfig(new URL('../../../config/models.yaml', import.meta.url)),
+    DATABASE_URL: base.DATABASE_URL,
+    REDIS_URL: process.env['REDIS_URL'],
+  };
 }
