@@ -326,20 +326,22 @@ typed `browser` 无论 registry 的 concurrency 设置都形成独占 wave；同
 
 首批内置工具（优先级从高到低）：
 
-| 工具                                     | 说明                                                                                                |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `bash`                                   | 经 Sandbox 执行 shell，支持持久会话、沙箱升级需审批                                                 |
-| `read_file` / `write_file` / `edit_file` | edit 采用 str-replace 语义（强制模型先读再改，减少误改）                                            |
-| `glob` / `grep`                          | 代码检索（rg 后端）                                                                                 |
-| `web_search` / `web_fetch`               | 联网能力（可配置关闭）                                                                              |
-| `browser`                                | saved read/search；live capture 仅在注入满足 §12 的 BrowserAccessPort 时启用，见 §8.2               |
-| `research`                               | 有界的研究问题、claims/引用与未决问题；工具结果留痕，来源校验使用当前 turn 的成功 browser read 结果 |
-| `todo`                                   | 任务规划                                                                                            |
-| `lsp_*`                                  | `lsp_diagnostics` / `lsp_symbols` / `lsp_hover` / `lsp_rename`                                      |
-| `ask_user`                               | 向用户提问（阻塞 turn 直至回复）                                                                    |
-| `subagent`                               | 派生子 Agent（独立上下文，结果回收）                                                                |
+| 工具                                     | 说明                                                                                                                                    |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `bash`                                   | 经 Sandbox 执行 shell，支持持久会话、沙箱升级需审批；文件内容读取应使用 `read_file`                                                     |
+| `read_file` / `write_file` / `edit_file` | `read_file` 负责工作区文本检查；模型指引优先使用它而非 Bash 的 `cat`/`sed` 等。edit 采用 str-replace 语义（强制模型先读再改，减少误改） |
+| `glob` / `grep`                          | 代码检索（rg 后端）                                                                                                                     |
+| `web_search` / `web_fetch`               | 联网能力（可配置关闭）                                                                                                                  |
+| `browser`                                | saved read/search；live capture 仅在注入满足 §12 的 BrowserAccessPort 时启用，见 §8.2                                                   |
+| `research`                               | 有界的研究问题、claims/引用与未决问题；工具结果留痕，来源校验使用当前 turn 的成功 browser read 结果                                     |
+| `todo`                                   | 任务规划                                                                                                                                |
+| `lsp_*`                                  | `lsp_diagnostics` / `lsp_symbols` / `lsp_hover` / `lsp_rename`                                                                          |
+| `ask_user`                               | 向用户提问（阻塞 turn 直至回复）                                                                                                        |
+| `subagent`                               | 派生子 Agent（独立上下文，结果回收）                                                                                                    |
 
 工具实现遵循 §5.2 的 `ToolDefinition`：execute 返回规范化 JSON 值，`render` 负责生成模型可见内容——**测试与 UI 展示都可复用同一渲染层**。
+
+Loop 的系统指引要求模型用 `read_file` 检查工作区文本、用 `glob` 定位文件，Bash 用于运行命令、测试、构建与版本控制操作。敏感文件路径由 agent 在工具执行前检查并通过正常审批流授权；模型直接调用 `read_file`，没有独立的 permission tool，也不得改用 Bash 绕过审批。模型不得在最终答复中复述秘密值。维护列表见 `packages/core/src/tools/sensitive-files.ts`。
 
 ### 8.1 Runtime Skills
 
@@ -515,8 +517,9 @@ PG 是唯一事实源：即使 Redis Stream 被截断、SSE 连接中断，任�
 1. **工具执行策略**（每会话可配，预置模板借鉴 dsh 的 permission-presets）：
    - `workspace-write + ask`（默认）：工作区内写自由，危险命令需审批；
    - `read-only`：只读；
-   - `danger-full-access + never`（CI 场景，禁用审批）。
+   - `danger-full-access + never`（CI 场景，其它工具调用不审批；敏感文件清单仍需审批）。
    - `commandPrefixes` 支持管理员配置的 literal argv 前缀白名单，workspace-write 默认含 `agent-browser`。匹配仅接受单一 literal 命令，拒绝 shell composition/expansion，仅允许一个有限行数的 stdin `head`/`tail` 输出过滤器（无文件参数、文件重定向或后续命令；可合并 stderr 到 stdout `2>&1`）；不通过字符串 startsWith 授权，不允许同名后缀 executable 绕过。显式 tool denied 始终优先。
+   - `packages/core/src/tools/sensitive-files.ts` 维护敏感 workspace 文件匹配列表。命中列表的 `read_file` 路径在读取前触发 agent-owned 审批，即使普通 read 或 wildcard policy 为 allowed；命令中直接引用敏感路径的 Bash 调用也触发审批，且不能由可复用 command-prefix grant 自动放行。`.env.example`、`.env.sample`、`.env.template` 是模板例外。该检查补充模型指引，不是对任意动态 shell 文件访问的 OS 级拦截。
    - 审批 UI 支持一次或当前 conversation 的 executable/argument-prefix approval。REST 鉴权后核对当前 session 的待决请求和实际 Bash call，先追加 `approval/command_granted` 再通知 worker。Loop 从 PG event log 读取授权，跨 turn/restart 生效，不能覆盖 denied 或绕过沙箱。无原始命令的截断预览不能定义权限。
 2. **审批流**：工具命中策略 → `ApprovalPort.request` → 事件发布到 Redis Stream → API Server 推送到前端对话框（或 ACP `session/request_permission`）→ 结果写回事件日志（**审批请求与结果均留痕**）。无应答器时 fail-closed。
 3. **Sandbox**：v1 在容器内运行（K8s Pod 内嵌套隔离 + 文件系统只读挂载 + 网络策略）；预留接口切换 gVisor / Firecracker microVM；越权操作必须经审批后升级。

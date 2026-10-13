@@ -7,7 +7,8 @@ import { z } from 'zod';
  * - `workspace-write + ask` (default): writes inside the workspace are free,
  *   anything dangerous (bash, writes outside the workspace) asks the user;
  * - `read-only`: every write/command asks;
- * - `danger-full-access + never` (CI): everything allowed, never ask.
+ * - `danger-full-access + never` (CI): broad access without routine prompts;
+ *   the agent-owned sensitive-file gate still asks before listed paths.
  *
  * The approval channel is fail-closed (§12.2): a request with no responder
  * resolves to `rejected` — never to `allowed`.
@@ -56,9 +57,8 @@ export const PERMISSION_PRESETS = {
     allowWorkspaceInternalBash: false,
   },
   'danger-full-access': {
-    // 'never ask' (design.md §12.1): the '*' rule leaves no 'ask' decisions,
-    // so onAsk is moot — set to 'deny' to stay fail-closed for anything that
-    // still slips through as 'ask'.
+    // Broadly allow tools. The agent-owned sensitive-file path gate can still
+    // return 'ask'; onAsk stays deny so missing approval infrastructure fails closed.
     onAsk: 'deny',
     tools: { '*': 'allowed' },
     allowWorkspaceInternalBash: false,

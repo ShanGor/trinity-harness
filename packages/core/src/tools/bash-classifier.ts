@@ -1,10 +1,12 @@
+import { bashReferencesSensitiveFile } from './sensitive-files.js';
+
 /**
  * Bash command classification for the `workspace-write + ask` preset
  * (docs/design.md §12.1: workspace-internal writes are free, dangerous
  * commands ask). Purely lexical — no execution, no FS access — so it is
  * deterministic and unit-testable. Conservative by design: anything involving
- * redirections, pipes, command substitution, absolute paths or non-sandbox
- * tooling falls back to 'ask'.
+ * redirections, pipes, command substitution, absolute paths, sensitive-file
+ * references, or non-sandbox tooling falls back to 'ask'.
  */
 
 export type BashCommandClass = 'workspace-internal' | 'needs-approval';
@@ -26,6 +28,7 @@ export function classifyBashCommand(command: string | undefined): BashCommandCla
   if (cmd.length === 0) return 'needs-approval';
   if (SHELL_METACHARS.test(cmd)) return 'needs-approval';
   if (PATH_TRAVERSAL.test(cmd)) return 'needs-approval';
+  if (bashReferencesSensitiveFile(cmd)) return 'needs-approval';
   if (!SAFE_BINARIES.test(cmd)) return 'needs-approval';
   return 'workspace-internal';
 }

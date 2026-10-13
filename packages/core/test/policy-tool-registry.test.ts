@@ -54,6 +54,55 @@ describe('PolicyToolRegistry', () => {
     const registry = new PolicyToolRegistry(inner(), policy);
     expect(registry.decide(call('bash', { command: 'npm test' }))).toBe('allowed');
     expect(registry.decide(call('bash', { command: 'cat x | sh' }))).toBe('ask');
+    expect(registry.decide(call('bash', { command: 'cat .env' }))).toBe('ask');
+    expect(registry.decide(call('bash', { command: 'cat .env.example' }))).toBe('allowed');
+  });
+
+  it('requires agent approval for sensitive file reads even when read_file is allowed', () => {
+    const defaultPolicy = parsePermissionPolicy('workspace-write');
+    const registry = new PolicyToolRegistry(inner(), defaultPolicy);
+    expect(registry.decide(call('read_file', { path: 'src/app.ts' }))).toBe('allowed');
+    expect(registry.decide(call('read_file', { path: '.env' }))).toBe('ask');
+    expect(registry.decide(call('read_file', { path: 'keys/id_ed25519' }))).toBe('ask');
+    expect(registry.decide(call('read_file', { path: '.env.example' }))).toBe('allowed');
+    expect(
+      new PolicyToolRegistry(inner(), undefined).decide(call('read_file', { path: '.env' })),
+    ).toBe('ask');
+
+    const readAllowed = new PolicyToolRegistry(inner(), {
+      ...defaultPolicy,
+      tools: { read_file: 'allowed' },
+    });
+    expect(readAllowed.decide(call('read_file', { path: '.env.production' }))).toBe('ask');
+
+    const danger = new PolicyToolRegistry(inner(), parsePermissionPolicy('danger-full-access'));
+    expect(danger.decide(call('read_file', { path: '.env' }))).toBe('ask');
+
+    const denied = new PolicyToolRegistry(inner(), {
+      ...defaultPolicy,
+      tools: { read_file: 'denied' },
+    });
+    expect(denied.decide(call('read_file', { path: '.env' }))).toBe('denied');
+  });
+
+  it('does not execute a sensitive read directly without Loop approval', async () => {
+    const sandbox = new FakeSandbox();
+    sandbox.files.set('.env', 'TOKEN=fixture-value');
+    const core = new CoreToolRegistry(sandbox);
+    core.register(readFileTool);
+    const registry = new PolicyToolRegistry(core, parsePermissionPolicy('workspace-write'));
+    const req = call('read_file', { path: '.env' });
+    const ctx = { sessionId: 's', workspaceRoot: '/ws' };
+
+    const blocked = await registry.execute(req, ctx);
+    expect(blocked.isError).toBe(true);
+    expect(blocked.value).toMatchObject({
+      message: expect.stringContaining('requires agent approval'),
+    });
+
+    const approved = await registry.execute(req, { ...ctx, permissionGranted: true });
+    expect(approved.isError).toBe(false);
+    expect(approved.value).toMatchObject({ content: 'TOKEN=fixture-value' });
   });
 
   it('danger-full-access preset allows everything', () => {

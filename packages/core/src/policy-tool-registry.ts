@@ -11,6 +11,7 @@ import type {
 import { matchesCommandPrefix } from './tools/command-prefix.js';
 
 import { classifyBashCommand } from './tools/bash-classifier.js';
+import { bashReferencesSensitiveFile, isSensitiveFilePath } from './tools/sensitive-files.js';
 import { browserActionOperations } from '@trinity-harness/contracts';
 
 /**
@@ -22,8 +23,8 @@ import { browserActionOperations } from '@trinity-harness/contracts';
  * - `ask`     → return an `ask` verdict; the CALLER (Agent Loop) owns the
  *   human-in-the-loop round trip — a registry must never block on I/O.
  *
- * No policy preserves M1/M2 behavior except browser actions, which require
- * per-operation approval even in inline mode.
+ * No policy preserves M1/M2 behavior except browser actions and maintained
+ * sensitive-file paths, which require agent-owned approval.
  */
 export class PolicyToolRegistry implements ToolRegistry {
   constructor(
@@ -57,9 +58,21 @@ export class PolicyToolRegistry implements ToolRegistry {
         return policy?.tools[`browser.${operation}`] ?? policy?.tools['*'] ?? 'ask';
       }
     }
+    const configuredDecision = policy?.tools[call.name] ?? policy?.tools['*'];
+    if (configuredDecision === 'denied') return 'denied';
+    const readPath = (call.args as { path?: unknown } | null)?.path;
+    if (
+      (call.name === 'read_file' &&
+        typeof readPath === 'string' &&
+        isSensitiveFilePath(readPath)) ||
+      (call.name === 'bash' &&
+        bashReferencesSensitiveFile(
+          (call.args as { command?: unknown } | null)?.command as string | undefined,
+        ))
+    )
+      return 'ask';
     if (!policy) return 'allowed';
-    const decision =
-      policy.tools[call.name] ?? policy.tools['*'] ?? (call.name === 'bash' ? 'ask' : 'allowed');
+    const decision = configuredDecision ?? (call.name === 'bash' ? 'ask' : 'allowed');
     if (decision !== 'ask') return decision;
     if (
       call.name === 'bash' &&
@@ -82,9 +95,16 @@ export class PolicyToolRegistry implements ToolRegistry {
   }
 
   async execute(call: ToolCall, ctx: ToolContextInput): Promise<ToolResult> {
-    if (this.decide(call) === 'denied') {
+    const decision = this.decide(call);
+    if (decision === 'denied') {
       return {
         value: { message: `tool '${call.name}' is denied by the session permission policy` },
+        isError: true,
+      };
+    }
+    if (decision === 'ask' && !ctx.permissionGranted) {
+      return {
+        value: { message: `tool '${call.name}' requires agent approval before execution` },
         isError: true,
       };
     }

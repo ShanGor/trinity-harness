@@ -5,7 +5,7 @@ import { defineTool } from './define-tool.js';
 export const readFileTool = defineTool({
   name: 'read_file',
   description:
-    'Read a UTF-8 text file from the workspace. Returns truncated content (maxBytes) with a truncated flag.',
+    'Inspect a UTF-8 text file in the workspace. Prefer this over Bash commands such as cat, head, tail, sed, or grep when reading file contents. Reads of sensitive paths are checked by the agent and may require approval. Returns bounded content (maxBytes) with a truncated flag.',
   parameters: z.object({
     path: z.string().min(1).describe('Workspace-relative file path'),
     maxBytes: z.number().int().positive().optional().describe('Max bytes to return'),
@@ -60,7 +60,7 @@ export const globTool = defineTool({
 export const bashTool = defineTool({
   name: 'bash',
   description:
-    'Run a shell command via `bash -c` inside the workspace. Commands run with a timeout; exit code 124 means killed by timeout.',
+    'Run a shell command via `bash -c` inside the workspace. Use read_file to inspect workspace text files; sensitive-file access through Bash is approval-gated too. Reserve Bash for executing commands, tests, builds, and other shell tasks. Commands run with a timeout; exit code 124 means killed by timeout.',
   parameters: z.object({
     command: z.string().min(1),
     timeout_ms: z

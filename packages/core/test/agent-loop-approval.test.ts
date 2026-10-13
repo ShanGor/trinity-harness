@@ -13,6 +13,7 @@ import {
   CoreToolRegistry,
   MemorySessionStore,
   bashTool,
+  readFileTool,
   writeFileTool,
 } from '../src/index.js';
 import { FakeLLM, FakeSandbox, textChunks, toolCallThenFinish } from '../src/testing/index.js';
@@ -74,6 +75,58 @@ function setup(opts: {
 }
 
 describe('CoreAgentLoop permission gate (M3)', () => {
+  it('agent requests approval before reading a sensitive file', async () => {
+    const store = new MemorySessionStore();
+    const sandbox = new FakeSandbox();
+    sandbox.files.set('.env', 'TOKEN=synthetic-fixture-value');
+    const tools = new CoreToolRegistry(sandbox);
+    tools.register(readFileTool);
+    const requests: ApprovalRequest[] = [];
+    const llm = new FakeLLM(
+      () => toolCallThenFinish('read-sensitive', 'read_file', { path: '.env' }),
+      () => textChunks('Inspected the approved file.'),
+    );
+    const loop = new CoreAgentLoop({
+      llm,
+      model: 'fake/model',
+      tools,
+      store,
+      workspaceRoot: '/ws',
+      approvals: {
+        request: async (req) => {
+          requests.push(req);
+          return { approvalId: req.approvalId, outcome: 'allowed', decidedBy: 'u1' };
+        },
+      },
+    });
+
+    const outcome = await loop.run(
+      's-sensitive',
+      'inspect .env',
+      { emit: () => {} },
+      {
+        actor: 'tester',
+        policy: parsePermissionPolicy('workspace-write'),
+      },
+    );
+
+    expect(outcome.reason).toBe('completed');
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      sessionId: 's-sensitive',
+      toolCallId: 'read-sensitive',
+      toolName: 'read_file',
+    });
+    expect(requests[0]!.argsPreview).toContain('.env');
+    const log = await store.load('s-sensitive');
+    expect(log.findIndex((event) => event.type === 'approval/requested')).toBeLessThan(
+      log.findIndex((event) => event.type === 'approval/resolved'),
+    );
+    expect(
+      log.some((event) => event.type === 'tool/result' && event.callId === 'read-sensitive'),
+    ).toBe(true);
+  });
+
   it('allowed approval: tool runs, request + resolved are logged and emitted', async () => {
     const requests: ApprovalRequest[] = [];
     const { store, sinkEvents, run } = setup({

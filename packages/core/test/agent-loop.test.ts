@@ -6,6 +6,8 @@ import {
   CoreAgentLoop,
   CoreToolRegistry,
   MemorySessionStore,
+  bashTool,
+  readFileTool,
   writeFileTool,
 } from '../src/index.js';
 import {
@@ -45,6 +47,34 @@ class CollectingSink implements EventSink {
 const eventTypes = (events: SessionEvent[]) => events.map((e) => e.type);
 
 describe('CoreAgentLoop', () => {
+  it('guides workspace reads to read_file instead of Bash', async () => {
+    const llm = new FakeLLM(() => textChunks('Done.'));
+    const store = new MemorySessionStore();
+    const registry = new CoreToolRegistry(new FakeSandbox());
+    registry.register(readFileTool);
+    registry.register(bashTool);
+    const loop = new CoreAgentLoop({
+      llm,
+      model: 'fake/model',
+      systemPrompt: 'you are a test agent',
+      tools: registry,
+      store,
+      workspaceRoot: '/ws',
+    });
+
+    await loop.run('s1', 'inspect src/app.ts', new CollectingSink());
+
+    const request = llm.requests[0]!;
+    expect(request.system).toContain('use read_file');
+    expect(request.system).toContain('Sensitive-file reads are checked by the agent');
+    expect(request.system).toContain('do not invoke a separate approval tool');
+    expect(request.tools.map((tool) => tool.name)).toEqual(['read_file', 'bash']);
+    expect(request.tools[0]!.description).toContain('Prefer this over Bash');
+    expect(request.tools[1]!.description).toContain(
+      'Use read_file to inspect workspace text files',
+    );
+  });
+
   it('completes a tool-free turn with a single model call', async () => {
     const llm = new FakeLLM(() => textChunks('Hello!', ' How can I help?'));
     const { store, loop } = makeLoop(llm);

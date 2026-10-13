@@ -43,6 +43,7 @@ import {
 } from '../telemetry.js';
 import { browserDiagnosticBytes, resolveBrowserImage } from '../tools/browser-artifacts.js';
 import { matchesCommandPrefix } from '../tools/command-prefix.js';
+import { bashReferencesSensitiveFile } from '../tools/sensitive-files.js';
 import { progressGuidance } from './progress-guidance.js';
 import { toModelMessages } from './to-model-messages.js';
 import { answerGrounding } from './answer-grounding.js';
@@ -372,6 +373,7 @@ export class CoreAgentLoop implements AgentLoop {
             this.opts.systemPrompt,
             augmented,
             conclusion,
+            'For workspace text-file inspection, use read_file (and glob to locate files) instead of Bash commands such as cat, head, tail, sed, or grep. Reserve Bash for running commands, tests, builds, version-control operations, and other shell tasks. Sensitive-file reads are checked by the agent and may trigger the normal approval flow; call read_file directly when needed, do not invoke a separate approval tool or bypass the gate with Bash, and stop if access is rejected. Never repeat secret values in your final answer.',
             'Keep progress updates brief. The final answer must synthesize the user request and link factual claims to reference documents actually read, using Markdown links. Distinguish supported findings, inference and unresolved questions. The interface lists observed sources separately; do not invent citations or describe internal bookkeeping.',
           ]
             .filter((s) => s !== undefined)
@@ -588,16 +590,20 @@ export class CoreAgentLoop implements AgentLoop {
               }
               let decision = gate?.decide(call) ?? 'allowed';
               if (decision === 'ask' && call.name === 'bash') {
-                const grants = (await store.load(sessionId)).filter(
-                  (event) => event.type === 'approval/command_granted',
-                );
-                if (
-                  matchesCommandPrefix(
-                    (call.args as { command?: unknown } | null)?.command,
-                    grants.map((event) => event.prefix),
+                const commandValue = (call.args as { command?: unknown } | null)?.command;
+                const command = typeof commandValue === 'string' ? commandValue : undefined;
+                if (!bashReferencesSensitiveFile(command)) {
+                  const grants = (await store.load(sessionId)).filter(
+                    (event) => event.type === 'approval/command_granted',
+                  );
+                  if (
+                    matchesCommandPrefix(
+                      command,
+                      grants.map((event) => event.prefix),
+                    )
                   )
-                )
-                  decision = 'allowed';
+                    decision = 'allowed';
+                }
               }
               if (decision === 'denied') {
                 presolved.set(call.id, {
