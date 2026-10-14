@@ -715,56 +715,75 @@ export default function App() {
                   unrecordedTurns={unrecordedTurns}
                 />
               )}
-              <Select
-                size="small"
-                value={workspaceValue(workspace)}
-                onChange={(v) =>
-                  setWorkspace(
-                    v === 'personal'
-                      ? { scope: 'personal' }
-                      : { scope: 'team', teamId: v.slice(5) },
-                  )
-                }
-                disabled={busy || !!sessionRef.current}
-                options={workspaceOptions}
-                style={{ width: 180 }}
-                title="Workspace for the next session"
-                aria-label="Workspace for the next session"
-              />
-              {workspace.scope === 'personal' && (
+              {!sessionId && (
+                <>
+                  <Select
+                    size="small"
+                    value={workspaceValue(workspace)}
+                    onChange={(v) =>
+                      setWorkspace(
+                        v === 'personal'
+                          ? { scope: 'personal' }
+                          : { scope: 'team', teamId: v.slice(5) },
+                      )
+                    }
+                    disabled={busy || !!sessionRef.current}
+                    options={workspaceOptions}
+                    style={{ width: 180 }}
+                    title="Workspace for the next session"
+                    aria-label="Workspace for the next session"
+                  />
+                  {workspace.scope === 'personal' && (
+                    <Button
+                      size="small"
+                      disabled={busy || !!sessionRef.current}
+                      onClick={() => {
+                        setBrowsePath(workspace.path ?? '');
+                        setFolderPickerOpen(true);
+                      }}
+                    >
+                      {workspace.path || 'Choose folder'}
+                    </Button>
+                  )}
+                  <Select
+                    size="small"
+                    aria-label="Tool permissions for the next session"
+                    value={policy}
+                    onChange={setPolicy}
+                    disabled={busy || !!sessionRef.current}
+                    options={[
+                      { value: 'workspace-write', label: 'Workspace write · ask' },
+                      { value: 'read-only', label: 'Read only' },
+                      { value: 'danger-full-access', label: 'Full access · no approvals' },
+                    ]}
+                    style={{ width: 210 }}
+                  />
+                </>
+              )}
+              <Dropdown
+                menu={{
+                  items: [
+                    { key: 'teams', label: 'Teams' },
+                    { key: 'sign-out', label: 'Sign out', danger: true },
+                  ],
+                  onClick: ({ key }) => {
+                    if (key === 'teams') setTeamsOpen(true);
+                    if (key === 'sign-out') logout();
+                  },
+                }}
+                placement="bottomRight"
+              >
                 <Button
                   size="small"
-                  disabled={busy || !!sessionRef.current}
-                  onClick={() => {
-                    setBrowsePath(workspace.path ?? '');
-                    setFolderPickerOpen(true);
-                  }}
+                  type="text"
+                  className="account-menu-trigger"
+                  aria-label={`Account menu for ${user.email}`}
+                  title={`${user.email} (${user.role})`}
                 >
-                  {workspace.path || 'Choose folder'}
+                  <span className="account-menu-label">{user.email}</span>
+                  <span aria-hidden="true">⌄</span>
                 </Button>
-              )}
-              <Button size="small" onClick={() => setTeamsOpen(true)}>
-                Teams
-              </Button>
-              <Select
-                size="small"
-                aria-label="Tool permissions for the next session"
-                value={policy}
-                onChange={setPolicy}
-                disabled={busy || !!sessionRef.current}
-                options={[
-                  { value: 'workspace-write', label: 'Workspace write · ask' },
-                  { value: 'read-only', label: 'Read only' },
-                  { value: 'danger-full-access', label: 'Full access · no approvals' },
-                ]}
-                style={{ width: 210 }}
-              />
-              <Typography.Text type="secondary" className="user-label">
-                {user.email} ({user.role})
-              </Typography.Text>
-              <Button size="small" onClick={logout}>
-                Sign out
-              </Button>
+              </Dropdown>
             </Flex>
           </Flex>
           <ApprovalModal

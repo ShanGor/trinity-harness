@@ -389,13 +389,23 @@ describe('chat typing and streaming performance', () => {
     expect(
       container.querySelector('[aria-label="Tool permissions for the next session"]'),
     ).not.toBeNull();
+    expect(
+      container.querySelector('[aria-label="Account menu for user@example.com"]'),
+    ).not.toBeNull();
 
     await act(async () => title.focus());
     expect(document.activeElement).toBe(title);
     await click(title);
     expect(title.getAttribute('aria-current')).toBe('true');
     expect(container.querySelectorAll('.history-title[aria-current="true"]')).toHaveLength(1);
+    expect(container.querySelector('[aria-label="Workspace for the next session"]')).toBeNull();
+    expect(
+      container.querySelector('[aria-label="Tool permissions for the next session"]'),
+    ).toBeNull();
     expect(fake.onEvent).toBeTypeOf('function');
+
+    await click(container.querySelector('.new-chat-button'));
+    expect(container.querySelector('[aria-label="Workspace for the next session"]')).not.toBeNull();
   });
 
   it('starts with history collapsed on phones and lets the user restore it', async () => {
