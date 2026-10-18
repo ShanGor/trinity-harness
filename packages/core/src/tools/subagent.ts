@@ -73,6 +73,7 @@ export function createSubagentTool(opts: SubagentToolOptions): ToolDefinition {
           actor: `subagent:${ctx.sessionId}`,
           tenantId: ctx.tenantId,
           policy,
+          taskBudget: ctx.taskBudget,
         });
       } finally {
         for (const entry of usage) await ctx.recordUsage?.(entry);

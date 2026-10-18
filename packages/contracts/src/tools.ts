@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import type { ModelUsage } from './usage.js';
+import type { TaskBudgetScope } from './task.js';
 
 import type { SandboxPort } from './sandbox.js';
 import type { ToolSchema } from './llm.js';
@@ -21,6 +22,7 @@ export interface ToolResult<V = unknown> {
 }
 
 export interface ToolContext {
+  taskBudget?: TaskBudgetScope | undefined;
   tenantId?: string | undefined;
   recordUsage?: ((usage: ModelUsage) => Promise<void>) | undefined;
   sessionId: string;

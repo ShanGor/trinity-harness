@@ -231,6 +231,8 @@ export class AiSdkGateway implements LLMPort {
     }
 
     const result = streamText({
+      maxRetries: 0,
+      ...(req.maxOutputTokens !== undefined ? { maxOutputTokens: req.maxOutputTokens } : {}),
       model: factory(modelId),
       ...(req.system !== undefined ? { system: req.system } : {}),
       messages: await toAiMessages(req.messages, req.resolveBlob),

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { modelUsageSchema } from './usage.js';
+import { taskEventSchemas } from './task.js';
 
 import { skillSummarySchema, skillSnapshotSchema } from './skills.js';
 import { answerCitationListSchema } from './citations.js';
@@ -79,6 +80,8 @@ export const assistantMessageEventSchema = z.object({
   type: z.literal('message/assistant'),
   surfaceOp: z.enum(['append', 'replace']),
   phase: z.enum(['progress', 'final']).optional(),
+  /** Partial answer retained for bounded stream/output-limit continuation. */
+  continuation: z.boolean().optional(),
   citationList: answerCitationListSchema.optional(),
   content: z.array(contentBlockSchema),
 });
@@ -105,6 +108,8 @@ export const compactionSummaryEventSchema = z.object({
   fromSeq: z.number().int().positive(),
   toSeq: z.number().int().positive(),
   summary: z.string(),
+  /** A rolling checkpoint incorporates all previous summaries. */
+  checkpoint: z.boolean().optional(),
 });
 
 export const approvalRequestedEventSchema = z.object({
@@ -163,6 +168,7 @@ export const skillLoadedEventSchema = z.object({
  */
 export const sessionEventSchema = z.discriminatedUnion('type', [
   modelUsageEventSchema,
+  ...taskEventSchemas.map((schema) => schema.extend(baseFields)),
   skillCatalogEventSchema,
   skillLoadedEventSchema,
   sessionCreatedEventSchema,

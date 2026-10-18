@@ -11,6 +11,16 @@ data:
   MODEL: {{ .Values.config.model | quote }}
   SYSTEM_PROMPT: {{ .Values.config.systemPrompt | quote }}
   DEFAULT_PERMISSION_POLICY: {{ .Values.config.defaultPermissionPolicy | quote }}
+  MAX_TURN_STEPS: {{ .Values.config.maxTurnSteps | quote }}
+  MODEL_CONTEXT_TOKENS: {{ .Values.config.modelContextTokens | quote }}
+  MODEL_OUTPUT_TOKENS: {{ .Values.config.modelOutputTokens | quote }}
+  COMPACTION_CONTEXT_TOKENS: {{ .Values.config.compactionContextTokens | quote }}
+  TASK_MAX_REQUESTS: {{ .Values.config.taskMaxRequests | quote }}
+  TASK_MAX_TOKENS: {{ .Values.config.taskMaxTokens | quote }}
+  TASK_MAX_DURATION_MS: {{ .Values.config.taskMaxDurationMs | quote }}
+  {{- if .Values.config.taskMaxCost }}
+  TASK_MAX_COST: {{ .Values.config.taskMaxCost | quote }}
+  {{- end }}
   CONTEXT_MAX_TOKENS: {{ .Values.config.contextMaxTokens | quote }}
   CONTEXT_KEEP_TOKENS: {{ .Values.config.contextKeepTokens | quote }}
   SPILL_THRESHOLD_BYTES: {{ .Values.config.spillThresholdBytes | quote }}

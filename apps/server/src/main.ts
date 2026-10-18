@@ -5,6 +5,9 @@ import {
   AiSdkGateway,
   bashTool,
   ContextManager,
+  EventTaskExecution,
+  createTaskTool,
+  createSubagentTool,
   CoreAgentLoop,
   CoreToolRegistry,
   createLspTools,
@@ -102,6 +105,7 @@ async function main(): Promise<void> {
         browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
       });
       registry.register(createSkillTool(skills));
+      registry.register(createTaskTool(store));
       registry.register(createResearchTool(store, blobStore));
       registry.register(
         createBrowserTool({
@@ -143,6 +147,58 @@ async function main(): Promise<void> {
           registry.register(tool);
         }
       }
+      registry.register(
+        createSubagentTool({
+          createLoop: () => {
+            const childStore = new MemorySessionStore();
+            const childSkills = new SkillRuntime(skillCatalog, childStore, {
+              browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
+            });
+            const childTools = new CoreToolRegistry(sandbox);
+            for (const tool of [
+              readFileTool,
+              writeFileTool,
+              editFileTool,
+              globTool,
+              bashTool,
+              createReadBlobTool(blobStore),
+              createSkillTool(childSkills),
+              createTaskTool(childStore),
+              createResearchTool(childStore, blobStore),
+              createBrowserTool({ store: childStore, blobs: blobStore, now: () => new Date() }),
+            ])
+              childTools.register(tool);
+            if (lsp) for (const tool of createLspTools(lsp)) childTools.register(tool);
+            return new CoreAgentLoop({
+              llm,
+              model: env.MODEL,
+              pricing: env.modelPricing,
+              systemPrompt: env.SYSTEM_PROMPT,
+              tools: childTools,
+              store: childStore,
+              skills: childSkills,
+              workspaceRoot: root,
+              maxSteps: 16,
+              verification: true,
+              maxContextTokens: env.MODEL_CONTEXT_TOKENS,
+              maxOutputTokens: env.MODEL_OUTPUT_TOKENS,
+              usage,
+              resolveBlob,
+              spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
+              context: new ContextManager({
+                llm,
+                model: env.COMPACTION_MODEL ?? env.MODEL,
+                store: childStore,
+                maxTokens: env.CONTEXT_MAX_TOKENS,
+                keepTokens: env.CONTEXT_KEEP_TOKENS,
+                windowTokens: env.MODEL_CONTEXT_TOKENS,
+                outputTokens: env.MODEL_OUTPUT_TOKENS,
+                summaryWindowTokens: env.COMPACTION_CONTEXT_TOKENS ?? env.MODEL_CONTEXT_TOKENS,
+              }),
+            });
+          },
+        }),
+      );
       assembly = { sandbox, registry, skills };
       assemblies.set(root, assembly);
     }
@@ -179,6 +235,24 @@ async function main(): Promise<void> {
     model: env.MODEL,
     pricing: env.modelPricing,
     maxSteps: env.MAX_TURN_STEPS,
+    verification: true,
+    maxContextTokens: env.MODEL_CONTEXT_TOKENS,
+    maxOutputTokens: env.MODEL_OUTPUT_TOKENS,
+    execution: new EventTaskExecution(
+      store,
+      {
+        maxSteps: env.MAX_TURN_STEPS,
+        maxRequests: env.TASK_MAX_REQUESTS,
+        maxTokens: env.TASK_MAX_TOKENS,
+        maxDurationMs: env.TASK_MAX_DURATION_MS,
+        reserveRequests: 3,
+        reserveTokens: 16_384,
+        maxCost: env.TASK_MAX_COST
+          ? [{ currency: env.TASK_MAX_COST.slice(0, 3), amount: env.TASK_MAX_COST.slice(4) }]
+          : [],
+      },
+      env.modelPricing,
+    ),
     systemPrompt: env.SYSTEM_PROMPT,
     tools: assemblyFor(workspaceRoot).registry,
     skills: assemblyFor(workspaceRoot).skills,
@@ -209,6 +283,9 @@ async function main(): Promise<void> {
       store,
       maxTokens: env.CONTEXT_MAX_TOKENS,
       keepTokens: env.CONTEXT_KEEP_TOKENS,
+      windowTokens: env.MODEL_CONTEXT_TOKENS,
+      outputTokens: env.MODEL_OUTPUT_TOKENS,
+      summaryWindowTokens: env.COMPACTION_CONTEXT_TOKENS ?? env.MODEL_CONTEXT_TOKENS,
     });
     return new CoreAgentLoop({
       ...m4LoopExtras(workspaceRoot),

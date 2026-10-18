@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ModelUsage } from './usage.js';
+import type { TaskBudgetScope } from './task.js';
 
 export const DEFAULT_TURN_MAX_STEPS = 64;
 export const turnStepBudgetSchema = z.coerce
@@ -54,6 +55,8 @@ export interface EventSink {
 }
 
 export interface RunTurnOptions {
+  /** Inherited parent task allowance; never supplied by model arguments. */
+  taskBudget?: TaskBudgetScope | undefined;
   signal?: AbortSignal | undefined;
   /** Recorded as the actor of every event this turn appends (M2 audit trail). */
   actor?: string | undefined;

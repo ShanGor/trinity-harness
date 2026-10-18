@@ -37,7 +37,7 @@ afterEach(async () => {
 });
 
 describe('CoreAgentLoop M4: compaction between steps', () => {
-  it('compacts over-budget HISTORY mid-turn; the current exchange is kept', async () => {
+  it('compacts history and an oversized active exchange while preserving the request', async () => {
     const store = new MemorySessionStore();
     const sandbox = new FakeSandbox();
     sandbox.files.set('a.txt', 'x'.repeat(300));
@@ -66,6 +66,7 @@ describe('CoreAgentLoop M4: compaction between steps', () => {
     const llm = new FakeLLM(
       () => textChunks('SUMMARY'),
       () => toolCallThenFinish('c1', 'read_file', { path: 'a.txt' }),
+      () => textChunks('READ SUMMARY'),
       () => textChunks('final answer'),
     );
     const context = new ContextManager({
@@ -100,7 +101,9 @@ describe('CoreAgentLoop M4: compaction between steps', () => {
     expect(lastText).not.toContain('o'.repeat(100));
     expect(lastText).not.toContain('q'.repeat(100));
     expect(lastText).toContain('SUMMARY');
-    expect(lastText).toContain('x'.repeat(100)); // current exchange retained
+    expect(lastText).not.toContain('x'.repeat(100)); // active tool history is summarized
+    expect(lastText).toContain('start');
+    expect(llm.requests[2]!.messages[0]!.content).toContain('x'.repeat(100));
   });
 
   it('emits context/compacted on the sink when a compaction lands', async () => {

@@ -19,6 +19,7 @@ export function turnMessageProjection(events: readonly SessionEvent[]): {
   const progress = new Set<number>();
   const terminalFallbacks = new Map<number, string>();
   const compacted = compactionRanges(events);
+  const rolling = events.some((event) => event.type === 'compaction/summary' && event.checkpoint);
   const lastTerminal = events.reduce(
     (last, event, index) => (event.type === 'turn/end' ? index : last),
     -1,
@@ -63,7 +64,11 @@ export function turnMessageProjection(events: readonly SessionEvent[]): {
     candidate = -1;
   };
   events.forEach((event, i) => {
-    if (isCompacted(i + 1, compacted)) return;
+    if (
+      isCompacted(i + 1, compacted) &&
+      !(rolling && (event.type === 'message/user' || event.type === 'turn/end'))
+    )
+      return;
     if (event.type === 'message/user') {
       close(i);
       start = i;
@@ -142,6 +147,7 @@ export function compactionRanges(events: readonly SessionEvent[]): CompactionRan
   const ranges: CompactionRange[] = [];
   events.forEach((event, i) => {
     if (event.type === 'compaction/summary') {
+      if (event.checkpoint) ranges.length = 0;
       ranges.push({
         fromSeq: event.fromSeq,
         toSeq: event.toSeq,
@@ -180,6 +186,9 @@ export function compactionSummaryText(summary: string): string {
 export function foldSurface(events: readonly SessionEvent[]): SurfaceEntry[] {
   const surface: SurfaceEntry[] = [];
   const ranges = compactionRanges(events);
+  const latestUser = events.some((event) => event.type === 'compaction/summary' && event.checkpoint)
+    ? events.reduce((last, event, index) => (event.type === 'message/user' ? index : last), -1)
+    : -1;
   const { closed, finals, progress } = turnMessageProjection(events);
   let emitIdx = 0;
   let activeIdx = -1; // range currently covering events
@@ -201,7 +210,12 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceEntry[] {
       activeIdx = emitIdx;
       emitIdx += 1;
     }
-    if (activeIdx >= 0 && seq >= ranges[activeIdx]!.fromSeq && seq <= ranges[activeIdx]!.toSeq) {
+    if (
+      i !== latestUser &&
+      activeIdx >= 0 &&
+      seq >= ranges[activeIdx]!.fromSeq &&
+      seq <= ranges[activeIdx]!.toSeq
+    ) {
       return; // covered by the current compaction range
     }
     if (event.type === 'compaction/summary') {

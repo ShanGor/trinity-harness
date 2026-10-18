@@ -54,6 +54,10 @@ export interface LLMRequest {
   messages: ConversationMessage[];
   tools: ToolSchema[];
   signal?: AbortSignal | undefined;
+  /** Bounded output, including reasoning where the provider supports it. */
+  maxOutputTokens?: number | undefined;
+  /** Conservative request estimate, calibrated by prior provider usage when available. */
+  estimatedInputTokens?: number | undefined;
   /**
    * M4: resolves `blob://` URIs (multimodal blocks, spilled content) to bytes
    * so the gateway can encode provider-native image/file parts. Provided by

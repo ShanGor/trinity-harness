@@ -103,6 +103,14 @@ config:
   model: 'anthropic/claude-sonnet-4-20250514'
   systemPrompt: 'You are Trinity, a software engineering agent.'
   defaultPermissionPolicy: 'workspace-write'
+  maxTurnSteps: 64
+  modelContextTokens: 200000 # Must match the routed model.
+  modelOutputTokens: 8192
+  compactionContextTokens: 200000 # Set separately when using a smaller summarizer.
+  taskMaxRequests: 128
+  taskMaxTokens: 2000000
+  taskMaxDurationMs: 1800000
+  taskMaxCost: '' # Optional currency ceiling, e.g. USD:1.50; never model rates.
   contextMaxTokens: 160000
   contextKeepTokens: 40000
   spillThresholdBytes: 50000

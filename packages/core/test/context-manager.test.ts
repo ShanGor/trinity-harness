@@ -179,7 +179,7 @@ describe('ContextManager', () => {
 
     expect(result.compacted).toBe(true);
     expect(result.fromSeq).toBe(1);
-    expect(result.toSeq).toBe(2); // whole first exchange only
+    expect(result.toSeq).toBe(4); // retain the requested bounded tail
 
     const log = await store.load('s1');
     expect(log.at(-1)!.type).toBe('compaction/summary');
@@ -193,18 +193,25 @@ describe('ContextManager', () => {
     expect(messages.at(-1)).toEqual(expect.objectContaining({ role: 'assistant' }));
   });
 
-  it('never compacts the only/latest exchange (in-flight prompt stays)', async () => {
+  it('compacts a single long exchange while retaining the original user request', async () => {
     const store = new MemorySessionStore();
     await store.append('s1', [
       user('only prompt'.padEnd(500, '!')),
       assistant('long '.padEnd(500, 'y')),
     ]);
-    const llm = new FakeLLM(); // summarizer must never be called
+    const llm = new FakeLLM(() =>
+      textChunks('Checkpoint: preserve the user request and ongoing work'),
+    );
     const result = await managerFor(store, llm).compact('s1');
-    expect(result.compacted).toBe(false);
+    expect(result.compacted).toBe(true);
+    expect(
+      toModelMessages(await store.load('s1')).some((message) =>
+        message.content.startsWith('only prompt'),
+      ),
+    ).toBe(true);
   });
 
-  it('applies a second compaction after the first without overlapping ranges', async () => {
+  it('merges previous checkpoints instead of accumulating summaries', async () => {
     const store = new MemorySessionStore();
     await store.append('s1', [
       user('1'.repeat(50)),
@@ -220,11 +227,14 @@ describe('ContextManager', () => {
     const manager = managerFor(store, llm, 120, 30);
     const first = await manager.compact('s1');
     expect(first.compacted).toBe(true);
+    await store.append('s1', [assistant('new evidence'.repeat(50))]);
     const second = await manager.compact('s1');
     expect(second.compacted).toBe(true);
-    expect(second.fromSeq).toBeGreaterThan(first.toSeq!);
+    expect(second.fromSeq).toBe(1);
+    expect(second.toSeq).toBeGreaterThan(first.toSeq!);
+    expect(llm.requests[1]!.messages[0]!.content).toContain('sum');
     const ranges = toModelMessages(await store.load('s1'));
-    expect(ranges.filter((m) => m.content.includes('sum'))).toHaveLength(2);
+    expect(ranges.filter((m) => m.content.includes('sum'))).toHaveLength(1);
   });
 
   it('sends the dropped range to the summarizer', async () => {
@@ -250,5 +260,104 @@ describe('ContextManager', () => {
     expect(seen!.messages[0]!.content).toContain(droppedUser);
     expect(seen!.messages[0]!.content).toContain(droppedAssistant);
     expect(seen!.system).toContain('compact');
+  });
+});
+
+describe('checkpoint safety and bounded summarization', () => {
+  it.each(['empty', 'truncated', 'interrupted'] as const)(
+    'retains original history after an %s summary',
+    async (kind) => {
+      const store = new MemorySessionStore();
+      await store.append('s', [user('request'), assistant('evidence'.repeat(100))]);
+      const before = await store.load('s');
+      const llm = new FakeLLM(() =>
+        kind === 'interrupted'
+          ? [{ kind: 'text-delta', text: 'stream ended prematurely' }]
+          : kind === 'empty'
+            ? textChunks('')
+            : [
+                { kind: 'text-delta', text: 'incomplete summary' },
+                { kind: 'finish', reason: 'length' },
+              ],
+      );
+      const manager = new ContextManager({
+        store,
+        llm,
+        model: 'fake',
+        maxTokens: 10,
+        keepTokens: 0,
+      });
+      await expect(manager.compact('s')).rejects.toThrow();
+      expect(await store.load('s')).toEqual(before);
+    },
+  );
+  it('chunks a large single tool result to fit a smaller summarizer window', async () => {
+    const store = new MemorySessionStore();
+    await store.append('s', [
+      user('Keep this requirement'),
+      {
+        eventId: id(),
+        at: now,
+        type: 'tool/call',
+        callId: 'large',
+        name: 'read_file',
+        args: { path: 'a' },
+      },
+      {
+        eventId: id(),
+        at: now,
+        type: 'tool/result',
+        callId: 'large',
+        isError: false,
+        value: { content: 'large observation '.repeat(2000) },
+      },
+    ]);
+    const llm = new FakeLLM(
+      ...Array.from(
+        { length: 20 },
+        () => () => textChunks('Requirements, evidence and next action retained.'),
+      ),
+    );
+    const manager = new ContextManager({
+      store,
+      llm,
+      model: 'small',
+      maxTokens: 100,
+      keepTokens: 0,
+      summaryWindowTokens: 4096,
+      outputTokens: 256,
+    });
+    expect((await manager.compact('s')).compacted).toBe(true);
+    expect(llm.requests.length).toBeGreaterThan(1);
+    for (const request of llm.requests) {
+      expect(request.messages[0]!.content.length).toBeLessThan(6500);
+      expect(request.maxOutputTokens).toBe(256);
+    }
+    const projected = toModelMessages(await store.load('s'));
+    expect(projected.some((message) => message.content === 'Keep this requirement')).toBe(true);
+    expect(projected.filter((message) => message.role === 'tool')).toHaveLength(0);
+  });
+  it('can checkpoint a recovered unknown tool outcome without executing it', async () => {
+    const store = new MemorySessionStore();
+    await store.append('s', [
+      user('resume safely'),
+      {
+        eventId: id(),
+        at: now,
+        type: 'tool/call',
+        callId: 'unknown',
+        name: 'bash',
+        args: { command: 'effect' },
+      },
+      assistant('more evidence'.repeat(100)),
+    ]);
+    const llm = new FakeLLM((request) => {
+      expect(request.messages[0]!.content).toContain('outcome is unknown');
+      return textChunks('An earlier operation has unknown outcome; inspect before retrying.');
+    });
+    const manager = new ContextManager({ store, llm, model: 'fake', maxTokens: 10, keepTokens: 0 });
+    expect((await manager.compact('s')).compacted).toBe(true);
+    const replayed = toModelMessages(await store.load('s'));
+    expect(replayed[0]!.content).toContain('unknown outcome');
   });
 });

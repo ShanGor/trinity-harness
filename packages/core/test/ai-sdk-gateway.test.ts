@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { LLMRequest } from '@trinity-harness/contracts';
 import type { LanguageModel } from 'ai';
+import { APICallError } from 'ai';
 
 import { AiSdkGateway, defaultProviders } from '../src/index.js';
 
@@ -63,6 +64,44 @@ const MINIMAL_OUTPUT = [
 ];
 
 describe('AiSdkGateway configuration', () => {
+  it('passes the fitted output limit to the provider', async () => {
+    const captured: CapturedCall = {};
+    const gateway = new AiSdkGateway({ fake: () => fakeModel(MINIMAL_OUTPUT, captured) });
+    for await (const chunk of await gateway.stream({
+      ...baseRequest,
+      model: 'fake/model',
+      messages: [{ role: 'user', content: 'test' }],
+      maxOutputTokens: 321,
+    }))
+      void chunk;
+    expect(captured.options?.maxOutputTokens).toBe(321);
+  });
+
+  it('leaves transient retries to the durable loop instead of retrying invisibly', async () => {
+    let attempts = 0;
+    const model = fakeModel([], {});
+    if (typeof model === 'string') throw new Error('Expected an in-memory provider model');
+    model.doStream = async () => {
+      attempts++;
+      throw new APICallError({
+        message: 'temporarily unavailable',
+        url: 'https://provider.invalid',
+        requestBodyValues: {},
+        statusCode: 503,
+        isRetryable: true,
+      });
+    };
+    const gateway = new AiSdkGateway({ fake: () => model });
+    await expect(async () => {
+      for await (const chunk of await gateway.stream({
+        ...baseRequest,
+        model: 'fake/model',
+        messages: [{ role: 'user', content: 'test' }],
+      }))
+        void chunk;
+    }).rejects.toThrow();
+    expect(attempts).toBe(1);
+  });
   afterEach(() => {
     vi.unstubAllEnvs();
   });

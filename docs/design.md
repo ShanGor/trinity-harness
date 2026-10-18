@@ -44,22 +44,22 @@
 
 ## 3. 技术栈
 
-| 层              | 选型                                        | 理由                                                                                                 |
-| --------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| 语言            | TypeScript（Node.js 22+，ESM）              | 全栈同构；AI SDK 生态最成熟                                                                          |
-| AI 抽象         | **Vercel AI SDK**（`ai` + provider 包）     | 统一 `generateText/streamText` 接口，天然支持工具调用、多模态、流式                                  |
-| 前端            | **React 19** + **Ant Design 5**             | antd 提供企业级组件（表格、审批流、表单），省去大量开发                                              |
-| 前端构建        | Vite                                        |                                                                                                      |
-| 后端框架        | Fastify（HTTP + SSE）                       | 轻量、高性能、schema-first                                                                           |
-| 数据库          | **PostgreSQL 16+**                          | 会话事件、用户、审计、配额（pgvector 预留）                                                          |
-| 缓存/事件       | **Redis 7+**（Stream + Pub/Sub + 分布式锁） | Stream 做事件总线，Pub/Sub 做低延迟信号                                                              |
-| 任务队列        | BullMQ（基于 Redis）                        | Agent 任务异步调度、重试                                                                             |
-| ORM             | Drizzle（**Drizzle Kit 管理迁移**）         | 类型安全、轻量；`drizzle-kit generate` 生成 SQL 迁移文件、`drizzle-kit migrate` 应用，禁止运行时改表 |
-| RPC/事件 Schema | Zod（单 schema 库，前后端共享）             | 与 AI SDK、Fastify 天然配合                                                                          |
-| K8s             | 原生 manifests（或 Helm）                   |                                                                                                      |
-| 可观测性        | OpenTelemetry + Prometheus                  |                                                                                                      |
-| LSP             | `vscode-languageserver-protocol` 客户端库   |                                                                                                      |
-| 包管理器        | **pnpm（主）**，同时兼容 **npm**            | 见下方说明                                                                                           |
+| 层              | 选型                                              | 理由                                                                                                 |
+| --------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 语言            | TypeScript（Node.js 22+，ESM，ES2023 标准库类型） | 全栈同构；AI SDK 生态最成熟                                                                          |
+| AI 抽象         | **Vercel AI SDK**（`ai` + provider 包）           | 统一 `generateText/streamText` 接口，天然支持工具调用、多模态、流式                                  |
+| 前端            | **React 19** + **Ant Design 5**                   | antd 提供企业级组件（表格、审批流、表单），省去大量开发                                              |
+| 前端构建        | Vite                                              |                                                                                                      |
+| 后端框架        | Fastify（HTTP + SSE）                             | 轻量、高性能、schema-first                                                                           |
+| 数据库          | **PostgreSQL 16+**                                | 会话事件、用户、审计、配额（pgvector 预留）                                                          |
+| 缓存/事件       | **Redis 7+**（Stream + Pub/Sub + 分布式锁）       | Stream 做事件总线，Pub/Sub 做低延迟信号                                                              |
+| 任务队列        | BullMQ（基于 Redis）                              | Agent 任务异步调度、重试                                                                             |
+| ORM             | Drizzle（**Drizzle Kit 管理迁移**）               | 类型安全、轻量；`drizzle-kit generate` 生成 SQL 迁移文件、`drizzle-kit migrate` 应用，禁止运行时改表 |
+| RPC/事件 Schema | Zod（单 schema 库，前后端共享）                   | 与 AI SDK、Fastify 天然配合                                                                          |
+| K8s             | 原生 manifests（或 Helm）                         |                                                                                                      |
+| 可观测性        | OpenTelemetry + Prometheus                        |                                                                                                      |
+| LSP             | `vscode-languageserver-protocol` 客户端库         |                                                                                                      |
+| 包管理器        | **pnpm（主）**，同时兼容 **npm**                  | 见下方说明                                                                                           |
 
 **包管理器约定（pnpm 为主、npm 兼容）：**
 
@@ -152,24 +152,24 @@ trinity-harness/
 
 ### 5.1 模块总览
 
-| 模块                    | 职责                                                                                    | 关键依赖（仅 contracts）                                        |
-| ----------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `LLM Gateway`           | 统一模型访问：流式、工具调用、多模态、重试、计量                                        | `ModelProvider`                                                 |
-| `Agent Loop`            | turn/step 驱动、工具调度、并发控制、取消                                                | `ToolRegistry`、`SessionStore`、`LLMPort`、`ApprovalPort`       |
-| `Tool Runtime`          | 工具注册、参数校验、执行管线（pre/execute/post）；有界 browser reading；上线边界见 §8.2 | `SandboxPort`、`BrowserAccessPort`、`BlobStore`、`SessionStore` |
-| `Session Core`          | 事件溯源日志、消息投影、压缩（compaction）、fork                                        | `EventBus`                                                      |
-| `Context Manager`       | 上下文压力检测、压缩、溢出文件化（spill）                                               | `LLMPort`、`SessionStore`                                       |
-| `Skill Runtime`         | SKILL.md 发现、渐进加载、显式调用、资源读取与指令快照回放（core/skills）                | `SkillCatalogPort`、`SkillRuntimePort`、`SessionStore`          |
-| `LSP Service`           | 语言服务接入：诊断、符号、跳转、格式化                                                  | （对 Loop 暴露为工具）                                          |
-| `Permission & Approval` | 工具审批、策略判定、审批持久化                                                          | `EventBus`                                                      |
-| `Audit`                 | 全链路审计事件采集与查询                                                                | `EventBus`                                                      |
-| `Multimodal`            | 图片/文档解析、附件存储、内容分块                                                       | `BlobStore`                                                     |
-| `Sandbox`               | 命令执行与文件系统隔离（先容器内，预留 gVisor/Firecracker）                             | —                                                               |
-| `Observability`         | OTel 埋点（api 全局）+ SDK 引导（OTLP/Prometheus 导出）                                 | `@opentelemetry/api`                                            |
-| `Identity & Tenant`     | 用户、租户、RBAC、配额                                                                  | PostgreSQL                                                      |
-| `Event Bus`             | Redis Stream 封装：发布、消费组、重放                                                   | Redis                                                           |
-| `API Server`            | REST/SSE 网关、`/acp` HTTP binding、会话控制、配置                                      | 以上全部（通过 DI）                                             |
-| `ACP Adapter`           | ACP 协议 ↔ 内部服务的翻译层                                                             | `API Server`（内部 SDK）                                        |
+| 模块                    | 职责                                                                                    | 关键依赖（仅 contracts）                                                       |
+| ----------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `LLM Gateway`           | 统一模型访问：流式、工具调用、多模态、重试、计量                                        | `ModelProvider`                                                                |
+| `Agent Loop`            | turn/step 驱动、工具调度、并发控制、取消、预算预留与验收                                | `ToolRegistry`、`SessionStore`、`LLMPort`、`ApprovalPort`、`TaskExecutionPort` |
+| `Tool Runtime`          | 工具注册、参数校验、执行管线（pre/execute/post）；有界 browser reading；上线边界见 §8.2 | `SandboxPort`、`BrowserAccessPort`、`BlobStore`、`SessionStore`                |
+| `Session Core`          | 事件溯源日志、消息投影、压缩（compaction）、fork                                        | `EventBus`                                                                     |
+| `Context Manager`       | 上下文压力检测、压缩、溢出文件化（spill）                                               | `LLMPort`、`SessionStore`                                                      |
+| `Skill Runtime`         | SKILL.md 发现、渐进加载、显式调用、资源读取与指令快照回放（core/skills）                | `SkillCatalogPort`、`SkillRuntimePort`、`SessionStore`                         |
+| `LSP Service`           | 语言服务接入：诊断、符号、跳转、格式化                                                  | （对 Loop 暴露为工具）                                                         |
+| `Permission & Approval` | 工具审批、策略判定、审批持久化                                                          | `EventBus`                                                                     |
+| `Audit`                 | 全链路审计事件采集与查询                                                                | `EventBus`                                                                     |
+| `Multimodal`            | 图片/文档解析、附件存储、内容分块                                                       | `BlobStore`                                                                    |
+| `Sandbox`               | 命令执行与文件系统隔离（先容器内，预留 gVisor/Firecracker）                             | —                                                                              |
+| `Observability`         | OTel 埋点（api 全局）+ SDK 引导（OTLP/Prometheus 导出）                                 | `@opentelemetry/api`                                                           |
+| `Identity & Tenant`     | 用户、租户、RBAC、配额                                                                  | PostgreSQL                                                                     |
+| `Event Bus`             | Redis Stream 封装：发布、消费组、重放                                                   | Redis                                                                          |
+| `API Server`            | REST/SSE 网关、`/acp` HTTP binding、会话控制、配置                                      | 以上全部（通过 DI）                                                            |
+| `ACP Adapter`           | ACP 协议 ↔ 内部服务的翻译层                                                             | `API Server`（内部 SDK）                                                       |
 
 ### 5.2 接口定义示例（`packages/contracts`）
 
@@ -274,8 +274,17 @@ turn/end (completed | max-tokens | blocked | aborted | error)
 
 - 默认 turn budget 为 **64 model steps**（server/worker 的 `MAX_TURN_STEPS` 可配置 1..1024）（显式子 agent budget 仍独立，默认 worker child 为 16）；最后一步禁用工具用于最终回答。工具运行次数和 model step 分别计量，不把审批等待当成 model step。
 - **研究执行**：默认 live 使用 Skill Runtime + Bash/Sandbox；typed browser 只读 adapter 和 saved evidence 路径见 §8.2，live capability 按部署边界 fail-closed。bundled skill 的 DOM extractor 一次提取有界正文、URL、标题、明确 publication metadata 和正文链接；无 metadata 时日期为 null，不从侧栏猜测。`research` tool 位于既有 Tool Runtime，composition root 注入 SessionStore/BlobStore，contracts 定义 Zod DTO。它记录问题范围、claims、支持/反证/背景引用、未决问题与是否足够作答；引用必须来自当前 prompt 后成功的 agent-browser tool/result，URL 和 quote 同时匹配结构化提取结果。校验保证观察来源，不保证网站真实或 claim 语义正确；页面始终是未信任数据。引文不匹配时返回具体 finding/source 位置及最多 600 字符的原文片段；仅为定位诊断按稳定文字片段寻找附近正文，接受条件仍为 URL 与逐字引文匹配（只忽略空白差异），不自动修正或认可 claim。notes 通过普通 tool/call/result append-only 留痕，重启可 replay；spill 后按当前 session/call 的受限 blob URI 恢复（最多 500 KB），不跨 session 读取；不建立内存账本或新表，不额外联网。完成 turn 后 notes 随内部工具历史退出后续 context，最终回答须自带关键结论/引用。
-- **进度反馈**：Loop 内纯函数从当前 prompt 的 tool events 检测三次连续浏览器失败/空 read，以及当前页面上三次重复 read（忽略变动的 accessibility refs）。重复输出只能说明观察没有变化，不等价于任务停滞；只提示换读取方式/来源或总结，不自动停止或重复副作用。在多个来源已提取但未记录 notes 时要求 evidence checkpoint，notes 后每新增两个来源要求更新结论/未决问题，notes 标记 ready 时提示回答；两次 research 引文校验失败后提示直接复制短的连续原文或移除不支持的 finding，成功记录 notes 后清除；该提示不强制停止，最终回答不应包含内部记账/重试说明。到 budget 最后四分之一提示收敛；guidance 变化追加 `turn/guidance`，模型只见当前 prompt 的最新 guidance，进展恢复时清除旧提示。compaction 不压缩活动 turn；历史 UI 不把 guidance 当作普通回复。
+- **进度反馈**：Loop 内纯函数从当前 prompt 的 tool events 检测三次连续浏览器失败/空 read，以及当前页面上三次重复 read（忽略变动的 accessibility refs）。重复输出只能说明观察没有变化，不等价于任务停滞；只提示换读取方式/来源或总结，不自动停止或重复副作用。在多个来源已提取但未记录 notes 时要求 evidence checkpoint，notes 后每新增两个来源要求更新结论/未决问题，notes 标记 ready 时提示回答；两次 research 引文校验失败后提示直接复制短的连续原文或移除不支持的 finding，成功记录 notes 后清除；该提示不强制停止，最终回答不应包含内部记账/重试说明。到 budget 最后四分之一提示收敛；guidance 变化追加 `turn/guidance`，模型只见当前 prompt 的最新 guidance，进展恢复时清除旧提示。compaction 可压缩活动 turn 的完整工具配对；历史 UI 不把 guidance 当作普通回复。
 - Turn 的最后一个允许 step 预留为无工具的最终回答：基于已有证据总结，并明确未完成工作/证据缺口；防止耗尽全部 step 后只有进度消息。模型仍请求工具时不执行超预算副作用。
+
+### 6.1.1 持久化执行预算、恢复和验收
+
+- `TaskExecutionPort` / `TaskBudgetScope` 在 contracts 定义，由 composition root 注入 `EventTaskExecution`；不开启该可选端口的底层测试/嵌入式 Loop 保持兼容，stock server/worker 均启用预算与验收。`task/budget` 固定本 prompt 的配置和开始时间，`task/request` 在调用模型前预留，`task/step` 记录主循环尝试；worker 重放不会重置额度、step 或 deadline。模型不能设置这些预算。并发子调用按 append-only 日志的预留顺序判定；拒绝记录 `task/request_denied`，崩溃未结算的请求继续占用保守预留。
+- 主任务默认总请求 128、input+output 总 token 2,000,000、耗时 30 分钟，含 assistant、child、compaction 和重试。主 step 默认 64、child 16；每个 assistant 尝试（包括失败和续接）消耗一个 step，摘要请求只消耗共享请求/token/cost 预算。预留 3 次请求和至少 16,384 token 给父任务验收/最终回答，子任务即使是其最后一步也不能动用。已知 input/output 用实际 usage 结算（cache/reasoning 不重复加），缺失 usage 保持预留而不伪造零。child usage 先归属持久化父任务，仍只写一次 tenant quota。child 上下文本身暂为内存，崩溃后不恢复 child 执行，不自动重做副作用；父任务的消费/未结算预留仍保留。
+- 配置：`MAX_TURN_STEPS`、`MODEL_CONTEXT_TOKENS`（默认 200,000，部署者须按所选模型设置）、`MODEL_OUTPUT_TOKENS`（8192）、`COMPACTION_CONTEXT_TOKENS`（默认同主模型）、`TASK_MAX_REQUESTS`、`TASK_MAX_TOKENS`、`TASK_MAX_DURATION_MS`、可选 `TASK_MAX_COST=USD:1.50`。费用上限是原币种 ceiling，费率仍仅来自固定 `config/models.yaml`。费用预留使用所有 context tiers 的保守最高费率；配置费用上限但模型缺少该币种价格时拒绝调用。token/cost 是基于估算的 admission ceiling，provider usage 可超过预估；不承诺精确账单硬上限。已有请求超额后拒绝更多消费，不能取消已经计费的请求。deadline 贯穿模型/工具/审批的 AbortSignal；远端执行是否立即停止仍取决于适配器。
+- SDK 隐式重试关闭，Loop 对已分类 transient/429/5xx/网络失败最多重试 3 次，指数退避（1/2/4 秒），鉴权/权限/配置错误不重试。只有无输出时可重发；已有部分文本时最多续接 2 次，含未执行 tool calls 的失败响应不执行这些工具。`length` 最多续接 2 次，截断响应的工具调用全部不执行；部分回答以显式 continuation 留痕并参与活动上下文，最终回答合并文本片段。provider overflow 在无可见输出时最多触发一次强制 checkpoint 后恢复。恢复原因与提示为 `task/recovery`，不自动重复副作用。
+- `task` 工具的 plan 声明要求、command/observation 验收项，verify 引用当前 prompt 的成功 tool call/result。command 必须精确匹配声明命令并且 exitCode=0，observation 必须来自读取工具；所有证据必须晚于 plan 和最近可能改变状态的调用。计划只能增加要求，不能删掉/弱化既有项；后续 edit/write 或非验收 Bash 等潜在副作用使旧证据失效。验收数据从原始日志投影，checkpoint 后仍固定在活动模型上下文。日志/摘要不是授权来源，命令仍走 Sandbox 和既有审批。
+- stock Loop 在有实质工具工作的最终回答前检查验收项，未通过则最多要求修复 2 次；剩余预算不足时以 error + 明确 incomplete detail 结束，不能只靠模型停止调用工具就宣称已验证。`task/assessment` 区分 verified/unverified/incomplete；verified 只证明模型声明的检查具有有效证据，不证明声明覆盖了所有语义要求，也不替代人工/业务验收。纯文字无工具回答无需伪造检查。租户配额、安全拒绝和 deadline 优先于预留，极端情况下只能输出终止状态，不能保证额外最终模型请求。
 
 ### 6.2 Loop 伪代码
 
@@ -296,12 +305,12 @@ while (msg = inbox.claim()):            // inbox = 用户消息 + 工具延期�
 
 ### 6.3 关键机制
 
-| 机制                    | 设计                                                                                                                                                |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **工具并发**            | 按 `concurrency` 分类，滚动并发池（默认上限可配）；`tool/call` 与 `tool/result` 严格按模型输出顺序提交日志，保证重放确定性。                        |
-| **取消**                | AbortSignal 贯穿 LLM 流与工具执行；中止时补写合成 `ABORTED` 结果事件，日志不残缺。                                                                  |
-| **拦截点（Loop 外置）** | `beforeStep` / `beforeModelCall` / `beforeToolExecute` / `afterToolExecute` 四个拦截点，权限、审计、脱敏、限流均实现为拦截器注册，Loop 本体零侵入。 |
-| **LLM 适配**            | 由 `LLM Gateway` 内部用 Vercel AI SDK 的 provider 机制实现 `LLMPort`；重试、fallback 模型、token 计量在此层完成。                                   |
+| 机制                    | 设计                                                                                                                                                       |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **工具并发**            | 按 `concurrency` 分类，滚动并发池（默认上限可配）；`tool/call` 与 `tool/result` 严格按模型输出顺序提交日志，保证重放确定性。                               |
+| **取消**                | AbortSignal 贯穿 LLM 流与工具执行；中止时补写合成 `ABORTED` 结果事件，日志不残缺。                                                                         |
+| **拦截点（Loop 外置）** | `beforeStep` / `beforeModelCall` / `beforeToolExecute` / `afterToolExecute` 四个拦截点，权限、审计、脱敏、限流均实现为拦截器注册，Loop 本体零侵入。        |
+| **LLM 适配**            | 由 `LLM Gateway` 内部用 Vercel AI SDK 的 provider 机制实现 `LLMPort`；SDK 负责协议适配与 usage 归一化；有界重试/恢复由 Loop 持久化调度，不做隐式额外调用。 |
 
 typed `browser` 无论 registry 的 concurrency 设置都形成独占 wave；同 step 首次执行错误或策略拒绝后，后续 browser calls 只记录 `NOT_EXECUTED`，不执行也不再发审批。无关工具保持原调度规则，下一 step 重置失败状态。每 step 最多执行 16 次 browser 调用。取消仍通过既有 terminal/torn-tail 配对。browser 结果跳过 generic spill，保留最终实际交付 receipt；硬曝光上限触发下一 step 的无工具结论路径。
 
@@ -318,7 +327,7 @@ typed `browser` 无论 registry 的 concurrency 设置都形成独占 wave；同
 - **取消实现**：REST/ACP Stop 先追加 `turn/cancel_requested(throughPromptSeq)`，再 await `TurnCancellationPort` 的 Redis wake-up；marker 覆盖已提交但尚未执行的 prompt 和重试，未来更高 seq 的 prompt 不受影响。Loop 在 prompt gate 前与每 step 检查持久化 marker；活跃任务经 AbortSignal 立即中断，worker 开始消费前等待 cancellation subscription ready。inline server 也持有并清理每个活跃 turn 的 AbortController。API 返回 `alreadyStopped`，UI 对已终止的旧 turn 清理 loading/approval；活跃 turn 等待 `turn/end`，错误终止也清理 approval；无结果的 pending tool 指示器随 turn 结束标为失败，并保留历史消息对象引用。取消导致的 provider 异常按 aborted 处理；POSIX Bash 命令置于独立进程组，取消/超时对整个命令组发送 SIGTERM，1 秒未退出则升级 SIGKILL，避免只杀 shell 留下子命令。用户已经运行的 CDP Chrome 不在该命令组内。审批 request/reply listener 在 subscribe 前注册，异步 subscription 暴露 ready promise，避免快速消息丢失。回放对所有未闭合 tool call 合成未知结果错误，不自动重复副作用。
 - **回放**：worker 崩溃恢复时，从上次 `turn/end` 之后截断的尾部自动合成关闭事件（借鉴 dsh 的 torn-tail 修复）。
 - **Compaction**：LLM 生成摘要替换表面区间；摘要边界吸附在 tool call/result 配对处；图像转储（image offload）、大结果 spill 到对象存储仅留引用（借鉴 dsh `spill/`）。
-  - **M4 实现备注**：`compaction/summary` 事件携带 `[fromSeq, toSeq]`，投影**原地**替换该区间（摘要占据首个被覆盖事件的位置，时序不变）；边界按"整个交换（用户消息 + 其后全部事件）"吸附，当前 turn 的最新交换永不压缩；compaction 在每个模型请求前与工具波后检查上下文压力（`ContextManager`，可注入 token 估算器）。spill 落在 `BlobStore`（M4 为本地文件系统适配器，S3 可替换），日志仅存 `blob://` 引用 + 预览，`read_blob` 工具取回。
+  - **M4 实现备注**：`compaction/summary` 事件携带 `[fromSeq, toSeq]`，投影**原地**替换该区间（摘要占据首个被覆盖事件的位置，时序不变）；新 checkpoint 可覆盖活动 turn，边界只选择已闭合 tool call/result 的位置；最新用户输入和 loaded skills/验收控制状态固定保留。`checkpoint: true` 合并并取代此前摘要；旧版非 checkpoint 区间仍按原规则回放。每次请求前计入 system、工具 schema、消息开销，并用当前模型最近 provider input usage 校准低估；checkpoint/关闭 turn/切模型后不沿用旧测量。按部署声明的模型窗口预留输出和安全余量，输出上限随剩余空间收缩；单个不可压缩的 prompt/instruction 超窗时明确失败。摘要输入按 summarizer 窗口分块滚动合并，空摘要、截断或失败不得替换原历史。spill 落在 `BlobStore`（M4 为本地文件系统适配器，S3 可替换），日志仅存 `blob://` 引用 + 预览，`read_blob` 工具取回。
 
 ---
 
@@ -334,7 +343,7 @@ typed `browser` 无论 registry 的 concurrency 设置都形成独占 wave；同
 | `web_search` / `web_fetch`               | 联网能力（可配置关闭）                                                                                                                  |
 | `browser`                                | saved read/search；live capture 仅在注入满足 §12 的 BrowserAccessPort 时启用，见 §8.2                                                   |
 | `research`                               | 有界的研究问题、claims/引用与未决问题；工具结果留痕，来源校验使用当前 turn 的成功 browser read 结果                                     |
-| `todo`                                   | 任务规划                                                                                                                                |
+| `task`                                   | 声明验收项、绑定工具证据、查询完成状态                                                                                                  |
 | `lsp_*`                                  | `lsp_diagnostics` / `lsp_symbols` / `lsp_hover` / `lsp_rename`                                                                          |
 | `ask_user`                               | 向用户提问（阻塞 turn 直至回复）                                                                                                        |
 | `subagent`                               | 派生子 Agent（独立上下文，结果回收）                                                                                                    |
@@ -646,6 +655,8 @@ api_keys / credentials(id, tenant_id, kind, ciphertext, created_at)
 | ---------------- | ---------------------- | ------------------------------------------------- | ------------------------------------------ | ------------------------------- | ---------- |
 | deepseek-harness | `ref/deepseek-harness` | `https://github.com/deepseek-ai/deepseek-harness` | `46a7f68b0922371ce7144b668b90e377d8e799f4` | `dsh-v0.1.7-rc.1`               | 2026-09-23 |
 | opencode         | `ref/opencode`         | `https://github.com/anomalyco/opencode`           | `009f3799cd6d28cad5a3e1b3902a80f60f93122e` | `github-v1.2.25-455-g009f3799c` | 2026-06-20 |
+
+2026-10-18 的 Agent Loop / compaction / verification / budget 复核另外读取了本机 `../opencode` 的 `c38d83c0c4f92466ff9c8e12b8a741698e811012`。该 checkout 已重构到 `packages/core/src/session/runner`，旧 `rao-loop-todowrite-verification.md` 不再代表其实现；本次没有更新只读 `ref/` 快照，也没有复制其实现代码。
 
 **升级参考版本的工作流程：**
 

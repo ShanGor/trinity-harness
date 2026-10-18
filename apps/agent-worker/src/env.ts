@@ -30,6 +30,16 @@ const workerEnvSchema = z.object({
   ADMIN_EMAIL: z.email().default('admin@trinity.local'),
   SKILL_DIRS: skillDirectoriesEnvSchema,
   MAX_TURN_STEPS: turnStepBudgetSchema,
+  MODEL_CONTEXT_TOKENS: z.coerce.number().int().min(4096).default(200_000),
+  MODEL_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8192),
+  COMPACTION_CONTEXT_TOKENS: z.coerce.number().int().min(4096).optional(),
+  TASK_MAX_REQUESTS: z.coerce.number().int().min(4).max(4096).default(128),
+  TASK_MAX_TOKENS: z.coerce.number().int().min(32768).default(2_000_000),
+  TASK_MAX_DURATION_MS: z.coerce.number().int().positive().max(86_400_000).default(1_800_000),
+  TASK_MAX_COST: z
+    .string()
+    .regex(/^[A-Z]{3}:\d+(\.\d{1,14})?$/)
+    .optional(),
   SYSTEM_PROMPT: z.string().min(1).default('You are Trinity, a software engineering agent.'),
   REASONING_BUDGET_TOKENS: z.coerce.number().int().positive().optional(),
   REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),

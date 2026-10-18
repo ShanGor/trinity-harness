@@ -10,6 +10,7 @@ import {
   type ConversationMessage,
   type SessionEvent,
 } from '@trinity-harness/contracts';
+import { taskVerification } from './task-verification.js';
 
 function textFromContent(
   content: Extract<SessionEvent, { type: 'message/user' | 'message/assistant' }>['content'],
@@ -74,6 +75,8 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
   // keeps exact tool pairs and reasoning until its terminal event is committed.
   const { closed, finals, progress, terminalFallbacks } = turnMessageProjection(events);
   const ranges = compactionRanges(events);
+  const latestUser = events.findLastIndex((event) => event.type === 'message/user');
+  const promptId = events[latestUser]?.eventId;
   let emitIdx = 0;
   let activeIdx = -1; // range currently covering events
   const toolNames = new Map<string, string>();
@@ -109,6 +112,22 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
       pinned.push(snapshot.instructions);
   }
   for (const content of pinned.reverse()) messages.push({ role: 'user', content });
+  // Control state survives checkpoint replacement and is rebuilt only from durable events.
+  if (promptId) {
+    const plan = events.findLast(
+      (event) => event.type === 'task/plan' && event.promptId === promptId,
+    );
+    if (plan?.type === 'task/plan')
+      messages.push({
+        role: 'user',
+        content: `[Task requirements and verification]\n${JSON.stringify({ checks: plan.checks, ...taskVerification(events, promptId) })}`,
+      });
+    const recovery = events.findLast(
+      (event) => event.type === 'task/recovery' && event.promptId === promptId,
+    );
+    if (recovery?.type === 'task/recovery')
+      messages.push({ role: 'user', content: `[Execution recovery]\n${recovery.advice}` });
+  }
   let start = -1;
   events.forEach((event, i) => {
     if (event.type === 'message/user') start = i;
@@ -129,7 +148,12 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
       activeIdx = emitIdx;
       emitIdx += 1;
     }
-    if (activeIdx >= 0 && seq >= ranges[activeIdx]!.fromSeq && seq <= ranges[activeIdx]!.toSeq) {
+    if (
+      i !== latestUser &&
+      activeIdx >= 0 &&
+      seq >= ranges[activeIdx]!.fromSeq &&
+      seq <= ranges[activeIdx]!.toSeq
+    ) {
       return; // covered by the current compaction range
     }
     if (terminalFallbacks.has(i))
@@ -160,7 +184,7 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
         messages.push({
           role: 'assistant',
           content:
-            (progress.has(i) ? '' : textFromContent(event.content)) +
+            (progress.has(i) && !event.continuation ? '' : textFromContent(event.content)) +
             (event.citationList && !progress.has(i) ? citationContext(event.citationList) : ''),
           ...(reasoning.length > 0 ? { reasoning } : {}),
         });

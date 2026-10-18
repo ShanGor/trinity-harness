@@ -5,6 +5,8 @@ import {
   AiSdkGateway,
   bashTool,
   ContextManager,
+  EventTaskExecution,
+  createTaskTool,
   CoreAgentLoop,
   CoreToolRegistry,
   createLspTools,
@@ -130,6 +132,7 @@ async function main(): Promise<void> {
     const sandbox = new LocalSandbox(root, { envMode: env.SANDBOX_ENV_MODE });
     const registry = new CoreToolRegistry(sandbox);
     registry.register(createSkillTool(skills));
+    registry.register(createTaskTool(store));
     registry.register(createResearchTool(store, blobStore));
     registry.register(
       createBrowserTool({
@@ -178,6 +181,7 @@ async function main(): Promise<void> {
           }
           childRegistry.register(createReadBlobTool(blobStore));
           childRegistry.register(createSkillTool(childSkills));
+          childRegistry.register(createTaskTool(childStore));
           childRegistry.register(createResearchTool(childStore, blobStore));
           childRegistry.register(
             createBrowserTool({ store: childStore, blobs: blobStore, now: () => new Date() }),
@@ -195,6 +199,20 @@ async function main(): Promise<void> {
             skills: childSkills,
             workspaceRoot: root,
             maxSteps: 16,
+            verification: true,
+            maxContextTokens: env.MODEL_CONTEXT_TOKENS,
+            maxOutputTokens: env.MODEL_OUTPUT_TOKENS,
+            context: new ContextManager({
+              llm,
+              model: env.COMPACTION_MODEL ?? env.MODEL,
+              store: childStore,
+              maxTokens: env.CONTEXT_MAX_TOKENS,
+              keepTokens: env.CONTEXT_KEEP_TOKENS,
+              windowTokens: env.MODEL_CONTEXT_TOKENS,
+              outputTokens: env.MODEL_OUTPUT_TOKENS,
+              summaryWindowTokens: env.COMPACTION_CONTEXT_TOKENS ?? env.MODEL_CONTEXT_TOKENS,
+            }),
+            spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
             usage,
             resolveBlob,
           });
@@ -218,6 +236,9 @@ async function main(): Promise<void> {
     store,
     maxTokens: env.CONTEXT_MAX_TOKENS,
     keepTokens: env.CONTEXT_KEEP_TOKENS,
+    windowTokens: env.MODEL_CONTEXT_TOKENS,
+    outputTokens: env.MODEL_OUTPUT_TOKENS,
+    summaryWindowTokens: env.COMPACTION_CONTEXT_TOKENS ?? env.MODEL_CONTEXT_TOKENS,
   });
 
   // M4: LSP diagnostics context injection (design.md §9) — shared helper,
@@ -234,6 +255,24 @@ async function main(): Promise<void> {
         model: env.MODEL,
         pricing: env.modelPricing,
         maxSteps: env.MAX_TURN_STEPS,
+        verification: true,
+        maxContextTokens: env.MODEL_CONTEXT_TOKENS,
+        maxOutputTokens: env.MODEL_OUTPUT_TOKENS,
+        execution: new EventTaskExecution(
+          store,
+          {
+            maxSteps: env.MAX_TURN_STEPS,
+            maxRequests: env.TASK_MAX_REQUESTS,
+            maxTokens: env.TASK_MAX_TOKENS,
+            maxDurationMs: env.TASK_MAX_DURATION_MS,
+            reserveRequests: 3,
+            reserveTokens: 16_384,
+            maxCost: env.TASK_MAX_COST
+              ? [{ currency: env.TASK_MAX_COST.slice(0, 3), amount: env.TASK_MAX_COST.slice(4) }]
+              : [],
+          },
+          env.modelPricing,
+        ),
         systemPrompt: env.SYSTEM_PROMPT,
         tools: assemblyFor(workspaceRoot).registry,
         skills,

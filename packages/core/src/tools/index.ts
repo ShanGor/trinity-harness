@@ -1,4 +1,5 @@
 export * from './builtin.js';
+export * from './task.js';
 export * from './bash-classifier.js';
 export * from './sensitive-files.js';
 export * from './read-blob.js';

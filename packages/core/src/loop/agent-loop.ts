@@ -21,6 +21,8 @@ import type {
   ModelUsage,
   TokenUsage,
   ToolContextInput,
+  TaskExecutionPort,
+  TaskBudgetScope,
 } from '@trinity-harness/contracts';
 import {
   BROWSER_LIMITS,
@@ -45,6 +47,9 @@ import { browserDiagnosticBytes, resolveBrowserImage } from '../tools/browser-ar
 import { matchesCommandPrefix } from '../tools/command-prefix.js';
 import { bashReferencesSensitiveFile } from '../tools/sensitive-files.js';
 import { progressGuidance } from './progress-guidance.js';
+import { taskVerification, verificationToolAllowed } from './task-verification.js';
+import { estimateRequestTokens, observedInputAdjustment } from '../context/estimate-tokens.js';
+import { setTimeout as delay } from 'node:timers/promises';
 import { toModelMessages } from './to-model-messages.js';
 import { answerGrounding } from './answer-grounding.js';
 
@@ -62,6 +67,13 @@ export interface AgentLoopOptions {
   workspaceRoot: string;
   skills?: SkillRuntimePort | undefined;
   maxSteps?: number | undefined;
+  execution?: TaskExecutionPort | undefined;
+  verification?: boolean | undefined;
+  maxContextTokens?: number | undefined;
+  maxOutputTokens?: number | undefined;
+  maxRetries?: number | undefined;
+  /** Injected clock/backoff for deterministic recovery tests. */
+  wait?: ((ms: number, signal?: AbortSignal) => Promise<void>) | undefined;
   /** Rolling pool size for parallel-class tools (design.md §6.3). */
   maxParallelTools?: number | undefined;
   /**
@@ -119,6 +131,31 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+export function classifyModelFailure(error: unknown): 'overflow' | 'retry' | 'fatal' {
+  const value = error as {
+    statusCode?: unknown;
+    code?: unknown;
+    isRetryable?: unknown;
+    cause?: unknown;
+  } | null;
+  const message = errorMessage(error).toLowerCase();
+  if (
+    /(context[_ -]?(length|window)|maximum context|too many tokens|prompt.{0,30}too long)/.test(
+      message,
+    )
+  )
+    return 'overflow';
+  if (
+    value?.isRetryable === true ||
+    [408, 429, 500, 502, 503, 504].includes(Number(value?.statusCode)) ||
+    ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED'].includes(String(value?.code)) ||
+    /stream interrupted|socket closed|fetch failed/.test(message)
+  )
+    return 'retry';
+  if (value?.cause && value.cause !== error) return classifyModelFailure(value.cause);
+  return 'fatal';
+}
+
 /** Bounded, log-safe argument preview for approval requests (§5 redaction). */
 function preview(value: unknown, max = 500): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
@@ -148,7 +185,8 @@ export class CoreAgentLoop implements AgentLoop {
     sink: EventSink,
     runOpts?: RunTurnOptions,
   ): Promise<TurnOutcome> {
-    const signal = runOpts?.signal;
+    let signal = runOpts?.signal;
+    let taskBudget: TaskBudgetScope | undefined = runOpts?.taskBudget;
     const { store, tools, llm } = this.opts;
     const actor = runOpts?.actor;
     const tenantId = runOpts?.tenantId;
@@ -170,6 +208,7 @@ export class CoreAgentLoop implements AgentLoop {
     });
     const turnStartedAt = Date.now();
     let steps = 0;
+    let stepLimit = this.maxSteps;
     let reason: TurnOutcome['reason'] = 'completed';
     let detail: string | undefined;
     try {
@@ -216,7 +255,12 @@ export class CoreAgentLoop implements AgentLoop {
       const promptSeq = runOpts?.promptSeq ?? appendedUser!.from;
       const promptId = (await store.load(sessionId))[promptSeq - 1]!.eventId;
       const persistUsage = async (usage: ModelUsage): Promise<void> => {
-        await store.append(sessionId, [{ ...meta(), type: 'model/usage', usage }], appendOpts);
+        if (
+          !(await store.load(sessionId)).some(
+            (event) => event.type === 'model/usage' && event.usage.requestId === usage.requestId,
+          )
+        )
+          await store.append(sessionId, [{ ...meta(), type: 'model/usage', usage }], appendOpts);
         sink.emit({ type: 'model/usage', usage });
       };
       ctx.recordUsage = (usage) => persistUsage({ ...usage, promptId, purpose: 'subagent' });
@@ -224,16 +268,19 @@ export class CoreAgentLoop implements AgentLoop {
         model: string,
         purpose: ModelUsage['purpose'],
         samples: TokenUsage[],
+        requestId = newId(),
       ): Promise<void> => {
         const tokens = normalizeTokenUsage(sumTokenUsage(samples));
-        await persistUsage({
-          requestId: newId(),
+        const entry: ModelUsage = {
+          requestId,
           promptId,
           model,
-          purpose,
+          purpose: runOpts?.taskBudget ? 'subagent' : purpose,
           tokens,
           ...priceUsage(model, tokens, this.opts.pricing ?? {}),
-        });
+        };
+        await taskBudget?.record(entry);
+        await persistUsage(entry);
         const inputTokens = tokens.inputTokens ?? 0;
         const outputTokens = tokens.outputTokens ?? 0;
         const tokenAttrs = {
@@ -248,6 +295,89 @@ export class CoreAgentLoop implements AgentLoop {
           } catch (err) {
             console.error('[CoreAgentLoop] usage record failed', err);
           }
+        }
+      };
+
+      let lane: 'work' | 'verification' | 'final' = 'work';
+      const requestStream = async (
+        request: LLMRequest,
+        purpose: ModelUsage['purpose'],
+      ): Promise<AsyncIterable<StreamChunk>> => {
+        if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
+        if (signal?.aborted) signal.throwIfAborted();
+        const denied = this.opts.usage && tenantId ? await this.checkQuota(tenantId) : null;
+        if (denied) throw new Error(denied);
+        const effectivePurpose = runOpts?.taskBudget ? 'subagent' : purpose;
+        const requestId =
+          (await taskBudget?.admit(
+            request,
+            effectivePurpose,
+            purpose === 'compaction' ? 'work' : lane,
+          )) ?? newId();
+        let stream: AsyncIterable<StreamChunk>;
+        try {
+          stream = await llm.stream(request);
+        } catch (err) {
+          await recordUsage(request.model, purpose, [], requestId);
+          throw err;
+        }
+        const samples: TokenUsage[] = [];
+        return (async function* () {
+          try {
+            for await (const chunk of stream) {
+              if (chunk.kind === 'usage') samples.push(chunk);
+              yield chunk;
+            }
+          } finally {
+            await recordUsage(request.model, purpose, samples, requestId);
+          }
+        })();
+      };
+      const recover = async (
+        kind: 'retry' | 'overflow' | 'length' | 'interrupted' | 'verification',
+        advice: string,
+        limit: number,
+      ): Promise<boolean> => {
+        const events = await store.load(sessionId);
+        const attempts = events
+          .slice(promptSeq)
+          .filter(
+            (event) =>
+              event.type === 'task/recovery' && event.promptId === promptId && event.kind === kind,
+          ).length;
+        if (attempts >= limit || steps >= stepLimit) return false;
+        await store.append(
+          sessionId,
+          [{ ...meta(), type: 'task/recovery', promptId, kind, advice }],
+          appendOpts,
+        );
+        if (kind === 'retry')
+          await (
+            this.opts.wait ??
+            (async (ms, abort) => {
+              await delay(ms, undefined, { signal: abort });
+            })
+          )(Math.min(1000 * 2 ** attempts, 8000), signal);
+        return true;
+      };
+      const compact = async (force = false, system?: string): Promise<boolean> => {
+        if (!this.opts.context) return false;
+        try {
+          const result = await this.opts.context.compact(sessionId, {
+            signal,
+            appendOpts,
+            sink,
+            force,
+            model: this.opts.model,
+            ...(system ? { system } : {}),
+            tools: tools.schemas(),
+            llm: { stream: (request) => requestStream(request, 'compaction') },
+          });
+          return result.compacted;
+        } catch (error) {
+          // Preserve the parent conclusion allowance. Quota/security failures still propagate.
+          if ((error as { code?: unknown } | null)?.code === 'TASK_BUDGET_EXHAUSTED') return false;
+          throw error;
         }
       };
 
@@ -287,6 +417,18 @@ export class CoreAgentLoop implements AgentLoop {
       }
 
       try {
+        if (reason === 'completed') {
+          taskBudget ??= await this.opts.execution?.open(sessionId, promptId, signal, actor);
+          if (taskBudget) {
+            stepLimit = Math.min(stepLimit, taskBudget.maxSteps);
+            signal = signal ? AbortSignal.any([signal, taskBudget.signal]) : taskBudget.signal;
+            ctx.signal = signal;
+            ctx.taskBudget = taskBudget;
+            steps = (await store.load(sessionId)).filter(
+              (event) => event.type === 'task/step' && event.promptId === promptId,
+            ).length;
+          }
+        }
         // `promptGated` ⇒ skip the model loop entirely; turn/end still lands.
         while (reason === 'completed') {
           throwIfAborted();
@@ -294,9 +436,9 @@ export class CoreAgentLoop implements AgentLoop {
           // Reached only when the previous step ended with tool calls: the cap
           // counts completed model requests, so a turn finishing exactly on the
           // limit still reports 'completed'.
-          if (steps >= this.maxSteps) {
+          if (steps >= stepLimit) {
             reason = 'error';
-            detail = `step limit (${this.maxSteps}) reached`;
+            detail = `step limit (${stepLimit}) reached`;
             break;
           }
           steps += 1;
@@ -305,18 +447,7 @@ export class CoreAgentLoop implements AgentLoop {
           // a new turn is bounded, and again between steps after tool waves
           // (docs/design.md §6.1 "上下文压力/溢出 → 触发 compaction"). No-op
           // when under budget.
-          if (this.opts.context) {
-            await this.opts.context.compact(sessionId, {
-              signal,
-              appendOpts,
-              sink,
-              beforeModelCall: async () => {
-                const denied = this.opts.usage && tenantId ? await this.checkQuota(tenantId) : null;
-                if (denied) throw new Error(denied);
-              },
-              recordUsage: (model, samples) => recordUsage(model, 'compaction', samples),
-            });
-          }
+          await compact(false, this.opts.systemPrompt);
 
           await this.opts.skills?.prepare({
             sessionId,
@@ -327,13 +458,7 @@ export class CoreAgentLoop implements AgentLoop {
             appendOpts,
           });
           let history = await store.load(sessionId);
-          const advice = progressGuidance(
-            history,
-            promptSeq,
-            steps,
-            this.maxSteps,
-            researchAvailable,
-          );
+          const advice = progressGuidance(history, promptSeq, steps, stepLimit, researchAvailable);
           const previousGuidance = [...history]
             .reverse()
             .find((event) => event.type === 'turn/guidance' && event.promptSeq === promptSeq);
@@ -364,14 +489,49 @@ export class CoreAgentLoop implements AgentLoop {
           const diagnosticsExhausted =
             browserDiagnosticBytes(history, promptSeq) >=
             BROWSER_LIMITS.diagnosticTurn - BROWSER_LIMITS.callsPerStep * BROWSER_LIMITS.diagnostic;
+          const planned = history.some(
+            (event) => event.type === 'task/plan' && event.promptId === promptId,
+          );
+          const verification = taskVerification(history, promptId);
+          const budgetConcluding =
+            (await taskBudget?.shouldConclude({
+              model: this.opts.model,
+              messages: toModelMessages(history),
+              tools: tools.schemas(),
+              system: this.opts.systemPrompt,
+              maxOutputTokens: this.opts.maxOutputTokens ?? 8192,
+            })) ?? false;
+          const budgetFinalizing =
+            (await taskBudget?.shouldFinalize({
+              model: this.opts.model,
+              messages: toModelMessages(history),
+              system: this.opts.systemPrompt,
+              tools: tools.schemas(),
+              maxOutputTokens: this.opts.maxOutputTokens ?? 8192,
+            })) ?? false;
+          const verifying =
+            planned &&
+            verification.status !== 'verified' &&
+            (steps >= stepLimit - 2 || budgetConcluding);
           const concluding =
-            steps === this.maxSteps || browserBudgetExhausted || diagnosticsExhausted;
+            steps === stepLimit ||
+            budgetFinalizing ||
+            browserBudgetExhausted ||
+            diagnosticsExhausted ||
+            (budgetConcluding && !verifying);
+          lane = concluding ? 'final' : verifying ? 'verification' : 'work';
           const conclusion = concluding
             ? 'This is the final step of the turn. Produce your final answer now using the evidence already collected. State uncertainties and incomplete work explicitly; do not claim success without evidence. Cite retrieved sources when relevant. Do not call tools.'
             : undefined;
           const system = [
             this.opts.systemPrompt,
             augmented,
+            this.opts.verification
+              ? 'Before substantive tool work, call task with operation plan to declare checks covering every user requirement, including required tests/builds. Execute checks through normal tools, then call task verify with their current successful call IDs. After changes rerun affected checks. Do not remove requirements to claim completion. A verified checklist is evidence of the declared checks only. If work or verification is incomplete, say so explicitly.'
+              : undefined,
+            verifying
+              ? 'Use the reserved verification allowance to run pending checks and record evidence. Do not start new implementation or delegate more work.'
+              : undefined,
             conclusion,
             'For workspace text-file inspection, use read_file (and glob to locate files) instead of Bash commands such as cat, head, tail, sed, or grep. Reserve Bash for running commands, tests, builds, version-control operations, and other shell tasks. Sensitive-file reads are checked by the agent and may trigger the normal approval flow; call read_file directly when needed, do not invoke a separate approval tool or bypass the gate with Bash, and stop if access is rejected. Never repeat secret values in your final answer.',
             'Keep progress updates brief. The final answer must synthesize the user request and link factual claims to reference documents actually read, using Markdown links. Distinguish supported findings, inference and unresolved questions. The interface lists observed sources separately; do not invent citations or describe internal bookkeeping.',
@@ -382,8 +542,33 @@ export class CoreAgentLoop implements AgentLoop {
             model: this.opts.model,
             system,
             messages: toModelMessages(history),
-            tools: concluding ? [] : tools.schemas(),
+            tools: concluding
+              ? []
+              : verifying
+                ? tools
+                    .schemas()
+                    .filter(
+                      (schema) =>
+                        !['write_file', 'edit_file', 'subagent', 'lsp_rename'].includes(
+                          schema.name,
+                        ),
+                    )
+                : tools.schemas(),
             signal,
+            maxOutputTokens: Math.min(
+              this.opts.maxOutputTokens ?? 8192,
+              Math.max(
+                1,
+                (this.opts.maxContextTokens ?? 200_000) -
+                  Math.ceil(
+                    estimateRequestTokens({
+                      messages: toModelMessages(history),
+                      system,
+                      tools: concluding ? [] : tools.schemas(),
+                    }) * 1.15,
+                  ),
+              ),
+            ),
             ...(this.opts.resolveBlob !== undefined
               ? {
                   resolveBlob: async (uri: string): Promise<Uint8Array> => {
@@ -397,6 +582,20 @@ export class CoreAgentLoop implements AgentLoop {
                 }
               : {}),
           };
+
+          if (await compact(false, system)) {
+            history = await store.load(sessionId);
+            request.messages = toModelMessages(history);
+          }
+          request.estimatedInputTokens =
+            estimateRequestTokens(request) + observedInputAdjustment(history, this.opts.model);
+          const inputEstimate = Math.ceil(estimateRequestTokens(request) * 1.15);
+          const room = (this.opts.maxContextTokens ?? 200_000) - inputEstimate;
+          if (room < 1)
+            throw new Error(
+              'CONTEXT_TOO_LARGE: required prompt/instructions exceed the model window after compaction',
+            );
+          request.maxOutputTokens = Math.min(this.opts.maxOutputTokens ?? 8192, room);
 
           // M5 quota gate (docs/design.md §17 "beforeModelCall 拦截点实时判定"):
           // deny BEFORE spending tokens. Fail-closed: a quota-store failure
@@ -413,61 +612,158 @@ export class CoreAgentLoop implements AgentLoop {
           const stepSpan = tracer.startSpan('trinity.step', {
             attributes: { 'trinity.step': steps, 'trinity.model': this.opts.model },
           });
-          let chunks: AsyncIterable<StreamChunk>;
-          try {
-            chunks = await llm.stream(request);
-          } catch (err) {
-            stepSpan.recordException(err as Error);
-            stepSpan.setStatus({ code: 2, message: errorMessage(err) });
-            stepSpan.end();
-            await recordUsage(this.opts.model, 'assistant', []);
-            throw err;
-          }
-
           let text = '';
           let reasoningText = '';
           let reasoningSignature: string | undefined;
-          const usageSamples: TokenUsage[] = [];
           const toolCalls: ToolCall[] = [];
+          let finish: 'stop' | 'length' | 'error' | undefined;
+          let failure: unknown;
           try {
+            if (taskBudget)
+              await store.append(
+                sessionId,
+                [{ ...meta(), type: 'task/step', promptId }],
+                appendOpts,
+              );
+            const chunks = await requestStream(request, 'assistant');
             for await (const chunk of chunks) {
-              if (chunk.kind === 'usage') {
-                usageSamples.push(chunk);
-                continue;
-              }
               throwIfAborted();
               if (chunk.kind === 'text-delta') {
                 text += chunk.text;
                 sink.emit({ type: 'text-delta', text: chunk.text });
               } else if (chunk.kind === 'reasoning-delta') {
-                // Reasoning is persisted on the assistant event so subsequent
-                // steps replay it (MiniMax-M3 requires the last reasoning output).
-                if (chunk.signature !== undefined) {
-                  reasoningSignature = chunk.signature;
-                }
-                if (chunk.text.length > 0) {
-                  reasoningText += chunk.text;
-                  sink.emit({ type: 'reasoning-delta', text: chunk.text });
-                }
-              } else if (chunk.kind === 'tool-call') {
-                toolCalls.push({ id: chunk.call.id, name: chunk.call.name, args: chunk.call.args });
-              } else if (chunk.kind === 'finish' && chunk.reason === 'error') {
-                throw new Error('LLM stream finished with an error');
+                if (chunk.signature !== undefined) reasoningSignature = chunk.signature;
+                reasoningText += chunk.text;
+                if (chunk.text) sink.emit({ type: 'reasoning-delta', text: chunk.text });
+              } else if (chunk.kind === 'tool-call') toolCalls.push(chunk.call);
+              else if (chunk.kind === 'finish') {
+                finish = chunk.reason;
+                if (finish === 'error') throw new Error('LLM stream finished with an error');
               }
             }
+            if (!finish) throw new Error('LLM stream interrupted before finish');
           } catch (err) {
+            failure = err;
             stepSpan.recordException(err as Error);
             stepSpan.setStatus({ code: 2, message: errorMessage(err) });
-            throw err;
           } finally {
             stepSpan.end();
-            await recordUsage(this.opts.model, 'assistant', usageSamples);
+          }
+          if (failure !== undefined) {
+            if (signal?.aborted || isAbortError(failure)) throw failure;
+            // Never execute calls from an incomplete response, or replay side effects on retry.
+            const classification = classifyModelFailure(failure);
+            if (
+              classification === 'overflow' &&
+              !text &&
+              !reasoningText &&
+              (await recover(
+                'overflow',
+                'The provider rejected the context. A new checkpoint was requested; continue from retained evidence.',
+                1,
+              )) &&
+              (await compact(true, system))
+            )
+              continue;
+            if (
+              classification === 'retry' &&
+              !text &&
+              !reasoningText &&
+              !toolCalls.length &&
+              (await recover(
+                'retry',
+                'The previous model request failed before output. Retry from the committed task state.',
+                this.opts.maxRetries ?? 3,
+              ))
+            )
+              continue;
+            if (
+              classification === 'retry' &&
+              (text || reasoningText) &&
+              !toolCalls.length &&
+              (await recover(
+                'interrupted',
+                'The previous model response was interrupted. Continue from the recorded partial response without repeating it. Inspect state before retrying effects.',
+                2,
+              ))
+            ) {
+              await store.append(
+                sessionId,
+                [
+                  {
+                    ...meta(),
+                    type: 'message/assistant',
+                    surfaceOp: 'append',
+                    phase: 'progress',
+                    continuation: true,
+                    content: [
+                      { kind: 'text', text: text || '[Reasoning interrupted before an answer]' },
+                    ],
+                  },
+                ],
+                appendOpts,
+              );
+              continue;
+            }
+            throw failure;
           }
 
           if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
 
+          const truncated = finish === 'length';
+          const needsVerification =
+            this.opts.verification &&
+            toolCalls.length === 0 &&
+            !truncated &&
+            (planned ||
+              history
+                .slice(promptSeq)
+                .some((event) => event.type === 'tool/call' && event.name !== 'task'));
+          const assessment = taskVerification(await store.load(sessionId), promptId);
+          const rejectedCompletion = needsVerification && assessment.status !== 'verified';
+          let repairCompletion = false;
+          if (rejectedCompletion) {
+            await store.append(
+              sessionId,
+              [{ ...meta(), type: 'task/assessment', promptId, ...assessment }],
+              appendOpts,
+            );
+            if (!concluding)
+              repairCompletion = await recover(
+                'verification',
+                `Completion is not verified. Complete the pending checks using task before the final answer: ${assessment.pending.join('; ').slice(0, 1400)}`,
+                2,
+              );
+            if (!repairCompletion) {
+              reason = 'error';
+              detail = `Task incomplete: ${assessment.pending.join('; ').slice(0, 1400)}`;
+              text = `Task verification is incomplete. ${assessment.pending.join('; ')}\n\n${text}`;
+            }
+          } else if (needsVerification)
+            await store.append(
+              sessionId,
+              [{ ...meta(), type: 'task/assessment', promptId, ...assessment }],
+              appendOpts,
+            );
+
+          if (toolCalls.length === 0 && !truncated && !repairCompletion && !rejectedCompletion) {
+            const prior = (await store.load(sessionId)).slice(promptSeq);
+            const lastCall = prior.findLastIndex((event) => event.type === 'tool/call');
+            const prefix = prior
+              .slice(lastCall + 1)
+              .flatMap((event) =>
+                event.type === 'message/assistant' && event.continuation
+                  ? event.content.flatMap((block) => (block.kind === 'text' ? [block.text] : []))
+                  : [],
+              )
+              .join('');
+            text = prefix + text;
+          }
           if (text.length > 0 || reasoningText.length > 0) {
-            const phase = toolCalls.length === 0 ? ('final' as const) : ('progress' as const);
+            const phase =
+              toolCalls.length === 0 && !truncated && !repairCompletion
+                ? ('final' as const)
+                : ('progress' as const);
             const citationList =
               phase === 'final' && text.trim().length > 0
                 ? await answerGrounding(
@@ -486,6 +782,7 @@ export class CoreAgentLoop implements AgentLoop {
                   type: 'message/assistant',
                   surfaceOp: 'append',
                   phase,
+                  ...(truncated ? { continuation: true } : {}),
                   ...(citationList?.length ? { citationList } : {}),
                   content: [
                     ...(reasoningText.length > 0
@@ -515,13 +812,30 @@ export class CoreAgentLoop implements AgentLoop {
             }
           }
 
+          if (repairCompletion) continue;
+          if (truncated) {
+            // A truncated response cannot authorize tool execution.
+            if (
+              concluding ||
+              !(await recover(
+                'length',
+                'The previous response hit its output limit. Continue without repeating content. Reissue any unexecuted tool calls with complete, smaller arguments.',
+                2,
+              ))
+            ) {
+              reason = 'error';
+              detail = 'Response remains truncated; task completion is unverified';
+              break;
+            }
+            continue;
+          }
           if (toolCalls.length === 0) {
             break; // model is done — turn complete
           }
 
           if (concluding) {
             reason = 'error';
-            detail = `step limit (${this.maxSteps}) reached`;
+            detail = `step limit (${stepLimit}) reached`;
             break;
           }
 
@@ -571,6 +885,20 @@ export class CoreAgentLoop implements AgentLoop {
             const presolved = new Map<string, ToolResult>();
             const executable: ToolCall[] = [];
             for (const call of wave) {
+              if (
+                verifying &&
+                !verificationToolAllowed(await store.load(sessionId), promptId, call)
+              ) {
+                presolved.set(call.id, {
+                  isError: true,
+                  value: {
+                    code: 'VERIFICATION_ONLY',
+                    message:
+                      'The reserved allowance permits declared verification commands and observations only; no new implementation or delegation.',
+                  },
+                });
+                continue;
+              }
               if (
                 call.name === 'browser' &&
                 (browserFailed || ++browserCalls > BROWSER_LIMITS.callsPerStep)
@@ -682,25 +1010,12 @@ export class CoreAgentLoop implements AgentLoop {
               });
             }
           }
-
-          // M4 context pressure: compact between steps so the NEXT request sees
-          // a bounded surface (docs/design.md §6.1 "上下文压力/溢出 → 触发
-          // compaction"). No-op when under budget.
-          if (this.opts.context) {
-            await this.opts.context.compact(sessionId, {
-              signal,
-              appendOpts,
-              sink,
-              beforeModelCall: async () => {
-                const denied = this.opts.usage && tenantId ? await this.checkQuota(tenantId) : null;
-                if (denied) throw new Error(denied);
-              },
-              recordUsage: (model, samples) => recordUsage(model, 'compaction', samples),
-            });
-          }
         }
       } catch (err) {
-        if (signal?.aborted || isAbortError(err)) {
+        if (taskBudget?.signal.aborted && !runOpts?.signal?.aborted) {
+          reason = 'error';
+          detail = 'Task deadline reached; unfinished work remains';
+        } else if (signal?.aborted || isAbortError(err)) {
           reason = 'aborted';
         } else {
           reason = 'error';
@@ -708,6 +1023,28 @@ export class CoreAgentLoop implements AgentLoop {
         }
       }
 
+      if (this.opts.verification || taskBudget) {
+        const events = await store.load(sessionId);
+        const assessment = taskVerification(events, promptId);
+        if (reason !== 'completed') {
+          assessment.status = 'incomplete';
+          if (!assessment.pending.length)
+            assessment.pending = ['Execution ended before a verified final answer.'];
+        }
+        const previous = events.findLast(
+          (event) => event.type === 'task/assessment' && event.promptId === promptId,
+        );
+        if (
+          previous?.type !== 'task/assessment' ||
+          previous.status !== assessment.status ||
+          JSON.stringify(previous.pending) !== JSON.stringify(assessment.pending)
+        )
+          await store.append(
+            sessionId,
+            [{ ...meta(), type: 'task/assessment', promptId, ...assessment }],
+            appendOpts,
+          );
+      }
       await store.append(
         sessionId,
         [
@@ -724,6 +1061,7 @@ export class CoreAgentLoop implements AgentLoop {
 
       return { reason, steps };
     } finally {
+      if (!runOpts?.taskBudget) taskBudget?.dispose();
       // M5 OTel turn metrics (design.md §17): outcome + cost of the turn.
       turnSpan.setAttributes({
         'trinity.turn_steps': steps,
@@ -813,6 +1151,10 @@ export class CoreAgentLoop implements AgentLoop {
           spilled: blob.uri,
           bytes: serialized.length,
           preview: serialized.slice(0, 500),
+          ...(call.name === 'bash' &&
+          typeof (result.value as { exitCode?: unknown } | null)?.exitCode === 'number'
+            ? { exitCode: (result.value as { exitCode: number }).exitCode }
+            : {}),
         },
         isError: result.isError,
       };
@@ -948,12 +1290,7 @@ export class CoreAgentLoop implements AgentLoop {
    */
   private async executeTool(
     call: ToolCall,
-    ctx: {
-      sessionId: string;
-      workspaceRoot: string;
-      signal?: AbortSignal;
-      permissionGranted?: boolean;
-    },
+    ctx: ToolContextInput,
     tools: ToolRegistry,
   ): Promise<ToolResult> {
     const span = tracer.startSpan('trinity.tool', {
