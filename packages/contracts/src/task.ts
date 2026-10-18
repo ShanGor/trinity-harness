@@ -3,10 +3,11 @@ import type { LLMRequest } from './llm.js';
 import type { ModelUsage } from './usage.js';
 
 export const taskBudgetSchema = z.object({
-  maxSteps: z.number().int().positive().max(1024).default(64),
-  maxRequests: z.number().int().positive().max(4096).default(128),
-  maxTokens: z.number().int().positive().default(2_000_000),
-  maxDurationMs: z.number().int().positive().max(86_400_000).default(1_800_000),
+  /** An omitted ceiling is unlimited; persisted ceilings remain effective on replay. */
+  maxSteps: z.number().int().positive().max(1024).optional(),
+  maxRequests: z.number().int().positive().max(4096).optional(),
+  maxTokens: z.number().int().positive().optional(),
+  maxDurationMs: z.number().int().positive().max(86_400_000).optional(),
   /** Per-currency ceilings; prices still come only from config/models.yaml. */
   maxCost: z
     .array(
@@ -95,7 +96,7 @@ export const taskEventSchemas = [
 /** Shared by parent and children. Implementations persist admission before spending. */
 export interface TaskBudgetScope {
   readonly signal: AbortSignal;
-  readonly maxSteps: number;
+  readonly maxSteps: number | undefined;
   shouldConclude(request: LLMRequest): Promise<boolean>;
   shouldFinalize(request: LLMRequest): Promise<boolean>;
   admit(

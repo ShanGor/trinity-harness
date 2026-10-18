@@ -292,11 +292,9 @@ it('resolves omitted extraction call IDs using observed URL and passage', async 
   });
 });
 
-it('shares a validated 64-step default across the core and app environment schemas', async () => {
-  const { turnStepBudgetSchema, DEFAULT_TURN_MAX_STEPS } =
-    await import('@trinity-harness/contracts');
-  expect(DEFAULT_TURN_MAX_STEPS).toBe(64);
-  expect(turnStepBudgetSchema.parse(undefined)).toBe(64);
+it('accepts omitted step ceilings and validates explicitly configured limits', async () => {
+  const { turnStepBudgetSchema } = await import('@trinity-harness/contracts');
+  expect(turnStepBudgetSchema.parse(undefined)).toBeUndefined();
   expect(turnStepBudgetSchema.parse('64')).toBe(64);
   expect(turnStepBudgetSchema.parse('128')).toBe(128);
   for (const invalid of [0, -1, 'abc', 1.5, 1025])

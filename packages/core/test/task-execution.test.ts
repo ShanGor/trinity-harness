@@ -89,6 +89,74 @@ async function budget(overrides: Parameters<typeof taskBudgetSchema.parse>[0] = 
 }
 
 describe('durable shared task budget', () => {
+  it('keeps default tasks unlimited across requests, tokens, elapsed time and replay', async () => {
+    const store = new MemorySessionStore();
+    const prompt = user();
+    await store.append('parent', [prompt]);
+    let now = Date.parse(at);
+    const execution = new EventTaskExecution(store, undefined, {}, () => now);
+    const scope = await execution.open('parent', prompt.eventId);
+    scopes.push(scope);
+    expect(scope.maxSteps).toBeUndefined();
+    const large = { ...request, estimatedInputTokens: 2_000_001 };
+    for (let index = 0; index < 130; index += 1) {
+      const requestId = await scope.admit(large, index % 2 ? 'subagent' : 'assistant', 'work');
+      if (index === 0)
+        await scope.record({
+          requestId,
+          promptId: prompt.eventId,
+          model: request.model,
+          purpose: 'assistant',
+          tokens: { inputTokens: 2_000_001, outputTokens: 10 },
+        });
+    }
+    now += 86_400_001;
+    expect(scope.signal.aborted).toBe(false);
+    expect(await scope.shouldConclude(large)).toBe(false);
+    expect(await scope.shouldFinalize(large)).toBe(false);
+
+    // The persisted snapshot, including omitted ceilings, wins over new configuration.
+    const resumed = await new EventTaskExecution(
+      store,
+      taskBudgetSchema.parse({ maxRequests: 1, maxTokens: 1, maxDurationMs: 1, maxSteps: 1 }),
+      {},
+      () => now,
+    ).open('parent', prompt.eventId);
+    scopes.push(resumed);
+    expect(resumed.maxSteps).toBeUndefined();
+    await expect(resumed.admit(large, 'compaction', 'work')).resolves.toBeTruthy();
+    const events = await store.load('parent');
+    expect(events.filter((event) => event.type === 'task/request')).toHaveLength(131);
+    expect(events.filter((event) => event.type === 'model/usage')).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'task/request_denied')).toHaveLength(0);
+    const recorded = events.find((event) => event.type === 'task/budget');
+    expect(JSON.parse(JSON.stringify(recorded)).limits).toEqual({
+      maxCost: [],
+      reserveRequests: 3,
+      reserveTokens: 16384,
+    });
+  });
+  it('preserves explicit request limits when resumed under unlimited defaults', async () => {
+    const { scope, store, prompt } = await budget({ maxRequests: 1 });
+    await scope.admit(request, 'assistant', 'work');
+    const resumed = await new EventTaskExecution(store).open('parent', prompt.eventId);
+    scopes.push(resumed);
+    await expect(resumed.admit(request, 'assistant', 'final')).rejects.toThrow('budget exhausted');
+  });
+  it('propagates cancellation for an unlimited task', async () => {
+    const store = new MemorySessionStore();
+    const controller = new AbortController();
+    const scope = await new EventTaskExecution(store).open(
+      'parent',
+      user().eventId,
+      controller.signal,
+    );
+    scopes.push(scope);
+    controller.abort();
+    expect(scope.signal.aborted).toBe(true);
+    await expect(scope.admit(request, 'assistant', 'work')).rejects.toThrow();
+    expect((await store.load('parent')).some((event) => event.type === 'task/request')).toBe(false);
+  });
   it('admits only one of concurrent children with one remaining request', async () => {
     const { scope, store } = await budget({ maxRequests: 1 });
     const results = await Promise.allSettled([
@@ -424,7 +492,7 @@ describe('bounded model recovery', () => {
       {},
       () => Date.parse(at),
     );
-    const { loop } = harness(llm, { store, execution, maxSteps: 2 });
+    const { loop } = harness(llm, { store, execution });
     expect(await loop.run('s', 'go', sink, { promptSeq: 1 })).toEqual({
       reason: 'completed',
       steps: 2,

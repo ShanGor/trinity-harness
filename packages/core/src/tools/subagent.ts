@@ -14,7 +14,7 @@ import type { CoreAgentLoop } from '../loop/agent-loop.js';
 
 /**
  * Subagent tool (docs/design.md §8): dispatches a CHILD agent with an
- * INDEPENDENT context (fresh in-memory session log, capped steps) and
+ * INDEPENDENT context (fresh in-memory session log, optional step limit) and
  * returns its final message — the parent context only pays for the result.
  *
  * `createLoop` is injected by the composition root (the child's tool set is

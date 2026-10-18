@@ -175,7 +175,7 @@ export class CoreAgentLoop implements AgentLoop {
   private readonly maxParallel: number;
 
   constructor(private readonly opts: AgentLoopOptions) {
-    this.maxSteps = turnStepBudgetSchema.parse(opts.maxSteps);
+    this.maxSteps = turnStepBudgetSchema.parse(opts.maxSteps) ?? Infinity;
     this.maxParallel = Math.max(1, opts.maxParallelTools ?? DEFAULT_MAX_PARALLEL_TOOLS);
   }
 
@@ -420,7 +420,7 @@ export class CoreAgentLoop implements AgentLoop {
         if (reason === 'completed') {
           taskBudget ??= await this.opts.execution?.open(sessionId, promptId, signal, actor);
           if (taskBudget) {
-            stepLimit = Math.min(stepLimit, taskBudget.maxSteps);
+            stepLimit = Math.min(stepLimit, taskBudget.maxSteps ?? Infinity);
             signal = signal ? AbortSignal.any([signal, taskBudget.signal]) : taskBudget.signal;
             ctx.signal = signal;
             ctx.taskBudget = taskBudget;

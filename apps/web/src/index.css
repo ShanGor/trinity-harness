@@ -741,20 +741,28 @@ select {
   overflow-wrap: normal;
 }
 
-.md table {
-  display: block;
+.md-table-scroll {
   max-width: 100%;
   margin-bottom: 16px;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.md table {
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   font-size: 14px;
 }
 
 .md th,
 .md td {
+  max-width: 32rem;
+  vertical-align: top;
   padding: 10px 14px;
   border: 1px solid var(--border);
   text-align: left;
+  overflow-wrap: anywhere;
 }
 
 .md th {

@@ -9,8 +9,18 @@ describe('task contracts', () => {
       promptId: crypto.randomUUID(),
     };
     expect(sessionEventSchema.parse({ ...base, type: 'task/budget', limits: {} })).toMatchObject({
-      limits: { maxSteps: 64, maxRequests: 128, maxTokens: 2000000, maxDurationMs: 1800000 },
+      limits: { maxCost: [], reserveRequests: 3, reserveTokens: 16384 },
     });
+    expect(taskBudgetSchema.parse({}).maxRequests).toBeUndefined();
+    const legacyLimits = {
+      maxSteps: 64,
+      maxRequests: 128,
+      maxTokens: 2000000,
+      maxDurationMs: 1800000,
+    };
+    expect(
+      sessionEventSchema.parse({ ...base, type: 'task/budget', limits: legacyLimits }),
+    ).toMatchObject({ limits: legacyLimits });
     expect(
       sessionEventSchema.parse({
         ...base,

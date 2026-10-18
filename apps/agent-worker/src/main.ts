@@ -198,7 +198,7 @@ async function main(): Promise<void> {
             store: childStore,
             skills: childSkills,
             workspaceRoot: root,
-            maxSteps: 16,
+            maxSteps: env.MAX_TURN_STEPS,
             verification: true,
             maxContextTokens: env.MODEL_CONTEXT_TOKENS,
             maxOutputTokens: env.MODEL_OUTPUT_TOKENS,

@@ -126,7 +126,7 @@ export function progressGuidance(
     advice.push(
       'The last three browser reads repeated output already observed on this page. This does not prove the task is blocked. Use article text and actual link URLs, follow a source that addresses the remaining question, or conclude with supported findings and explicit uncertainty.',
     );
-  if (step >= Math.ceil(maxSteps * 0.75))
+  if (Number.isFinite(maxSteps) && step >= Math.ceil(maxSteps * 0.75))
     advice.push(
       'The turn is in its final quarter of the step budget. Prioritize unresolved requirements, avoid redundant exploration, and prepare a useful final answer with sources and limitations. The final step is reserved for answering.',
     );

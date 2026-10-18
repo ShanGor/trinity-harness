@@ -9,15 +9,25 @@ data:
   PORT: "3000"
   WORKSPACE_ROOT: {{ .Values.workspace.mountPath | quote }}
   MODEL: {{ .Values.config.model | quote }}
+  {{- if .Values.config.systemPrompt }}
   SYSTEM_PROMPT: {{ .Values.config.systemPrompt | quote }}
+  {{- end }}
   DEFAULT_PERMISSION_POLICY: {{ .Values.config.defaultPermissionPolicy | quote }}
+  {{- if ne .Values.config.maxTurnSteps nil }}
   MAX_TURN_STEPS: {{ .Values.config.maxTurnSteps | quote }}
+  {{- end }}
   MODEL_CONTEXT_TOKENS: {{ .Values.config.modelContextTokens | quote }}
   MODEL_OUTPUT_TOKENS: {{ .Values.config.modelOutputTokens | quote }}
   COMPACTION_CONTEXT_TOKENS: {{ .Values.config.compactionContextTokens | quote }}
+  {{- if ne .Values.config.taskMaxRequests nil }}
   TASK_MAX_REQUESTS: {{ .Values.config.taskMaxRequests | quote }}
+  {{- end }}
+  {{- if ne .Values.config.taskMaxTokens nil }}
   TASK_MAX_TOKENS: {{ .Values.config.taskMaxTokens | quote }}
+  {{- end }}
+  {{- if ne .Values.config.taskMaxDurationMs nil }}
   TASK_MAX_DURATION_MS: {{ .Values.config.taskMaxDurationMs | quote }}
+  {{- end }}
   {{- if .Values.config.taskMaxCost }}
   TASK_MAX_COST: {{ .Values.config.taskMaxCost | quote }}
   {{- end }}

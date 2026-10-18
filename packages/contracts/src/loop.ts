@@ -2,13 +2,7 @@ import { z } from 'zod';
 import type { ModelUsage } from './usage.js';
 import type { TaskBudgetScope } from './task.js';
 
-export const DEFAULT_TURN_MAX_STEPS = 64;
-export const turnStepBudgetSchema = z.coerce
-  .number()
-  .int()
-  .positive()
-  .max(1024)
-  .default(DEFAULT_TURN_MAX_STEPS);
+export const turnStepBudgetSchema = z.coerce.number().int().positive().max(1024).optional();
 
 import type { ContentBlock } from './events.js';
 import type { PermissionPolicy } from './approval.js';

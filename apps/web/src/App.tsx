@@ -999,6 +999,22 @@ const ChatMessageContent = memo(function ChatMessageContent({
 /** Markdown-rendered assistant bubble: streaming deltas + tool calls below. */
 const EMPTY_USAGE: ModelUsage[] = [];
 
+function normalizeMarkdownTableHeadings(markdown: string): string {
+  const lines = markdown.split('\n');
+  const separatorRow = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const headingAndHeader = /^(\s{0,3}#{1,6}[ \t]+[^|]+?)\s*(\|.+)$/.exec(lines[index]!);
+    if (!headingAndHeader || !separatorRow.test(lines[index + 1]!)) continue;
+
+    lines[index] = headingAndHeader[1]!.trimEnd();
+    lines.splice(index + 1, 0, '', headingAndHeader[2]!);
+    index += 2;
+  }
+
+  return lines.join('\n');
+}
+
 function AssistantContent({ item, content }: { item: ChatItem; content: string }): ReactElement {
   return (
     <article className="assistant-response" aria-label="Trinity response">
@@ -1013,9 +1029,14 @@ function AssistantContent({ item, content }: { item: ChatItem; content: string }
             remarkPlugins={[remarkGfm]}
             components={{
               a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
+              table: ({ children }) => (
+                <div className="md-table-scroll">
+                  <table>{children}</table>
+                </div>
+              ),
             }}
           >
-            {content}
+            {normalizeMarkdownTableHeadings(content)}
           </ReactMarkdown>
           {item.streaming ? '▋' : ''}
         </div>

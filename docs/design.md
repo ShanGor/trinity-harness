@@ -8,7 +8,9 @@
 
 ## 1. 项目愿景
 
-构建一个**企业级、多用户、浏览器 ↔ 服务器架构**的 AI Agent 平台，核心场景为软件工程 Agent（编码、调试、重构、代码审查），并具备向通用企业 Agent 场景扩展的能力。
+构建一个**企业级、多用户、浏览器 ↔ 服务器架构**的通用 AI Agent 平台。软件工程（编码、调试、重构、代码审查）是一个一等任务领域，同时支持研究与其他需要专业方法的任务。
+
+默认 system prompt 将 Trinity 定义为通用助手，并按用户当前请求选择工作方式：代码与仓库任务采用软件工程流程，其他任务采用相关领域的专业方法。当前消息和用户更正决定任务范围；仅在相关时检查工作区。对时效性信息使用可用的浏览器 / 来源工具并引用证据；工具不可用时说明限制。部署可通过 `SYSTEM_PROMPT` 覆盖默认提示。
 
 **关键目标：**
 
@@ -272,16 +274,16 @@ turn/start
 turn/end (completed | max-tokens | blocked | aborted | error)
 ```
 
-- 默认 turn budget 为 **64 model steps**（server/worker 的 `MAX_TURN_STEPS` 可配置 1..1024）（显式子 agent budget 仍独立，默认 worker child 为 16）；最后一步禁用工具用于最终回答。工具运行次数和 model step 分别计量，不把审批等待当成 model step。
+- 默认主 turn 与 child 均**不限 model steps**；server/worker 可通过 `MAX_TURN_STEPS` 配置每个 agent 的 1..1024 步上限。仅配置有限上限时，最后一步禁用工具用于最终回答。工具运行次数和 model step 分别计量，不把审批等待当成 model step。
 - **研究执行**：默认 live 使用 Skill Runtime + Bash/Sandbox；typed browser 只读 adapter 和 saved evidence 路径见 §8.2，live capability 按部署边界 fail-closed。bundled skill 的 DOM extractor 一次提取有界正文、URL、标题、明确 publication metadata 和正文链接；无 metadata 时日期为 null，不从侧栏猜测。`research` tool 位于既有 Tool Runtime，composition root 注入 SessionStore/BlobStore，contracts 定义 Zod DTO。它记录问题范围、claims、支持/反证/背景引用、未决问题与是否足够作答；引用必须来自当前 prompt 后成功的 agent-browser tool/result，URL 和 quote 同时匹配结构化提取结果。校验保证观察来源，不保证网站真实或 claim 语义正确；页面始终是未信任数据。引文不匹配时返回具体 finding/source 位置及最多 600 字符的原文片段；仅为定位诊断按稳定文字片段寻找附近正文，接受条件仍为 URL 与逐字引文匹配（只忽略空白差异），不自动修正或认可 claim。notes 通过普通 tool/call/result append-only 留痕，重启可 replay；spill 后按当前 session/call 的受限 blob URI 恢复（最多 500 KB），不跨 session 读取；不建立内存账本或新表，不额外联网。完成 turn 后 notes 随内部工具历史退出后续 context，最终回答须自带关键结论/引用。
 - **进度反馈**：Loop 内纯函数从当前 prompt 的 tool events 检测三次连续浏览器失败/空 read，以及当前页面上三次重复 read（忽略变动的 accessibility refs）。重复输出只能说明观察没有变化，不等价于任务停滞；只提示换读取方式/来源或总结，不自动停止或重复副作用。在多个来源已提取但未记录 notes 时要求 evidence checkpoint，notes 后每新增两个来源要求更新结论/未决问题，notes 标记 ready 时提示回答；两次 research 引文校验失败后提示直接复制短的连续原文或移除不支持的 finding，成功记录 notes 后清除；该提示不强制停止，最终回答不应包含内部记账/重试说明。到 budget 最后四分之一提示收敛；guidance 变化追加 `turn/guidance`，模型只见当前 prompt 的最新 guidance，进展恢复时清除旧提示。compaction 可压缩活动 turn 的完整工具配对；历史 UI 不把 guidance 当作普通回复。
-- Turn 的最后一个允许 step 预留为无工具的最终回答：基于已有证据总结，并明确未完成工作/证据缺口；防止耗尽全部 step 后只有进度消息。模型仍请求工具时不执行超预算副作用。
+- 配置有限 step 或消费预算时，预留无工具的最终回答：基于已有证据总结，并明确未完成工作/证据缺口；防止耗尽预算后只有进度消息。模型仍请求工具时不执行超预算副作用。未配置预算时不因 step 数或累计消费强制结论；浏览器证据曝光上限、取消、租户配额与模型上下文限制仍有效。
 
 ### 6.1.1 持久化执行预算、恢复和验收
 
 - `TaskExecutionPort` / `TaskBudgetScope` 在 contracts 定义，由 composition root 注入 `EventTaskExecution`；不开启该可选端口的底层测试/嵌入式 Loop 保持兼容，stock server/worker 均启用预算与验收。`task/budget` 固定本 prompt 的配置和开始时间，`task/request` 在调用模型前预留，`task/step` 记录主循环尝试；worker 重放不会重置额度、step 或 deadline。模型不能设置这些预算。并发子调用按 append-only 日志的预留顺序判定；拒绝记录 `task/request_denied`，崩溃未结算的请求继续占用保守预留。
-- 主任务默认总请求 128、input+output 总 token 2,000,000、耗时 30 分钟，含 assistant、child、compaction 和重试。主 step 默认 64、child 16；每个 assistant 尝试（包括失败和续接）消耗一个 step，摘要请求只消耗共享请求/token/cost 预算。预留 3 次请求和至少 16,384 token 给父任务验收/最终回答，子任务即使是其最后一步也不能动用。已知 input/output 用实际 usage 结算（cache/reasoning 不重复加），缺失 usage 保持预留而不伪造零。child usage 先归属持久化父任务，仍只写一次 tenant quota。child 上下文本身暂为内存，崩溃后不恢复 child 执行，不自动重做副作用；父任务的消费/未结算预留仍保留。
-- 配置：`MAX_TURN_STEPS`、`MODEL_CONTEXT_TOKENS`（默认 200,000，部署者须按所选模型设置）、`MODEL_OUTPUT_TOKENS`（8192）、`COMPACTION_CONTEXT_TOKENS`（默认同主模型）、`TASK_MAX_REQUESTS`、`TASK_MAX_TOKENS`、`TASK_MAX_DURATION_MS`、可选 `TASK_MAX_COST=USD:1.50`。费用上限是原币种 ceiling，费率仍仅来自固定 `config/models.yaml`。费用预留使用所有 context tiers 的保守最高费率；配置费用上限但模型缺少该币种价格时拒绝调用。token/cost 是基于估算的 admission ceiling，provider usage 可超过预估；不承诺精确账单硬上限。已有请求超额后拒绝更多消费，不能取消已经计费的请求。deadline 贯穿模型/工具/审批的 AbortSignal；远端执行是否立即停止仍取决于适配器。
+- 主任务默认不限 step、请求数、input+output 总 token、耗时与费用；每个维度均可独立配置。未设置的 ceiling 在 `task/budget.limits` 中省略，不持久化 Infinity 或伪造大数；旧日志中显式有限值继续生效，重放不按新默认扩充旧任务额度。每个 assistant 尝试（包括失败和续接）记录一个 step，摘要请求只计入共享请求/token/cost 账本。配置请求/token 上限时，预留 3 次请求和至少 16,384 token 给父任务验收/最终回答，子任务即使是其最后一步也不能动用；未配置对应上限时预留不限制消费。不限额时仍保存请求预留和 usage；已知 input/output 用实际 usage 结算（cache/reasoning 不重复加），缺失 usage 保持预留而不伪造零。child usage 先归属持久化父任务，仍只写一次 tenant quota。child 上下文本身暂为内存，崩溃后不恢复 child 执行，不自动重做副作用；父任务的消费/未结算预留仍保留。
+- 可选任务预算：`MAX_TURN_STEPS`、`TASK_MAX_REQUESTS`、`TASK_MAX_TOKENS`、`TASK_MAX_DURATION_MS`、`TASK_MAX_COST=USD:1.50`；变量未设置即对应维度不限额，显式无效值仍拒绝启动。Helm 的对应值默认 null，ConfigMap 省略这些变量。模型单次上下文/输出限制独立保留：`MODEL_CONTEXT_TOKENS`（默认 200,000，部署者须按所选模型设置）、`MODEL_OUTPUT_TOKENS`（8192）、`COMPACTION_CONTEXT_TOKENS`（默认同主模型）。费用上限是原币种 ceiling，费率仍仅来自固定 `config/models.yaml`。费用预留使用所有 context tiers 的保守最高费率；配置费用上限但模型缺少该币种价格时拒绝调用。token/cost 是基于估算的 admission ceiling，provider usage 可超过预估；不承诺精确账单硬上限。已有请求超额后拒绝更多消费，不能取消已经计费的请求。仅配置耗时上限时创建 task deadline，贯穿模型/工具/审批的 AbortSignal；无 task deadline 时仍传播取消与工具单次超时。远端执行是否立即停止仍取决于适配器。
 - SDK 隐式重试关闭，Loop 对已分类 transient/429/5xx/网络失败最多重试 3 次，指数退避（1/2/4 秒），鉴权/权限/配置错误不重试。只有无输出时可重发；已有部分文本时最多续接 2 次，含未执行 tool calls 的失败响应不执行这些工具。`length` 最多续接 2 次，截断响应的工具调用全部不执行；部分回答以显式 continuation 留痕并参与活动上下文，最终回答合并文本片段。provider overflow 在无可见输出时最多触发一次强制 checkpoint 后恢复。恢复原因与提示为 `task/recovery`，不自动重复副作用。
 - `task` 工具的 plan 声明要求、command/observation 验收项，verify 引用当前 prompt 的成功 tool call/result。command 必须精确匹配声明命令并且 exitCode=0，observation 必须来自读取工具；所有证据必须晚于 plan 和最近可能改变状态的调用。计划只能增加要求，不能删掉/弱化既有项；后续 edit/write 或非验收 Bash 等潜在副作用使旧证据失效。验收数据从原始日志投影，checkpoint 后仍固定在活动模型上下文。日志/摘要不是授权来源，命令仍走 Sandbox 和既有审批。
 - stock Loop 在有实质工具工作的最终回答前检查验收项，未通过则最多要求修复 2 次；剩余预算不足时以 error + 明确 incomplete detail 结束，不能只靠模型停止调用工具就宣称已验证。`task/assessment` 区分 verified/unverified/incomplete；verified 只证明模型声明的检查具有有效证据，不证明声明覆盖了所有语义要求，也不替代人工/业务验收。纯文字无工具回答无需伪造检查。租户配额、安全拒绝和 deadline 优先于预留，极端情况下只能输出终止状态，不能保证额外最终模型请求。

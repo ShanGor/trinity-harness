@@ -32,7 +32,7 @@ Six research-note updates were rejected because a citation's URL or exact passag
 
 ## Runtime behavior
 
-- Main turns default to 64 model steps, configurable through `MAX_TURN_STEPS`; the final step has no tools and requests an answer with limitations.
+- Main turns and children default to unlimited model steps. An optional `MAX_TURN_STEPS` ceiling reserves its final step for an answer with limitations. Shared request, token, duration and cost ceilings are also optional and unlimited when unset.
 - Evidence notes and progress guidance are replayable session events, with bounded spill recovery and no new database table.
 - Quote matching establishes that text was observed; it does not validate a claim's interpretation or a website's truthfulness.
 - Active work retains tool observations. Completed turns retain the user's input and final response in subsequent model context; internal notes and progress messages remain in the event log.

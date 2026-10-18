@@ -11,7 +11,7 @@ import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
 
 import { loadModelPricingConfig } from '@trinity-harness/core';
-import { loadEnv } from '@trinity-harness/shared';
+import { DEFAULT_SYSTEM_PROMPT, loadEnv } from '@trinity-harness/shared';
 
 const serverEnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
@@ -34,14 +34,14 @@ const serverEnvSchema = z.object({
   MODEL_CONTEXT_TOKENS: z.coerce.number().int().min(4096).default(200_000),
   MODEL_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8192),
   COMPACTION_CONTEXT_TOKENS: z.coerce.number().int().min(4096).optional(),
-  TASK_MAX_REQUESTS: z.coerce.number().int().min(4).max(4096).default(128),
-  TASK_MAX_TOKENS: z.coerce.number().int().min(32768).default(2_000_000),
-  TASK_MAX_DURATION_MS: z.coerce.number().int().positive().max(86_400_000).default(1_800_000),
+  TASK_MAX_REQUESTS: z.coerce.number().int().min(4).max(4096).optional(),
+  TASK_MAX_TOKENS: z.coerce.number().int().min(32768).optional(),
+  TASK_MAX_DURATION_MS: z.coerce.number().int().positive().max(86_400_000).optional(),
   TASK_MAX_COST: z
     .string()
     .regex(/^[A-Z]{3}:\d+(\.\d{1,14})?$/)
     .optional(),
-  SYSTEM_PROMPT: z.string().min(1).default('You are Trinity, a software engineering agent.'),
+  SYSTEM_PROMPT: z.string().min(1).default(DEFAULT_SYSTEM_PROMPT),
   /** Anthropic extended thinking budget (tokens). */
   REASONING_BUDGET_TOKENS: z.coerce.number().int().positive().optional(),
   /** OpenAI reasoning effort. */

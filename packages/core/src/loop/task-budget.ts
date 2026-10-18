@@ -54,10 +54,18 @@ export class EventTaskExecution implements TaskExecutionPort {
     )!;
     if (start.type !== 'task/budget') throw new Error('Missing task budget');
     const limits = start.limits;
-    const remainingMs = Date.parse(start.at) + limits.maxDurationMs - this.now();
+    const maxRequests = limits.maxRequests ?? Infinity;
+    const maxTokens = limits.maxTokens ?? Infinity;
+    const deadlineAt =
+      limits.maxDurationMs === undefined ? undefined : Date.parse(start.at) + limits.maxDurationMs;
     const lifetime = new AbortController();
-    const deadline = AbortSignal.timeout(Math.max(0, remainingMs));
-    const combined = AbortSignal.any([lifetime.signal, deadline, ...(signal ? [signal] : [])]);
+    const combined = AbortSignal.any([
+      lifetime.signal,
+      ...(deadlineAt === undefined
+        ? []
+        : [AbortSignal.timeout(Math.max(0, deadlineAt - this.now()))]),
+      ...(signal ? [signal] : []),
+    ]);
     const read = async (): Promise<SessionEvent[]> => this.store.load(sessionId);
     const size = (request: LLMRequest): number =>
       Math.ceil(estimateRequestTokens(request) * 1.15) + (request.maxOutputTokens ?? 8192);
@@ -137,8 +145,8 @@ export class EventTaskExecution implements TaskExecutionPort {
       shouldFinalize: async (request) => {
         const used = usage(await read());
         return (
-          used.requests + 1 >= limits.maxRequests ||
-          used.tokens + size(request) * 2 > limits.maxTokens ||
+          used.requests + 1 >= maxRequests ||
+          used.tokens + size(request) * 2 > maxTokens ||
           costs(request).some(
             (cost) =>
               (used.costs.get(cost.currency) ?? 0n) + moneyUnits(cost.amount) * 2n >
@@ -149,9 +157,9 @@ export class EventTaskExecution implements TaskExecutionPort {
       shouldConclude: async (request) => {
         const used = usage(await read());
         return (
-          used.requests + 1 > Math.max(0, limits.maxRequests - limits.reserveRequests) ||
+          used.requests + 1 > Math.max(0, maxRequests - limits.reserveRequests) ||
           used.tokens + size(request) >
-            Math.max(0, limits.maxTokens - Math.max(limits.reserveTokens, size(request))) ||
+            Math.max(0, maxTokens - Math.max(limits.reserveTokens, size(request))) ||
           costs(request).some(
             (cost) =>
               (used.costs.get(cost.currency) ?? 0n) + moneyUnits(cost.amount) >
@@ -160,7 +168,7 @@ export class EventTaskExecution implements TaskExecutionPort {
         );
       },
       admit: async (request, purpose, lane) => {
-        if (combined.aborted || this.now() >= Date.parse(start.at) + limits.maxDurationMs)
+        if (combined.aborted || (deadlineAt !== undefined && this.now() >= deadlineAt))
           throw new TaskBudgetError('Task deadline reached');
         const requestId = newId();
         const reservedCost = costs(request);
@@ -189,18 +197,18 @@ export class EventTaskExecution implements TaskExecutionPort {
         const used = usage(await read(), requestId);
         const reserved = lane === 'work' || purpose === 'subagent';
         const requestReserve = reserved
-          ? Math.min(limits.reserveRequests, limits.maxRequests)
+          ? Math.min(limits.reserveRequests, maxRequests)
           : lane === 'verification'
             ? 1
             : 0;
         const tokenReserve = reserved
-          ? Math.min(limits.reserveTokens, limits.maxTokens)
+          ? Math.min(limits.reserveTokens, maxTokens)
           : lane === 'verification'
             ? size(request)
             : 0;
         if (
-          used.requests > limits.maxRequests - requestReserve ||
-          used.tokens > limits.maxTokens - tokenReserve ||
+          used.requests > maxRequests - requestReserve ||
+          used.tokens > maxTokens - tokenReserve ||
           limits.maxCost.some(
             (cost) => (used.costs.get(cost.currency) ?? 0n) > moneyUnits(cost.amount),
           )

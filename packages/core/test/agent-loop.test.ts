@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { EventSink, LoopEvent, SessionEvent } from '@trinity-harness/contracts';
+import type { EventSink, LLMRequest, LoopEvent, SessionEvent } from '@trinity-harness/contracts';
 
 import {
   CoreAgentLoop,
@@ -396,7 +396,7 @@ it('replays conversation command grants and never overrides a denied tool', asyn
   ).toMatchObject({ isError: true, value: { message: expect.stringContaining('denied') } });
 });
 
-it('defaults to 64 model steps and reserves the last for an answer', async () => {
+it('reserves the last configured model step for an answer', async () => {
   const llm = new FakeLLM(
     ...Array.from(
       { length: 63 },
@@ -408,13 +408,31 @@ it('defaults to 64 model steps and reserves the last for an answer', async () =>
       return textChunks('Completed with these limits.');
     },
   );
-  const { loop, store } = makeLoop(llm);
+  const { loop, store } = makeLoop(llm, new FakeSandbox(), { maxSteps: 64 });
   expect(await loop.run('s', 'go', new CollectingSink())).toEqual({
     reason: 'completed',
     steps: 64,
   });
   expect((await store.load('s')).filter((event) => event.type === 'tool/call')).toHaveLength(63);
   expect((await store.load('s')).filter((event) => event.type === 'turn/guidance')).toHaveLength(1);
+});
+
+it('continues past 64 steps by default without disabling tools or forcing a conclusion', async () => {
+  const llm = new FakeLLM(
+    ...Array.from({ length: 65 }, (_, i) => (request: LLMRequest) => {
+      expect(request.tools.length).toBeGreaterThan(0);
+      expect(request.system).not.toContain('final answer now');
+      return toolCallThenFinish(`c${i}`, 'write_file', { path: 'x', content: String(i) });
+    }),
+    () => textChunks('Done.'),
+  );
+  const { loop, store } = makeLoop(llm);
+  expect(await loop.run('s', 'go', new CollectingSink())).toEqual({
+    reason: 'completed',
+    steps: 66,
+  });
+  expect((await store.load('s')).some((event) => event.type === 'turn/guidance')).toBe(false);
+  llm.assertExhausted();
 });
 
 it('persists repeated-read guidance, clears it after new evidence, and keeps executing', async () => {
