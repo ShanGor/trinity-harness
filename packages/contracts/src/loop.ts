@@ -23,6 +23,7 @@ export type LoopEvent =
     }
   | { type: 'tool/call'; call: ToolCall }
   | { type: 'tool/result'; callId: string; name: string; result: ToolResult }
+  | { type: 'turn/guidance'; advice: string }
   | {
       type: 'approval-requested';
       approvalId: string;
@@ -51,6 +52,7 @@ export interface EventSink {
 export interface RunTurnOptions {
   /** Inherited parent task allowance; never supplied by model arguments. */
   taskBudget?: TaskBudgetScope | undefined;
+  contextGuard?: (() => Promise<void>) | undefined;
   signal?: AbortSignal | undefined;
   /** Recorded as the actor of every event this turn appends (M2 audit trail). */
   actor?: string | undefined;
@@ -62,6 +64,7 @@ export interface RunTurnOptions {
    * so the committed log never shows a prompt that never ran (§12 留痕).
    */
   promptSeq?: number | undefined;
+  cancellationSeq?: number | undefined;
   /**
    * M4 multimodal: full content blocks for this turn's user message. When
    * present they replace the plain-text `prompt` in the appended

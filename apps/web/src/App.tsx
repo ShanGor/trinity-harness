@@ -1,3 +1,10 @@
+import { newId, pendingCreationSchema } from '@trinity-harness/shared';
+import {
+  AssistantMemory,
+  AssistantHistory,
+  AssistantTasks,
+  MemoryContextDisclosure,
+} from './personal-assistant';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 
 import type { ServerEvent, ModelUsage } from '@trinity-harness/shared';
@@ -15,7 +22,6 @@ import {
   Modal,
   Select,
   Table,
-  Tabs,
   Tag,
   Typography,
   Upload,
@@ -39,9 +45,12 @@ import { MessageTimestamp } from './message-timestamp';
 import { AnswerCitationList } from './answer-citations';
 import { UsagePanel } from './usage-panel';
 import { TurnProgress } from './turn-progress';
+import { loadTimelineWithPrompt } from './conversation-history';
 
 import {
+  applyTimelineEvent,
   mergeModelUsage,
+  mergeRecallSelection,
   settleAssistantItems,
   setAssistantApproval,
   mergeAssistantChunk,
@@ -94,10 +103,11 @@ function workspaceValue(ws: WorkspaceSelection): string {
 }
 
 function workspaceLabel(s: SessionSummary, teams: TeamView[]): string {
+  if (s.kind === 'chat') return 'Session workspace';
   if (s.scope !== 'team') {
     const marker = `/${s.userId}/`;
-    const index = s.workspaceUri.lastIndexOf(marker);
-    return index < 0 ? 'personal' : `personal / ${s.workspaceUri.slice(index + marker.length)}`;
+    const index = s.workspaceUri?.lastIndexOf(marker) ?? -1;
+    return index < 0 ? 'personal' : `personal / ${s.workspaceUri?.slice(index + marker.length)}`;
   }
   return teams.find((t) => t.teamId === s.scopeId)?.name ?? 'team';
 }
@@ -109,7 +119,51 @@ export default function App() {
   const [historyCollapsed, setHistoryCollapsed] = useState(
     () => window.matchMedia('(max-width: 600px)').matches,
   );
-  const [historyWidthRatio, setHistoryWidthRatio] = useState(0.22);
+  const [historyWidthRatio, setHistoryWidthRatio] = useState(0.18);
+  const [mode, setMode] = useState<'chat' | 'work'>('chat');
+  const [page, setPage] = useState<
+    'conversation' | 'tasks' | 'history' | 'memory' | 'scheduled' | 'audit'
+  >('conversation');
+  const activityBySession = useRef(
+    new Map<string, { sourceSessionId: string; sourceEventId: string; kind: 'chat' | 'work' }[]>(),
+  );
+  const [activities, setActivities] = useState<
+    { sourceSessionId: string; sourceEventId: string; kind: 'chat' | 'work' }[]
+  >([]);
+  const [queuedPrompts, setQueuedPrompts] = useState<{ promptId: string; text: string }[]>([]);
+  const composerDrafts = useRef(new Map<string, string>());
+  const timelineHistory = useRef(
+    new Map<string, { events: ServerEvent[]; before: number | null }>(),
+  );
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderBefore, setOlderBefore] = useState<number | null>(null);
+  const [mainSessionId, setMainSessionId] = useState<string | null>(null);
+  const [creationPending, setCreationPending] = useState(false);
+  const creationOperation = useRef<string>(newId());
+  const creationPromise = useRef<Promise<string> | null>(null);
+  const [draftOrigin, setDraftOrigin] = useState<string | null>(null);
+  const [workspaceChosen, setWorkspaceChosen] = useState(false);
+  const localFiles = useRef(new Map<string, File>());
+  const conversationCache = useRef(
+    new Map<
+      string,
+      {
+        items: ChatItem[];
+        usage: ModelUsage[];
+        busy: boolean;
+        approval: PendingApproval | null;
+        staged: (AttachmentView & { name: string })[];
+      }
+    >(),
+  );
+  const currentView = useRef({
+    items: [] as ChatItem[],
+    usage: [] as ModelUsage[],
+    busy: false,
+    approval: null as PendingApproval | null,
+    staged: [] as (AttachmentView & { name: string })[],
+  });
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [usageRecords, setUsageRecords] = useState<ModelUsage[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -118,7 +172,7 @@ export default function App() {
   /** Workspace for the NEXT session (existing sessions keep their own). */
   const [workspace, setWorkspace] = useState<WorkspaceSelection>({ scope: 'personal' });
   const [busy, setBusy] = useState(false);
-  const [draftResetVersion, setDraftResetVersion] = useState(0);
+  const draftResetVersion = 0;
   const [approval, setApproval] = useState<PendingApproval | null>(null);
   const [policy, setPolicy] = useState<string>('workspace-write');
   const [teamsOpen, setTeamsOpen] = useState(false);
@@ -128,6 +182,7 @@ export default function App() {
   const [foldersLoading, setFoldersLoading] = useState(false);
   /** M4: attachments staged for the next prompt (uploaded on selection). */
   const [staged, setStaged] = useState<(AttachmentView & { name: string })[]>([]);
+  currentView.current = { items, usage: usageRecords, busy, approval, staged };
   const sessionRef = useRef<string | null>(null);
   const streamRef = useRef<{ close(): void } | null>(null);
 
@@ -173,7 +228,41 @@ export default function App() {
   }, []);
 
   const handleEvent = useCallback(
-    (event: ServerEvent) => {
+    (event: ServerEvent, replay = false) => {
+      const history = sessionRef.current
+        ? timelineHistory.current.get(sessionRef.current)
+        : undefined;
+      history?.events.push(event);
+      if (event.type === 'session/activity') {
+        const id = sessionRef.current;
+        if (id) {
+          const current = activityBySession.current.get(id) ?? [];
+          const next = current.some(
+            (entry) =>
+              entry.sourceSessionId === event.sourceSessionId &&
+              entry.sourceEventId === event.sourceEventId,
+          )
+            ? current
+            : [...current, event];
+          activityBySession.current.set(id, next);
+          setActivities(next);
+        }
+        return;
+      }
+      if (event.type === 'session/memory_selection') {
+        setItems((prev) => mergeRecallSelection(prev, event.receipt));
+        return;
+      }
+      if (event.type === 'session/prompt_queue') {
+        if (event.state === 'queued')
+          setQueuedPrompts((prev) =>
+            prev.some((entry) => entry.promptId === event.promptId)
+              ? prev
+              : [...prev, { promptId: event.promptId, text: event.text ?? 'Queued request' }],
+          );
+        else setQueuedPrompts((prev) => prev.filter((entry) => entry.promptId !== event.promptId));
+        return;
+      }
       if (event.type === 'model/usage') {
         setUsageRecords((records) =>
           records.some((entry) => entry.requestId === event.usage.requestId)
@@ -184,10 +273,10 @@ export default function App() {
         return;
       }
       if (event.type === 'error') {
-        message.error(event.message);
+        if (!replay) message.error(event.message);
         setBusy(false);
         setApproval(null);
-        setItems((items) => settleAssistantItems(items, 'error'));
+        setItems((items) => settleAssistantItems(items, 'error', event.message));
         return;
       }
       if (event.type === 'message/committed') {
@@ -204,6 +293,8 @@ export default function App() {
             ),
           );
         } else {
+          if (event.message.id)
+            setQueuedPrompts((prev) => prev.filter((entry) => entry.promptId !== event.message.id));
           // Replayed/relayed user message — skip if we already rendered it
           // locally when the prompt was sent (see chat-items.ts for why the
           // match targets the most recent USER item, not the last item).
@@ -276,7 +367,9 @@ export default function App() {
       streamRef.current = client.openEventStream(
         id,
         {
-          onEvent: handleEvent,
+          onEvent: (event) => {
+            if (sessionRef.current === id) handleEvent(event);
+          },
           onError: (err) => message.warning(`event stream error (reconnecting): ${String(err)}`),
         },
         fromSeq !== undefined ? { afterSeq: fromSeq } : undefined,
@@ -363,6 +456,12 @@ export default function App() {
 
   const logout = useCallback(() => {
     sessionStorage.removeItem(TOKEN_KEY);
+    activityBySession.current.clear();
+    setActivities([]);
+    composerDrafts.current.clear();
+    conversationCache.current.clear();
+    timelineHistory.current.clear();
+    setMainSessionId(null);
     streamRef.current?.close();
     setUser(null);
     setItems([]);
@@ -383,45 +482,171 @@ export default function App() {
     [openStream],
   );
 
+  const saveCurrentView = useCallback(() => {
+    conversationCache.current.set(sessionRef.current ?? 'new', currentView.current);
+  }, []);
+
   const ensureSession = useCallback(
     async (title?: string): Promise<string> => {
       if (sessionRef.current) return sessionRef.current;
-      const id = await client.createSession(title, policy, workspace);
-      activateSession(id);
-      await refreshSessions();
-      return id;
+      if (creationPromise.current) return creationPromise.current;
+      setCreationPending(true);
+      if (user)
+        sessionStorage.setItem(
+          `trinity.pendingCreation:${user.id}`,
+          JSON.stringify({
+            operationId: creationOperation.current,
+            kind: mode,
+            policy: mode === 'chat' ? 'read-only' : policy,
+            ...(mode === 'work' ? { workspace } : {}),
+            ...(title ? { title } : {}),
+          }),
+        );
+      const pending = client.createSession(
+        title,
+        mode === 'chat' ? 'read-only' : policy,
+        mode === 'work' ? workspace : undefined,
+        {
+          kind: mode,
+          creationOperationId: creationOperation.current,
+          ...((draftOrigin ?? mainSessionId)
+            ? { originSessionId: (draftOrigin ?? mainSessionId)! }
+            : {}),
+        },
+      );
+      creationPromise.current = pending;
+      try {
+        const id = await pending;
+        if (user) sessionStorage.removeItem(`trinity.pendingCreation:${user.id}`);
+        activateSession(id);
+        setCreationPending(false);
+        await refreshSessions();
+        return id;
+      } catch (error) {
+        const status = (error as { status?: number }).status;
+        if (status && status >= 400 && status < 500) {
+          setCreationPending(false);
+          if (user) sessionStorage.removeItem(`trinity.pendingCreation:${user.id}`);
+          creationOperation.current = newId();
+        }
+        throw error;
+      } finally {
+        creationPromise.current = null;
+      }
     },
-    [activateSession, policy, refreshSessions, workspace],
+    [activateSession, mainSessionId, mode, policy, refreshSessions, workspace, user, draftOrigin],
   );
 
-  /** Sidebar click: switch to a past session and replay its log. */
   const switchSession = useCallback(
     (id: string) => {
+      setPage('conversation');
+      void refreshSessions();
       if (id === sessionRef.current) return;
+      saveCurrentView();
+      setOlderBefore(timelineHistory.current.get(id)?.before ?? null);
+      setLoadingOlder(false);
+      const cached = conversationCache.current.get(id);
+      setActivities(activityBySession.current.get(id) ?? []);
+      setItems(cached?.items ?? []);
+      setUsageRecords(cached?.usage ?? []);
+      setQueuedPrompts([]);
+      setApproval(cached?.approval ?? null);
+      setStaged(cached?.staged ?? []);
+      setBusy(cached?.busy ?? false);
+      if (cached) {
+        activateSession(id);
+        return;
+      }
       streamRef.current?.close();
-      setItems([]);
-      setUsageRecords([]);
-      setApproval(null);
-      setStaged([]);
-      setBusy(false);
-      setDraftResetVersion((version) => version + 1);
-      activateSession(id, 0);
+      sessionRef.current = id;
+      setSessionId(id);
+      void loadTimelineWithPrompt(client, id, undefined, () => sessionRef.current !== id)
+        .then((timeline) => {
+          if (sessionRef.current !== id) return;
+          timelineHistory.current.set(id, { events: [], before: timeline.nextBefore });
+          for (const event of timeline.events) handleEvent(event, true);
+          setOlderBefore(timeline.nextBefore);
+          activateSession(id, timeline.lastSeq);
+        })
+        .catch((error: unknown) => {
+          if (sessionRef.current === id) message.error(String(error));
+        });
     },
-    [activateSession],
+    [activateSession, saveCurrentView, refreshSessions, handleEvent, message],
   );
 
-  /** New chat: drop the session binding; the next prompt creates a fresh one. */
   const newChat = useCallback(() => {
+    saveCurrentView();
+    setPage('conversation');
+    setOlderBefore(null);
     streamRef.current?.close();
+    const cached = conversationCache.current.get('new');
     setItems([]);
     setUsageRecords([]);
     setApproval(null);
-    setStaged([]);
+    setStaged(cached?.staged ?? []);
     setBusy(false);
-    setDraftResetVersion((version) => version + 1);
     sessionRef.current = null;
     setSessionId(null);
-  }, []);
+    setMode('chat');
+    setDraftOrigin(null);
+    setWorkspaceChosen(false);
+    setCreationPending(false);
+    creationOperation.current = newId();
+  }, [saveCurrentView]);
+
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    void client
+      .ensureMainChat()
+      .then(async (id) => {
+        if (!active) return;
+        setMainSessionId(id);
+        let recovered: string | undefined;
+        const raw = sessionStorage.getItem(`trinity.pendingCreation:${user.id}`);
+        if (raw) {
+          let value: unknown;
+          try {
+            value = JSON.parse(raw);
+          } catch {
+            value = null;
+          }
+          const saved = pendingCreationSchema.safeParse(value);
+          if (saved.success) {
+            setCreationPending(true);
+            creationOperation.current = saved.data.operationId;
+            setMode(saved.data.kind);
+            setPolicy(saved.data.policy);
+            if (saved.data.workspace) {
+              setWorkspace(saved.data.workspace);
+              setWorkspaceChosen(true);
+            }
+            recovered = await client.createSession(
+              saved.data.title,
+              saved.data.policy,
+              saved.data.workspace,
+              { kind: saved.data.kind, creationOperationId: saved.data.operationId },
+            );
+            sessionStorage.removeItem(`trinity.pendingCreation:${user.id}`);
+            const draft = sessionStorage.getItem(`trinity.draft:${user.id}:new`);
+            if (draft) {
+              composerDrafts.current.set(recovered, draft);
+              sessionStorage.setItem(`trinity.draft:${user.id}:${recovered}`, draft);
+            }
+            setCreationPending(false);
+          } else sessionStorage.removeItem(`trinity.pendingCreation:${user.id}`);
+        }
+        await refreshSessions();
+        if (active && !sessionRef.current) switchSession(recovered ?? id);
+      })
+      .catch((error: unknown) =>
+        message.error(error instanceof Error ? error.message : String(error)),
+      );
+    return () => {
+      active = false;
+    };
+  }, [user, message, refreshSessions, switchSession]);
 
   const exportSession = useCallback(
     async (id: string) => {
@@ -464,25 +689,59 @@ export default function App() {
     [message, modal, newChat, refreshSessions],
   );
 
-  /** M4: upload a file right away and stage the blob reference. */
+  /** Stage locally; first submit commits the immutable session identity. */
   const onStageFile = useCallback(
     async (file: File) => {
-      try {
-        const id = await ensureSession();
-        const { uri, mimeType } = await client.uploadAttachment(id, file, file.type, file.name);
-        const kind = file.type === 'application/pdf' ? ('file' as const) : ('image' as const);
-        setStaged((prev) => [...prev, { kind, uri, mimeType, name: file.name }]);
-      } catch (err) {
-        message.error(err instanceof Error ? err.message : String(err));
+      if (
+        file.size > 20 * 1024 * 1024 ||
+        !['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'application/pdf'].includes(
+          file.type,
+        )
+      ) {
+        message.error('Choose an image or PDF up to 20 MB.');
+        return;
       }
+      const uri = URL.createObjectURL(file);
+      localFiles.current.set(uri, file);
+      setStaged((prev) => [
+        ...prev,
+        {
+          kind: file.type === 'application/pdf' ? 'file' : 'image',
+          uri,
+          mimeType: file.type,
+          name: file.name,
+        },
+      ]);
     },
-    [ensureSession, message],
+    [message],
   );
 
   const onSubmit = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if ((!trimmed && staged.length === 0) || busy) return;
+      if ((!trimmed && staged.length === 0) || (busy && sessionRef.current !== mainSessionId))
+        return false;
+      if (sessionRef.current === mainSessionId && mainSessionId) {
+        try {
+          const attachments = [];
+          for (const attachment of staged) {
+            const file = localFiles.current.get(attachment.uri);
+            const uploaded = file
+              ? await client.uploadAttachment(mainSessionId, file, file.type, file.name)
+              : attachment;
+            attachments.push({
+              uri: uploaded.uri,
+              mimeType: uploaded.mimeType ?? 'application/octet-stream',
+            });
+          }
+          await client.sendPrompt(mainSessionId, trimmed || '[see attachments]', attachments);
+          setStaged([]);
+          return true;
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : String(error));
+          return false;
+        }
+      }
       if (trimmed.length === 0 && staged.length === 0) return;
       const sent = staged.map(({ kind, uri, mimeType }) => ({ kind, uri, mimeType }));
       const mimeList = staged.map(({ uri, mimeType }) => ({
@@ -515,15 +774,31 @@ export default function App() {
       try {
         // First prompt of a session doubles as its sidebar title.
         const id = await ensureSession(trimmed.slice(0, 60) || undefined);
+        for (const attachment of mimeList) {
+          const file = localFiles.current.get(attachment.uri);
+          if (file) {
+            const uploaded = await client.uploadAttachment(id, file, file.type, file.name);
+            attachment.uri = uploaded.uri;
+          }
+        }
         await client.sendPrompt(id, trimmed || '[see attachments]', mimeList);
+        for (const attachment of staged) {
+          if (localFiles.current.has(attachment.uri)) {
+            URL.revokeObjectURL(attachment.uri);
+            localFiles.current.delete(attachment.uri);
+          }
+        }
         await refreshSessions();
+        return true;
       } catch (err) {
         message.error(err instanceof Error ? err.message : String(err));
         setBusy(false);
         setItems((items) => settleAssistantItems(items, 'error'));
+        setStaged(staged);
+        return false;
       }
     },
-    [busy, ensureSession, message, refreshSessions, staged],
+    [mainSessionId, mode, workspaceChosen, busy, ensureSession, message, refreshSessions, staged],
   );
 
   const unrecordedTurns = useMemo(() => {
@@ -532,27 +807,217 @@ export default function App() {
       (item) => item.role === 'user' && (!item.messageId || !recorded.has(item.messageId)),
     ).length;
   }, [items, usageRecords]);
-  const activeTitle = sessions.find((s) => s.sessionId === sessionId)?.title;
+  const loadOlder = useCallback(async (): Promise<void> => {
+    const id = sessionRef.current;
+    const history = id ? timelineHistory.current.get(id) : undefined;
+    if (!id || !history || history.before === null || loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      const page = await loadTimelineWithPrompt(
+        client,
+        id,
+        history.before,
+        () => sessionRef.current !== id,
+      );
+      if (sessionRef.current !== id) return;
+      history.events = [...page.events, ...history.events];
+      history.before = page.nextBefore;
+      setItems(history.events.reduce(applyTimelineEvent, [] as ChatItem[]));
+      setUsageRecords((current) => {
+        const records = page.events.flatMap((event) =>
+          event.type === 'model/usage' ? [event.usage] : [],
+        );
+        return [
+          ...records.filter(
+            (record) => !current.some((entry) => entry.requestId === record.requestId),
+          ),
+          ...current,
+        ];
+      });
+      setOlderBefore(page.nextBefore);
+    } catch (error) {
+      if (sessionRef.current === id) message.error(String(error));
+    } finally {
+      if (sessionRef.current === id) setLoadingOlder(false);
+    }
+  }, [loadingOlder, message]);
+  const recentSessions = useMemo(
+    () => sessions.filter((session) => session.sessionRole !== 'main').slice(0, 12),
+    [sessions],
+  );
+  const linkedActiveIds = useMemo(
+    () =>
+      sessions
+        .filter(
+          (entry) =>
+            entry.originSessionId === mainSessionId &&
+            entry.kind === 'work' &&
+            ['queued', 'running', 'needs_approval'].includes(entry.taskState ?? ''),
+        )
+        .slice(0, 12)
+        .map((entry) => entry.sessionId)
+        .join(','),
+    [sessions, mainSessionId],
+  );
+  useEffect(() => {
+    const handles = linkedActiveIds
+      .split(',')
+      .filter(Boolean)
+      .map((id) =>
+        client.openEventStream(id, {
+          onEvent: (event) => {
+            if (
+              event.type === 'session/turn_status' ||
+              (event.type === 'session/update' && event.update.kind === 'permission_request')
+            )
+              void refreshSessions();
+          },
+        }),
+      );
+    return () => {
+      for (const handle of handles) handle.close();
+    };
+  }, [linkedActiveIds, refreshSessions]);
+  const activeSession = sessions.find((s) => s.sessionId === sessionId);
+  const activeTitle = activeSession?.title;
+  const isMain = !!sessionId && sessionId === mainSessionId;
+  const effectiveMode = activeSession?.kind ?? mode;
 
   const chatPanel = (
-    <div className="chat-panel">
+    <div className="chat-panel" hidden={page !== 'conversation'}>
       {items.length === 0 && (
         <div className="empty-chat-state">
           <img src="/branding/trinity-logo.png" alt="Trinity logo" />
-          <span className="eyebrow">TRINITY HARNESS</span>
-          <Typography.Title level={2}>What would you like to work on?</Typography.Title>
+          <span className="eyebrow">
+            {effectiveMode === 'chat' ? 'A LITTLE CLARITY, A NEW IDEA' : 'FROM IDEA TO DONE'}
+          </span>
+          <Typography.Title level={2}>
+            {effectiveMode === 'chat'
+              ? 'Where should we begin?'
+              : 'What would you like to work on?'}
+          </Typography.Title>
           <Typography.Text className="empty-chat-description">
-            Build something new, work through a bug, or explore your code. Start with what you have
-            in mind.
+            {effectiveMode === 'chat'
+              ? 'Ask a question, explore an idea, or talk something through.'
+              : 'Research a topic, build something, or tackle a task in your workspace.'}
           </Typography.Text>
           <div className="empty-chat-capabilities" aria-label="Things you can work on">
-            <span>Build & refine</span>
-            <span>Debug & understand</span>
-            <span>Review & improve</span>
+            {(effectiveMode === 'chat'
+              ? ['Explore an idea', 'Understand a topic', 'Find the right words']
+              : ['Research & synthesize', 'Build & refine', 'Review & improve']
+            ).map((label) => (
+              <span key={label}>{label}</span>
+            ))}
           </div>
         </div>
       )}
+      {olderBefore !== null && (
+        <Button loading={loadingOlder} onClick={() => void loadOlder()}>
+          Load older messages
+        </Button>
+      )}
       {items.length > 0 && <ChatTranscript items={items} />}
+      {isMain && activities.length > 0 && (
+        <div className="linked-work-cards" aria-label="Shared answers">
+          {activities.slice(-8).map((entry) => (
+            <Button
+              key={`${entry.sourceSessionId}-${entry.sourceEventId}`}
+              onClick={() => switchSession(entry.sourceSessionId)}
+            >
+              {entry.kind === 'work' ? 'Shared Work result' : 'Shared Chat answer'} ↗
+            </Button>
+          ))}
+        </div>
+      )}
+      {isMain &&
+        sessions.some((entry) => entry.kind === 'work' && entry.originSessionId === sessionId) && (
+          <div className="linked-work-cards" aria-label="Linked work">
+            {sessions
+              .filter((entry) => entry.kind === 'work' && entry.originSessionId === sessionId)
+              .slice(0, 6)
+              .map((entry) => (
+                <Button key={entry.sessionId} onClick={() => switchSession(entry.sessionId)}>
+                  {entry.scope === 'team' ? 'Team task' : entry.title || 'Work'} ·{' '}
+                  {entry.taskState?.replaceAll('_', ' ') ?? 'draft'}
+                </Button>
+              ))}
+          </div>
+        )}
+
+      {!sessionId && draftOrigin && (
+        <Typography.Paragraph className="related-work-source">
+          Related conversation linked. Review the brief and select a workspace before Start.
+        </Typography.Paragraph>
+      )}
+      {!sessionId && mode === 'work' && (
+        <div className="work-setup">
+          <Typography.Text strong>Workspace</Typography.Text>
+          <Select
+            aria-label="Work workspace"
+            placeholder="Choose personal or team space"
+            disabled={creationPending}
+            value={workspaceChosen ? workspaceValue(workspace) : undefined}
+            options={[
+              { value: 'personal', label: 'Personal workspace' },
+              ...teams.map((team) => ({
+                value: `team:${team.teamId}`,
+                label: `${team.name} · shared with team`,
+              })),
+            ]}
+            onChange={(value) => {
+              setWorkspaceChosen(true);
+              setWorkspace(
+                value === 'personal'
+                  ? { scope: 'personal' }
+                  : { scope: 'team', teamId: value.slice(5) },
+              );
+            }}
+          />
+          {workspaceChosen && workspace.scope === 'personal' && (
+            <Button
+              disabled={creationPending}
+              onClick={() => {
+                setBrowsePath(workspace.path ?? '');
+                setFolderPickerOpen(true);
+              }}
+            >
+              {workspace.path || 'Personal root · choose folder'}
+            </Button>
+          )}
+          <Select
+            aria-label="Work permissions"
+            value={policy}
+            disabled={creationPending}
+            onChange={setPolicy}
+            options={[
+              { value: 'workspace-write', label: 'Workspace write · ask' },
+              { value: 'read-only', label: 'Read only' },
+            ]}
+          />
+        </div>
+      )}
+      {creationPending && !sessionId && (
+        <div role="status">
+          Resolving conversation creation…{' '}
+          <Button
+            onClick={() =>
+              void ensureSession().catch((error: unknown) => message.error(String(error)))
+            }
+          >
+            Retry connection
+          </Button>
+        </div>
+      )}
+      {isMain && queuedPrompts.length > 0 && (
+        <div className="queued-prompts" role="status">
+          <Typography.Text strong>Queued · {queuedPrompts.length}</Typography.Text>
+          {queuedPrompts.map((entry) => (
+            <Typography.Paragraph key={entry.promptId} ellipsis>
+              {entry.text}
+            </Typography.Paragraph>
+          ))}
+        </div>
+      )}
       <div className="composer-dock">
         <div className="composer-card">
           {staged.length > 0 && (
@@ -596,13 +1061,22 @@ export default function App() {
               }}
               showUploadList={false}
               accept="image/png,image/jpeg,image/webp,image/gif,application/pdf"
-              disabled={busy}
+              disabled={busy && !isMain}
             >
-              <Button icon={<span>＋</span>} disabled={busy} aria-label="Attach image or PDF" />
+              <Button
+                icon={<span>＋</span>}
+                disabled={busy && !isMain}
+                aria-label="Attach image or PDF"
+              />
             </Upload>
             <div className="chat-composer-input">
               <ChatComposer
+                draftOwner={user?.id}
+                draftStore={composerDrafts.current}
+                draftKey={sessionId ?? 'new'}
+                canQueue={isMain}
                 busy={busy}
+                placeholder={mode === 'chat' ? 'Ask anything…' : 'Describe a task…'}
                 resetVersion={draftResetVersion}
                 onSubmit={onSubmit}
                 onCancel={onCancelTurn}
@@ -643,11 +1117,6 @@ export default function App() {
     );
   }
 
-  const workspaceOptions = [
-    { value: 'personal', label: 'Personal workspace' },
-    ...teams.map((t) => ({ value: `team:${t.teamId}`, label: t.name })),
-  ];
-
   return (
     <Layout className="trinity-shell">
       <HistorySidebar collapsed={historyCollapsed} widthRatio={historyWidthRatio}>
@@ -658,13 +1127,56 @@ export default function App() {
             <span>AI Workspace</span>
           </div>
         </div>
-        <Button className="new-chat-button" type="primary" onClick={newChat}>
-          ＋ New conversation
-        </Button>
-        <span className="sider-section-label">Recent conversations</span>
+        <nav className="sidebar-navigation" aria-label="Workspace navigation">
+          <Button
+            className="new-chat-button"
+            type="text"
+            disabled={creationPending}
+            onClick={newChat}
+          >
+            <span aria-hidden="true">＋</span> New
+          </Button>
+          <Button
+            type="text"
+            onClick={() => mainSessionId && switchSession(mainSessionId)}
+            aria-current={isMain && page === 'conversation' ? 'page' : undefined}
+          >
+            Main chat
+          </Button>
+          <Button
+            type="text"
+            onClick={() => {
+              void refreshSessions();
+              setPage('tasks');
+            }}
+            aria-current={page === 'tasks' ? 'page' : undefined}
+          >
+            Tasks{' '}
+            {sessions.filter(
+              (entry) =>
+                entry.kind === 'work' &&
+                ['queued', 'running', 'needs_approval'].includes(entry.taskState ?? ''),
+            ).length || ''}
+          </Button>
+          <Button
+            type="text"
+            onClick={() => setPage('history')}
+            aria-current={page === 'history' ? 'page' : undefined}
+          >
+            History
+          </Button>
+          <Button
+            type="text"
+            aria-current={page === 'scheduled' ? 'page' : undefined}
+            onClick={() => setPage('scheduled')}
+          >
+            <span aria-hidden="true">◷</span> Scheduled
+          </Button>
+        </nav>
+        <span className="sider-section-label">Recent</span>
         <div className="history-scroll">
           <RecentConversations
-            sessions={sessions}
+            sessions={recentSessions}
             sessionId={sessionId}
             user={user}
             teams={teams}
@@ -672,6 +1184,37 @@ export default function App() {
             onExport={exportSession}
             onDelete={confirmDeleteSession}
           />
+        </div>
+        <div className="sidebar-account">
+          <Dropdown
+            menu={{
+              items: [
+                { key: 'teams', label: 'Teams' },
+                { key: 'memory', label: 'Memory' },
+                ...(user.role === 'admin' ? [{ key: 'audit', label: 'Audit log' }] : []),
+                { key: 'sign-out', label: 'Sign out', danger: true },
+              ],
+              onClick: ({ key }) => {
+                if (key === 'memory') setPage('memory');
+                if (key === 'audit') setPage('audit');
+                if (key === 'teams') setTeamsOpen(true);
+                if (key === 'sign-out') logout();
+              },
+            }}
+            placement="topLeft"
+            trigger={['click']}
+          >
+            <Button
+              size="small"
+              type="text"
+              className="account-menu-trigger"
+              aria-label={`Account menu for ${user.email}`}
+              title={`${user.email} (${user.role})`}
+            >
+              <span className="account-menu-label">{user.email}</span>
+              <span aria-hidden="true">⌄</span>
+            </Button>
+          </Dropdown>
         </div>
       </HistorySidebar>
       <HistoryDivider
@@ -697,16 +1240,85 @@ export default function App() {
               </Button>
             )}
             <div className="workspace-heading">
-              <Typography.Title level={4} title={activeTitle || sessionId || 'New conversation'}>
-                {sessionId ? 'Conversation' : 'New conversation'}{' '}
-                {sessionId ? (
-                  <Typography.Text type="secondary">
-                    · {activeTitle || sessionId.slice(0, 8)}
-                  </Typography.Text>
-                ) : null}
-              </Typography.Title>
+              {!sessionId && page === 'conversation' ? (
+                <nav className="mode-tabs" aria-label="New conversation type">
+                  {(['chat', 'work'] as const).map((value) => (
+                    <Button
+                      key={value}
+                      disabled={creationPending}
+                      type="text"
+                      aria-pressed={mode === value && page === 'conversation'}
+                      onClick={() => {
+                        setMode(value);
+                        setPage('conversation');
+                      }}
+                    >
+                      {value === 'chat' ? 'Chat' : 'Work'}
+                    </Button>
+                  ))}
+                </nav>
+              ) : (
+                <Typography.Text strong>
+                  {page === 'conversation'
+                    ? isMain
+                      ? 'Main chat'
+                      : activeSession?.kind === 'work'
+                        ? 'Work'
+                        : activeSession?.kind === 'chat'
+                          ? 'Chat'
+                          : 'Existing conversation'
+                    : page.charAt(0).toUpperCase() + page.slice(1)}
+                </Typography.Text>
+              )}
+              {sessionId && page === 'conversation' && (
+                <span className="active-conversation-title" title={activeTitle}>
+                  {activeTitle || 'Untitled conversation'}
+                </span>
+              )}
             </div>
             <Flex align="center" gap={8} wrap className="workspace-controls">
+              {sessionId && (
+                <Button
+                  onClick={() => {
+                    const source = sessionId;
+                    const brief =
+                      activeSession?.scope === 'team'
+                        ? ''
+                        : ([...items].reverse().find((item) => item.role === 'user')?.content ??
+                          '');
+                    if (brief) {
+                      composerDrafts.current.set('new', brief);
+                      if (user) sessionStorage.setItem(`trinity.draft:${user.id}:new`, brief);
+                    }
+                    newChat();
+                    setMode('work');
+                    setDraftOrigin(source);
+                  }}
+                >
+                  Create related Work
+                </Button>
+              )}
+              {sessionId &&
+                !isMain &&
+                items.some((item) => item.role === 'assistant' && item.final && item.messageId) && (
+                  <Button
+                    onClick={() => {
+                      const answer = [...items]
+                        .reverse()
+                        .find((item) => item.role === 'assistant' && item.final && item.messageId);
+                      if (answer?.messageId)
+                        void client
+                          .shareBack(sessionId, answer.messageId)
+                          .then(() => message.success('Answer link shared to Main chat.'))
+                          .catch((error: unknown) => message.error(String(error)));
+                    }}
+                  >
+                    Share answer link
+                  </Button>
+                )}
+              {activeSession?.workspaceUri && (
+                <Tag title={activeSession.workspaceUri}>{workspaceLabel(activeSession, teams)}</Tag>
+              )}
               {sessionId && (
                 <UsagePanel
                   records={usageRecords}
@@ -715,77 +1327,38 @@ export default function App() {
                   unrecordedTurns={unrecordedTurns}
                 />
               )}
-              {!sessionId && (
-                <>
-                  <Select
-                    size="small"
-                    value={workspaceValue(workspace)}
-                    onChange={(v) =>
-                      setWorkspace(
-                        v === 'personal'
-                          ? { scope: 'personal' }
-                          : { scope: 'team', teamId: v.slice(5) },
-                      )
-                    }
-                    disabled={busy || !!sessionRef.current}
-                    options={workspaceOptions}
-                    style={{ width: 180 }}
-                    title="Workspace for the next session"
-                    aria-label="Workspace for the next session"
-                  />
-                  {workspace.scope === 'personal' && (
-                    <Button
-                      size="small"
-                      disabled={busy || !!sessionRef.current}
-                      onClick={() => {
-                        setBrowsePath(workspace.path ?? '');
-                        setFolderPickerOpen(true);
-                      }}
-                    >
-                      {workspace.path || 'Choose folder'}
-                    </Button>
-                  )}
-                  <Select
-                    size="small"
-                    aria-label="Tool permissions for the next session"
-                    value={policy}
-                    onChange={setPolicy}
-                    disabled={busy || !!sessionRef.current}
-                    options={[
-                      { value: 'workspace-write', label: 'Workspace write · ask' },
-                      { value: 'read-only', label: 'Read only' },
-                      { value: 'danger-full-access', label: 'Full access · no approvals' },
-                    ]}
-                    style={{ width: 210 }}
-                  />
-                </>
-              )}
-              <Dropdown
-                menu={{
-                  items: [
-                    { key: 'teams', label: 'Teams' },
-                    { key: 'sign-out', label: 'Sign out', danger: true },
-                  ],
-                  onClick: ({ key }) => {
-                    if (key === 'teams') setTeamsOpen(true);
-                    if (key === 'sign-out') logout();
-                  },
-                }}
-                placement="bottomRight"
+              <Button
+                type="text"
+                onClick={() => setSettingsOpen(true)}
+                aria-label="Session settings"
               >
-                <Button
-                  size="small"
-                  type="text"
-                  className="account-menu-trigger"
-                  aria-label={`Account menu for ${user.email}`}
-                  title={`${user.email} (${user.role})`}
-                >
-                  <span className="account-menu-label">{user.email}</span>
-                  <span aria-hidden="true">⌄</span>
-                </Button>
-              </Dropdown>
+                <span aria-hidden="true">⚙</span>
+                <span className="settings-button-label"> Session settings</span>
+              </Button>
             </Flex>
           </Flex>
+          <Modal
+            open={settingsOpen}
+            title="Session settings"
+            footer={null}
+            onCancel={() => setSettingsOpen(false)}
+          >
+            <div className="session-settings">
+              {sessionId ? (
+                <Typography.Paragraph type="secondary">
+                  Chat gets its own workspace automatically. Work uses the workspace selected at
+                  creation. Both can use files, browser research and commands under the session
+                  permissions.
+                </Typography.Paragraph>
+              ) : null}
+              {!sessionId && (
+                <Typography.Paragraph>
+                  Chat creates an automatic session workspace for ad-hoc work. Work setup lets you
+                  select an existing workspace and permissions before Start.
+                </Typography.Paragraph>
+              )}
+            </div>
+          </Modal>
           <ApprovalModal
             approval={approval}
             onApprove={() => void onApprove('allowed')}
@@ -840,22 +1413,57 @@ export default function App() {
             }}
           />
           <Flex justify="flex-end" className="turn-controls">
-            {busy ? (
+            {busy || (isMain && queuedPrompts.length > 0) ? (
               <Button size="small" danger onClick={() => void onCancelTurn()}>
                 Cancel turn
               </Button>
             ) : null}
           </Flex>
-          {auditPanel ? (
-            <Tabs
-              className="workspace-tabs"
-              items={[
-                { key: 'chat', label: 'Chat', children: chatPanel },
-                { key: 'audit', label: 'Audit', children: auditPanel },
-              ]}
+          {chatPanel}
+          {page === 'tasks' && (
+            <AssistantTasks
+              client={client}
+              sessions={sessions.filter((session) => session.kind === 'work')}
+              onOpen={switchSession}
             />
-          ) : (
-            chatPanel
+          )}
+          {page === 'history' && <AssistantHistory client={client} onOpen={switchSession} />}
+          {page === 'memory' && <AssistantMemory client={client} sessionId={sessionId} />}
+
+          {page === 'scheduled' && (
+            <section className="scheduled-page" aria-labelledby="scheduled-title">
+              <span className="eyebrow">YOUR ROUTINE, SIMPLIFIED</span>
+              <Typography.Title id="scheduled-title" level={2}>
+                Scheduled tasks
+              </Typography.Title>
+              <Typography.Paragraph type="secondary">
+                A place for the work you want to repeat.
+              </Typography.Paragraph>
+              <div className="scheduled-empty">
+                <span className="scheduled-icon" aria-hidden="true">
+                  ◷
+                </span>
+                <Typography.Title level={4}>Scheduling isn’t available yet</Typography.Title>
+                <Typography.Paragraph type="secondary">
+                  Trinity currently runs tasks when you send a message. Recurring and future runs
+                  are not supported yet.
+                </Typography.Paragraph>
+                <Button
+                  onClick={() => {
+                    setMode('work');
+                    newChat();
+                  }}
+                >
+                  Start work now
+                </Button>
+              </div>
+            </section>
+          )}
+          {page === 'audit' && auditPanel && (
+            <section className="audit-page">
+              <Typography.Title level={3}>Audit log</Typography.Title>
+              {auditPanel}
+            </section>
           )}
         </Flex>
       </Layout.Content>
@@ -900,7 +1508,9 @@ const RecentConversations = memo(function RecentConversations({
                     label: 'Delete',
                     danger: true,
                     disabled:
-                      user.role === 'viewer' || (user.role !== 'admin' && s.userId !== user.id),
+                      s.sessionRole === 'main' ||
+                      user.role === 'viewer' ||
+                      (user.role !== 'admin' && s.userId !== user.id),
                   },
                 ],
                 onClick: ({ key, domEvent }) => {
@@ -937,7 +1547,13 @@ const RecentConversations = memo(function RecentConversations({
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                   {new Date(s.createdAt).toLocaleString()}
                 </Typography.Text>
-                <Tag style={{ fontSize: 11, lineHeight: '14px' }}>{workspaceLabel(s, teams)}</Tag>
+                <Tag title={workspaceLabel(s, teams)} style={{ fontSize: 11, lineHeight: '14px' }}>
+                  {s.kind === 'chat'
+                    ? 'Chat'
+                    : s.kind === 'work'
+                      ? `Work · ${s.taskState?.replaceAll('_', ' ') ?? 'draft'}`
+                      : 'Existing conversation'}
+                </Tag>
               </Flex>
             }
           />
@@ -987,7 +1603,10 @@ const ChatMessageContent = memo(function ChatMessageContent({
         <MessageTimestamp at={item.at} />
       </div>
       {item.content.length > 0 && (
-        <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>
+        <Typography.Paragraph
+          copyable={{ text: item.content }}
+          style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}
+        >
           {item.content}
         </Typography.Paragraph>
       )}
@@ -1075,6 +1694,7 @@ function AssistantContent({ item, content }: { item: ChatItem; content: string }
       {!item.streaming && (
         <AnswerCitationList citations={item.citationList} renderImage={renderEvidenceImage} />
       )}
+      {item.recall && <MemoryContextDisclosure receipt={item.recall} />}
       <UsagePanel records={item.usage ?? EMPTY_USAGE} scope="Turn" active={item.streaming} />
       {!item.streaming && content.trim().length > 0 && <ResponseActions content={content} />}
     </article>
@@ -1112,6 +1732,10 @@ function AttachmentItem({
     let objectUrl: string | null = null;
     setFailed(false);
     setUrl(null);
+    if (attachment.uri.startsWith('blob:') && !attachment.uri.startsWith('blob://')) {
+      setUrl(attachment.uri);
+      return () => controller.abort();
+    }
     void client
       .fetchBlob(attachment.uri, controller.signal)
       .then((blob) => {

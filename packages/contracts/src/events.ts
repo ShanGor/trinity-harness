@@ -1,6 +1,9 @@
+import { permissionPolicySchema } from './approval.js';
+import { personalContextEventSchema } from './personal-assistant.js';
 import { z } from 'zod';
 import { modelUsageSchema } from './usage.js';
 import { taskEventSchemas } from './task.js';
+import { executionContextEventSchemas, toolEffectSchema } from './execution-context.js';
 
 import { skillSummarySchema, skillSnapshotSchema } from './skills.js';
 import { answerCitationListSchema } from './citations.js';
@@ -47,7 +50,11 @@ export const modelUsageEventSchema = z.object({
 export const sessionCreatedEventSchema = z.object({
   ...baseFields,
   type: z.literal('session/created'),
-  workspaceUri: z.string().min(1),
+  workspaceUri: z.string().min(1).nullable(),
+  kind: z.enum(['chat', 'work']).optional(),
+  sessionRole: z.enum(['main', 'side', 'task']).optional(),
+  creationOperationId: z.uuid().optional(),
+  originSessionId: z.uuid().optional(),
   forkedFrom: z.uuid().optional(),
 });
 
@@ -56,14 +63,33 @@ export const sessionClosedEventSchema = z.object({
   type: z.literal('session/closed'),
 });
 
+/** One-time workspace allocation for Chat sessions created before automatic workspaces. */
+export const sessionWorkspaceBoundEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('session/workspace_bound'),
+  workspaceUri: z.string().min(1),
+});
+
+export const sessionAttachmentEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('session/attachment'),
+  uri: z.string().startsWith('blob://'),
+  workspacePath: z.string().min(1).max(500),
+  mimeType: z.string().min(1).max(100),
+  size: z.number().int().nonnegative(),
+});
+
 export const turnStartEventSchema = z.object({
   ...baseFields,
   type: z.literal('turn/start'),
+  promptId: z.uuid().optional(),
+  executionVersion: z.literal(2).optional(),
 });
 
 export const turnEndEventSchema = z.object({
   ...baseFields,
   type: z.literal('turn/end'),
+  promptId: z.uuid().optional(),
   reason: z.enum(['completed', 'max-tokens', 'blocked', 'aborted', 'error']),
   detail: z.string().optional(),
 });
@@ -89,6 +115,7 @@ export const assistantMessageEventSchema = z.object({
 export const toolCallEventSchema = z.object({
   ...baseFields,
   type: z.literal('tool/call'),
+  effect: toolEffectSchema.optional(),
   callId: z.string().min(1),
   name: z.string().min(1),
   args: z.unknown(),
@@ -97,6 +124,7 @@ export const toolCallEventSchema = z.object({
 export const toolResultEventSchema = z.object({
   ...baseFields,
   type: z.literal('tool/result'),
+  effect: toolEffectSchema.optional(),
   callId: z.string().min(1),
   value: z.unknown(),
   isError: z.boolean(),
@@ -110,6 +138,8 @@ export const compactionSummaryEventSchema = z.object({
   summary: z.string(),
   /** A rolling checkpoint incorporates all previous summaries. */
   checkpoint: z.boolean().optional(),
+  memoryPromptId: z.uuid().optional(),
+  memoryPolicyRevision: z.number().int().nonnegative().optional(),
 });
 
 export const approvalRequestedEventSchema = z.object({
@@ -166,13 +196,52 @@ export const skillLoadedEventSchema = z.object({
  * Session event log entry — discriminated union, zod-validated, append-only.
  * See docs/design.md §7.
  */
+export const activityReferenceEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('activity/reference'),
+  sourceSessionId: z.uuid(),
+  sourceEventId: z.uuid(),
+  kind: z.enum(['chat', 'work']),
+});
+
+export const queuedPromptEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('prompt/queued'),
+  promptId: z.uuid(),
+  content: z.array(contentBlockSchema).min(1).max(10),
+  actor: z.string().max(200),
+  tenantId: z.uuid(),
+  policy: permissionPolicySchema,
+});
+export const discardedPromptEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('prompt/discarded'),
+  promptId: z.uuid(),
+  reason: z.literal('cancelled'),
+});
+
 export const sessionEventSchema = z.discriminatedUnion('type', [
+  z.object({
+    ...baseFields,
+    type: z.literal('browser/runtime_bound'),
+    generation: z.uuid(),
+    engine: z.literal('zendriver'),
+    upstreamVersion: z.string().max(100),
+    securityMode: z.literal('trusted-managed'),
+  }),
+  activityReferenceEventSchema,
+  queuedPromptEventSchema,
+  discardedPromptEventSchema,
+  personalContextEventSchema,
   modelUsageEventSchema,
   ...taskEventSchemas.map((schema) => schema.extend(baseFields)),
+  ...executionContextEventSchemas.map((schema) => schema.extend(baseFields)),
   skillCatalogEventSchema,
   skillLoadedEventSchema,
   sessionCreatedEventSchema,
   sessionClosedEventSchema,
+  sessionWorkspaceBoundEventSchema,
+  sessionAttachmentEventSchema,
   turnStartEventSchema,
   turnCancelRequestedEventSchema,
   turnGuidanceEventSchema,

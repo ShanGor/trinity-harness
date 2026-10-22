@@ -10,6 +10,7 @@ import { defineTool } from '../tools/define-tool.js';
 export function createSkillTool(runtime: SkillRuntimePort): ToolDefinition {
   return defineTool({
     name: 'skill',
+    effect: { kind: 'read', scope: 'control', evidence: 'none' },
     description:
       'Load instructions for an available runtime skill before acting on a matching task. Use the exact catalog name. Optionally read a relative text resource from that skill. This does not execute scripts or grant permissions.',
     parameters: skillArgumentsSchema,

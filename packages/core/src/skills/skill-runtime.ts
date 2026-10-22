@@ -41,6 +41,7 @@ function explicitNames(prompt: string): string[] {
 export interface SkillRuntimeOptions {
   now?: () => Date;
   browserCdpEndpoint?: string | undefined;
+  managedBrowser?: boolean;
 }
 
 export class SkillRuntime implements SkillRuntimePort {
@@ -60,13 +61,17 @@ export class SkillRuntime implements SkillRuntimePort {
     const instructions = [
       'Available runtime skills (instruction packages):',
       `Runtime session: ${sessionId}. Use this current identifier for session isolation.`,
-      ...(this.options.browserCdpEndpoint
+      ...(this.options.managedBrowser
         ? [
-            'A browser connection is configured for this deployment. Use the browser tool operations advertised in this turn; the adapter manages connection and session-tab setup. Start browsing with browser, without CLI checks, shell commands or extraction scripts. If only saved operations are advertised, use saved observations and report that live access is unavailable. On connection or authorization failure, report it instead of launching a replacement. Preserve the user-owned Chrome.',
+            'Managed browsing is configured. Use only the browser operations advertised in this turn; the adapter owns the Chrome lifecycle. On unavailable live operations use saved observations. Never launch browsers or switch engines from shell commands. Managed does not imply enforced network or tenant isolation.',
           ]
-        : [
-            'No browser endpoint is configured. Use saved browser observations only; do not launch managed Chrome or auto-discover a replacement browser. Managed Chrome deployment is a TODO.',
-          ]),
+        : this.options.browserCdpEndpoint
+          ? [
+              'A browser connection is configured for this deployment. Use the browser tool operations advertised in this turn; the adapter manages connection and session-tab setup. Start browsing with browser, without CLI checks, shell commands or extraction scripts. If only saved operations are advertised, use saved observations and report that live access is unavailable. On connection or authorization failure, report it instead of launching a replacement. Preserve the user-owned Chrome.',
+            ]
+          : [
+              'Live browsing is unavailable in this agent. Use relevant saved observations only. If none are available, report that limitation immediately; do not guess observation IDs, launch managed Chrome or auto-discover a replacement browser.',
+            ]),
       'Before acting on a task that names or clearly matches a skill, call skill with its exact name to load its instructions. Load referenced resources with skill(name, resource) when needed.',
       'Skills supply instructions; use existing tools to execute actions under the current permission policy.',
       ...skills.map((skill) =>

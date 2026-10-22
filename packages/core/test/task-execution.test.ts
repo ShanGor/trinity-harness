@@ -23,6 +23,7 @@ import type { AgentLoopOptions } from '../src/loop/agent-loop.js';
 import { taskVerification } from '../src/loop/task-verification.js';
 import { FakeLLM, textChunks, toolCallThenFinish } from '../src/testing/fake-llm.js';
 import { FakeSandbox } from '../src/testing/fake-sandbox.js';
+import { modelRetry } from '../src/loop/model-retry.js';
 
 const at = '2026-10-18T00:00:00.000Z';
 const meta = () => ({ eventId: crypto.randomUUID(), at });
@@ -328,7 +329,7 @@ describe('task verification evidence', () => {
       () => toolCallThenFinish('r', 'read_file', { path: 'a' }),
       () => textChunks('Done too early'),
       (req) => {
-        expect(JSON.stringify(req.messages)).toContain('Completion is not verified');
+        expect(JSON.stringify(req.messages)).toContain('Repair the rejected candidate');
         return toolCallThenFinish('v', 'task', { operation: 'verify', id: 'read', callId: 'r' });
       },
       () => textChunks('Verified result'),
@@ -420,6 +421,215 @@ describe('bounded model recovery', () => {
     expect((await harness(fatal).loop.run('s', 'go', sink)).reason).toBe('error');
     expect(fatal.requests).toHaveLength(1);
   });
+  it('persists provider timing and visible progress before waiting', async () => {
+    let now = Date.parse(at);
+    const started = now;
+    const llm = new FakeLLM(
+      () => {
+        throw Object.assign(new Error('busy'), {
+          statusCode: 429,
+          responseHeaders: { 'retry-after': '30', 'x-api-key': 'private' },
+        });
+      },
+      () => {
+        expect(now).toBe(started + 30_000);
+        return textChunks('Recovered');
+      },
+    );
+    const visible: string[] = [];
+    const { loop, store } = harness(llm, {
+      now: () => now,
+      wait: async (ms) => {
+        const events = await store.load('s');
+        expect(events.find((event) => event.type === 'task/recovery')).toMatchObject({
+          retry: {
+            statusCode: 429,
+            delayMs: 30_000,
+            retryAt: new Date(started + 30_000).toISOString(),
+          },
+        });
+        expect(visible.at(-1)).toContain('HTTP 429');
+        expect(visible.at(-1)).toContain(new Date(started + 30_000).toISOString());
+        expect(JSON.stringify(events)).not.toContain('private');
+        now += ms;
+      },
+    });
+    expect(
+      (
+        await loop.run('s', 'go', {
+          emit: (event) => {
+            if (event.type === 'message/assistant') visible.push(event.content);
+          },
+        })
+      ).reason,
+    ).toBe('completed');
+    expect(llm.requests).toHaveLength(2);
+    expect(JSON.stringify(llm.requests[1]?.messages)).not.toContain('scheduled for');
+  });
+  it('resumes the remaining persisted wait without resetting the retry allowance', async () => {
+    const store = new MemorySessionStore();
+    const prompt = user();
+    let now = Date.parse(at);
+    const failure = Object.assign(new Error('limited'), {
+      statusCode: 429,
+      responseHeaders: { 'retry-after': '30' },
+    });
+    await store.append('s', [
+      prompt,
+      {
+        ...meta(),
+        type: 'task/recovery',
+        promptId: prompt.eventId,
+        kind: 'retry',
+        advice: 'retry',
+        retry: modelRetry(failure, 1, now),
+      },
+    ]);
+    now += 10_000;
+    const waits: number[] = [];
+    const llm = new FakeLLM(() => {
+      throw failure;
+    });
+    const { loop } = harness(llm, {
+      store,
+      maxRetries: 1,
+      now: () => now,
+      wait: async (ms) => {
+        waits.push(ms);
+        now += ms;
+      },
+    });
+    expect((await loop.run('s', 'ignored on replay', sink, { promptSeq: 1 })).reason).toBe('error');
+    expect(waits).toEqual([20_000]);
+    expect(llm.requests).toHaveLength(1);
+    expect((await store.load('s')).filter((event) => event.type === 'task/recovery')).toHaveLength(
+      1,
+    );
+  });
+  it.each(['elapsed', 'consumed', 'other-prompt', 'legacy'] as const)(
+    'does not reapply a %s retry wait',
+    async (kind) => {
+      const store = new MemorySessionStore();
+      const prompt = user();
+      const now = Date.parse(at);
+      const events: SessionEvent[] = [
+        prompt,
+        {
+          ...meta(),
+          type: 'task/recovery',
+          promptId: kind === 'other-prompt' ? crypto.randomUUID() : prompt.eventId,
+          kind: 'retry',
+          advice: 'retry',
+          ...(kind === 'legacy'
+            ? {}
+            : {
+                retry: modelRetry(
+                  { statusCode: 429, responseHeaders: { 'retry-after': '30' } },
+                  1,
+                  now,
+                ),
+              }),
+        },
+      ];
+      if (kind === 'consumed')
+        events.push({ ...meta(), type: 'task/step', promptId: prompt.eventId });
+      await store.append('s', events);
+      const { loop } = harness(new FakeLLM(() => textChunks('Done')), {
+        store,
+        now: () => now + (kind === 'elapsed' ? 40_000 : 0),
+        wait: async () => {
+          throw new Error('Unexpected wait');
+        },
+      });
+      expect((await loop.run('s', 'go', sink, { promptSeq: 1 })).reason).toBe('completed');
+    },
+  );
+  it('stops during a provider cooldown without issuing another request', async () => {
+    const controller = new AbortController();
+    const llm = new FakeLLM(() => {
+      throw Object.assign(new Error('limited'), {
+        statusCode: 429,
+        responseHeaders: { 'retry-after': '300' },
+      });
+    });
+    const { loop, store } = harness(llm, {
+      now: () => Date.parse(at),
+      wait: async (ms, signal) => {
+        expect(ms).toBe(300_000);
+        await store.append('s', [
+          { ...meta(), type: 'turn/cancel_requested', throughPromptSeq: 1 },
+        ]);
+        controller.abort();
+        signal?.throwIfAborted();
+      },
+    });
+    expect((await loop.run('s', 'go', sink, { signal: controller.signal })).reason).toBe('aborted');
+    expect(llm.requests).toHaveLength(1);
+  });
+  it('honors provider cooldowns after a partial interrupted answer', async () => {
+    let now = Date.parse(at);
+    let calls = 0;
+    const waits: number[] = [];
+    const llm: LLMPort = {
+      stream: async () =>
+        (async function* () {
+          calls++;
+          if (calls === 1) {
+            yield { kind: 'text-delta', text: 'First. ' } as const;
+            throw Object.assign(new Error('limited'), {
+              statusCode: 429,
+              responseHeaders: { 'retry-after': '10' },
+            });
+          }
+          yield* textChunks('Second.');
+        })(),
+    };
+    const { loop, store } = harness(llm, {
+      now: () => now,
+      wait: async (ms) => {
+        waits.push(ms);
+        now += ms;
+      },
+    });
+    expect((await loop.run('s', 'go', sink)).reason).toBe('completed');
+    expect(waits).toEqual([10_000]);
+    expect(
+      (await store.load('s')).filter((event) => event.type === 'message/assistant').at(-1),
+    ).toMatchObject({ phase: 'final', content: [{ kind: 'text', text: 'First. Second.' }] });
+  });
+  it('propagates an inherited task deadline to the retry wait', async () => {
+    const lifetime = new AbortController();
+    const scope: TaskBudgetScope = {
+      signal: lifetime.signal,
+      maxSteps: undefined,
+      shouldConclude: async () => false,
+      shouldFinalize: async () => false,
+      admit: async () => crypto.randomUUID(),
+      record: async () => undefined,
+      dispose: () => undefined,
+    };
+    const llm = new FakeLLM(() => {
+      throw Object.assign(new Error('overloaded'), {
+        statusCode: 529,
+        responseHeaders: { 'retry-after': '60' },
+      });
+    });
+    const { loop, store } = harness(llm, {
+      now: () => Date.parse(at),
+      wait: async (ms, signal) => {
+        expect(ms).toBe(60_000);
+        lifetime.abort(new DOMException('Task deadline reached', 'TimeoutError'));
+        expect(signal?.aborted).toBe(true);
+        signal?.throwIfAborted();
+      },
+    });
+    expect((await loop.run('s', 'go', sink, { taskBudget: scope })).reason).toBe('error');
+    expect((await store.load('s')).at(-1)).toMatchObject({
+      type: 'turn/end',
+      detail: 'Task deadline reached; unfinished work remains',
+    });
+    expect(llm.requests).toHaveLength(1);
+  });
   it('continues a partial interrupted stream without repeating side effects', async () => {
     let calls = 0;
     const llm: LLMPort = {
@@ -498,6 +708,55 @@ describe('bounded model recovery', () => {
       steps: 2,
     });
   });
+  it('honors provider timing for a failed compaction request', async () => {
+    const store = new MemorySessionStore();
+    await store.append('s', [
+      user(),
+      {
+        ...meta(),
+        type: 'message/assistant',
+        surfaceOp: 'append',
+        content: [{ kind: 'text', text: 'old evidence'.repeat(100) }],
+      },
+    ]);
+    let now = Date.parse(at);
+    const waits: number[] = [];
+    const llm = new FakeLLM(
+      () => {
+        throw new Error('maximum context length exceeded');
+      },
+      () => {
+        throw Object.assign(new Error('summary limited'), {
+          statusCode: 429,
+          responseHeaders: { 'retry-after': '5' },
+        });
+      },
+      () => textChunks('Checkpoint'),
+      () => textChunks('Recovered'),
+    );
+    const context = new ContextManager({
+      llm,
+      model: 'fake/model',
+      store,
+      maxTokens: 100000,
+      keepTokens: 100,
+    });
+    const { loop } = harness(llm, {
+      store,
+      context,
+      now: () => now,
+      wait: async (ms) => {
+        waits.push(ms);
+        now += ms;
+      },
+    });
+    expect((await loop.run('s', 'continue', sink)).reason).toBe('completed');
+    expect(waits).toEqual([5000]);
+    expect(llm.requests).toHaveLength(4);
+    expect(
+      (await store.load('s')).filter((event) => event.type === 'compaction/summary'),
+    ).toHaveLength(1);
+  });
   it('accounts child requests in the parent budget, including failed attempts', async () => {
     const store = new MemorySessionStore();
     const llm = new FakeLLM(
@@ -526,50 +785,79 @@ describe('bounded model recovery', () => {
 });
 
 describe('verification ordering and reserves', () => {
-  it('rejects a test started concurrently with a write, even if its result is ordered later', () => {
-    const prompt = user();
-    const events: SessionEvent[] = [
-      prompt,
-      {
-        ...meta(),
-        type: 'task/plan',
-        promptId: prompt.eventId,
-        checks: [
-          {
-            id: 'tests',
-            requirement: 'Tests pass after changes',
-            kind: 'command',
-            command: 'pnpm test',
-          },
-        ],
+  it('reports the configured request budget when tools are refused during finalization', async () => {
+    const store = new MemorySessionStore();
+    const llm = new FakeLLM(
+      () => toolCallThenFinish('first', 'write_file', { path: 'first', content: 'allowed' }),
+      (request) => {
+        expect(request.tools).toEqual([]);
+        expect(request.system).toContain('Task request/token/cost budget reached');
+        return toolCallThenFinish('extra', 'write_file', { path: 'extra', content: 'refused' });
       },
-      {
-        ...meta(),
-        type: 'tool/call',
-        callId: 'write',
-        name: 'write_file',
-        args: { path: 'a', content: 'x' },
-      },
-      {
-        ...meta(),
-        type: 'tool/call',
-        callId: 'test',
-        name: 'bash',
-        args: { command: 'pnpm test' },
-      },
-      { ...meta(), type: 'tool/result', callId: 'write', value: {}, isError: false },
-      { ...meta(), type: 'tool/result', callId: 'test', value: { exitCode: 0 }, isError: false },
-      {
-        ...meta(),
-        type: 'task/check',
-        promptId: prompt.eventId,
-        id: 'tests',
-        callId: 'test',
-        resultSeq: 6,
-      },
-    ];
-    expect(taskVerification(events, prompt.eventId).status).toBe('incomplete');
+    );
+    const execution = new EventTaskExecution(
+      store,
+      taskBudgetSchema.parse({ maxRequests: 2, reserveRequests: 0 }),
+      {},
+      () => Date.parse(at),
+    );
+    const { loop, sandbox } = harness(llm, { store, execution });
+    expect(await loop.run('s', 'work', sink)).toEqual({ reason: 'error', steps: 2 });
+    expect((await store.load('s')).at(-1)).toMatchObject({
+      type: 'turn/end',
+      detail: 'Task request/token/cost budget reached',
+    });
+    expect(sandbox.files.has('extra')).toBe(false);
+    llm.assertExhausted();
   });
+  it.each([undefined, 2] as const)(
+    'rejects concurrent write/test evidence under version %s',
+    (evidenceVersion) => {
+      const prompt = user();
+      const events: SessionEvent[] = [
+        prompt,
+        {
+          ...meta(),
+          type: 'task/plan',
+          promptId: prompt.eventId,
+          ...(evidenceVersion === 2 ? { evidenceVersion } : {}),
+          checks: [
+            {
+              id: 'tests',
+              requirement: 'Tests pass after changes',
+              kind: 'command',
+              command: 'pnpm test',
+            },
+          ],
+        },
+        {
+          ...meta(),
+          type: 'tool/call',
+          callId: 'write',
+          name: 'write_file',
+          args: { path: 'a', content: 'x' },
+        },
+        {
+          ...meta(),
+          type: 'tool/call',
+          callId: 'test',
+          name: 'bash',
+          args: { command: 'pnpm test' },
+        },
+        { ...meta(), type: 'tool/result', callId: 'write', value: {}, isError: false },
+        { ...meta(), type: 'tool/result', callId: 'test', value: { exitCode: 0 }, isError: false },
+        {
+          ...meta(),
+          type: 'task/check',
+          promptId: prompt.eventId,
+          id: 'tests',
+          callId: 'test',
+          resultSeq: 6,
+        },
+      ];
+      expect(taskVerification(events, prompt.eventId).status).toBe('incomplete');
+    },
+  );
   it('keeps the last request for a parent final answer after verification', async () => {
     const { scope } = await budget({ maxRequests: 3, reserveRequests: 2 });
     await scope.admit(request, 'assistant', 'work');
@@ -620,3 +908,28 @@ describe('verification ordering and reserves', () => {
     expect(llm.requests[1]!.maxOutputTokens!).toBeLessThan(llm.requests[0]!.maxOutputTokens!);
   });
 });
+
+it.each(['skill', 'recall'])(
+  'does not force verification retries for %s-only context gathering',
+  async (name) => {
+    const llm = new FakeLLM(
+      () => toolCallThenFinish('context', name, {}),
+      () => textChunks('Which project should I inspect?'),
+    );
+    const h = harness(llm, { verification: true });
+    const { z } = await import('zod');
+    h.tools.register({
+      name,
+      description: 'Load authorized context',
+      effect: { kind: 'read', scope: 'control', evidence: 'none' },
+      parameters: z.object({}),
+      execute: async () => ({ value: {}, isError: false }),
+    });
+    const outcome = await h.loop.run(`context-${name}`, 'Inspect my project', sink);
+    expect(outcome.reason).toBe('completed');
+    expect(llm.requests).toHaveLength(2);
+    expect(
+      (await h.store.load(`context-${name}`)).some((event) => event.type === 'task/recovery'),
+    ).toBe(false);
+  },
+);

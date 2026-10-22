@@ -2,8 +2,10 @@ import type { z } from 'zod';
 import type { ModelUsage } from './usage.js';
 import type { TaskBudgetScope } from './task.js';
 
+import type { PermissionPolicy } from './approval.js';
 import type { SandboxPort } from './sandbox.js';
 import type { ToolSchema } from './llm.js';
+import type { ToolEffect } from './execution-context.js';
 
 /**
  * Tool contracts (docs/design.md §5.2, §8): value/render separation —
@@ -22,9 +24,17 @@ export interface ToolResult<V = unknown> {
 }
 
 export interface ToolContext {
+  /** Current committed user message's text, supplied by the Loop, never tool arguments. */
+  userRequest?: string | undefined;
   taskBudget?: TaskBudgetScope | undefined;
+  /** Authenticated parent policy snapshot for delegation; never supplied by model arguments. */
+  permissionPolicy?: PermissionPolicy | undefined;
+  /** Inherited recall-policy fence; not supplied by model arguments. */
+  contextGuard?: (() => Promise<void>) | undefined;
   tenantId?: string | undefined;
   recordUsage?: ((usage: ModelUsage) => Promise<void>) | undefined;
+  /** Runtime-generated execution status; persisted as progress, never as evidence. */
+  reportProgress?: ((message: string) => Promise<void>) | undefined;
   sessionId: string;
   /** Server-assigned originating call; never taken from model arguments. */
   callId?: string;
@@ -40,13 +50,17 @@ export interface ToolContext {
 }
 
 export interface ToolDefinition<A = unknown, V = unknown> {
+  /** Adapter-owned effect classification; model arguments never supply this metadata. */
+  effect?: ToolEffect;
+  effectFor?(args: A): ToolEffect;
   name: string;
   description: string;
   /** Argument validator; the registry parses/validates before execute(). */
   parameters: z.ZodType<A>;
   execute(args: A, ctx: ToolContext): Promise<ToolResult<V>>;
   concurrency?: 'parallel' | 'exclusive';
-  timeoutMs?: number;
+  /** null inherits cancellation/task deadlines without adding a tool deadline. */
+  timeoutMs?: number | null;
 }
 
 /**
@@ -56,6 +70,7 @@ export interface ToolDefinition<A = unknown, V = unknown> {
 export type ToolContextInput = Omit<ToolContext, 'sandbox'>;
 
 export interface ToolRegistry {
+  effectOf?(call: ToolCall): ToolEffect;
   /** Registers a tool; returns a handle that unregisters on dispose. */
   register(def: ToolDefinition): Disposable;
   /** Zod-validated dispatch; bad args / unknown tools become isError results. */

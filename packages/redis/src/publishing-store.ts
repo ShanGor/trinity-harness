@@ -32,7 +32,10 @@ export class PublishingSessionStore implements SessionStore {
   ): Promise<SeqRange> {
     const range = await this.inner.append(sessionId, events, opts);
     if (events.length > 0) {
-      const entries = events.map((event, i) => ({ seq: range.from + i, event }));
+      const entries =
+        events[0]?.type === 'session/created' || events[0]?.type === 'activity/reference'
+          ? await this.inner.loadRange(sessionId, { afterSeq: range.from - 1, toSeq: range.to })
+          : events.map((event, i) => ({ seq: range.from + i, event }));
       try {
         await this.publisher.publish(sessionId, entries);
       } catch (err) {
@@ -52,6 +55,18 @@ export class PublishingSessionStore implements SessionStore {
     opts: { afterSeq: number; toSeq?: number },
   ): Promise<{ seq: number; event: SessionEvent }[]> {
     return this.inner.loadRange(sessionId, opts);
+  }
+
+  async loadPage(
+    sessionId: string,
+    opts: { beforeSeq?: number; limit: number },
+  ): Promise<{
+    entries: { seq: number; event: SessionEvent }[];
+    nextBefore: number | null;
+    lastSeq: number;
+  }> {
+    if (!this.inner.loadPage) throw new Error('Bounded session paging unavailable');
+    return this.inner.loadPage(sessionId, opts);
   }
 
   projectMessages(sessionId: string): Promise<Message[]> {

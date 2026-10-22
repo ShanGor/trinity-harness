@@ -35,6 +35,24 @@ export class MemorySessionStore implements SessionStore {
     return log.slice(opts.afterSeq, end).map((event, i) => ({ seq: opts.afterSeq + i + 1, event }));
   }
 
+  async loadPage(
+    sessionId: string,
+    opts: { beforeSeq?: number; limit: number },
+  ): Promise<{
+    entries: { seq: number; event: SessionEvent }[];
+    nextBefore: number | null;
+    lastSeq: number;
+  }> {
+    const log = this.logs.get(sessionId) ?? [];
+    const end = Math.min(log.length, (opts.beforeSeq ?? log.length + 1) - 1);
+    const start = Math.max(0, end - opts.limit);
+    return {
+      entries: log.slice(start, end).map((event, index) => ({ event, seq: start + index + 1 })),
+      nextBefore: start > 0 ? start + 1 : null,
+      lastSeq: log.length,
+    };
+  }
+
   async projectMessages(sessionId: string) {
     return projectMessages(await this.load(sessionId));
   }

@@ -54,6 +54,8 @@ export interface LongRunningProcess {
 }
 
 export interface OpenProcessOptions {
+  /** Dedicated POSIX process group; kill() terminates all owned descendants. */
+  processGroup?: boolean;
   cwd?: string | undefined;
   env?: Record<string, string> | undefined;
   signal?: AbortSignal | undefined;

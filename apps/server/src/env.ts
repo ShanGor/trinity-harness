@@ -10,7 +10,11 @@ import path from 'node:path';
 import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
 
-import { loadModelPricingConfig } from '@trinity-harness/core';
+import {
+  browserDeploymentEnvShape,
+  validateBrowserDeployment,
+  loadModelPricingConfig,
+} from '@trinity-harness/core';
 import { DEFAULT_SYSTEM_PROMPT, loadEnv } from '@trinity-harness/shared';
 
 const serverEnvSchema = z.object({
@@ -27,6 +31,7 @@ const serverEnvSchema = z.object({
       'MODEL must be in "provider/model-id" form, e.g. "anthropic/claude-sonnet-4-20250514"',
     )
     .default('anthropic/claude-sonnet-4-20250514'),
+  ...browserDeploymentEnvShape,
   BROWSER_CDP_ENDPOINT: browserCdpEndpointSchema.optional(),
   BROWSER_CDP_OWNER_ID: z.uuid().optional(),
   SKILL_DIRS: skillDirectoriesEnvSchema,
@@ -102,6 +107,7 @@ export function loadServerEnv(): ServerEnv {
         .join('; ')}`,
     );
   }
+  validateBrowserDeployment(result.data);
   return {
     ...result.data,
     modelPricing: loadModelPricingConfig(new URL('../../../config/models.yaml', import.meta.url)),

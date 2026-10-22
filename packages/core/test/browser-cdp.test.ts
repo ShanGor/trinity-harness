@@ -9,7 +9,7 @@ import {
 import { FakeSandbox } from '../src/testing/index.js';
 const websocket = 'ws://127.0.0.1:9222/devtools/browser/test-browser';
 const envelope = (value: unknown) => JSON.stringify({ success: true, data: value });
-function assembly() {
+function assembly(currentUrl = 'https://example.com/') {
   const sandbox = new FakeSandbox();
   const calls: string[][] = [];
   const store = new MemorySessionStore();
@@ -28,7 +28,7 @@ function assembly() {
                   ? { tabs: [{ active: true, targetId: 'owned-target' }] }
                   : {
                       result: {
-                        url: 'https://example.com/',
+                        url: currentUrl,
                         documentRevision: '123_4',
                         browserVersion: 'Chrome/151.0.0.0',
                       },
@@ -131,6 +131,42 @@ describe('explicit trusted CDP attachment', () => {
       expect(calls.filter((args) => args.includes('open'))).toEqual([]);
     },
   );
+  it('allows explicit HTTP navigation out of the owned Chrome error page, but refuses evidence reads', async () => {
+    const { access, calls } = assembly('chrome-error://chromewebdata/');
+    await expect(
+      access.authorize('s', 'navigate', 'https://example.com/recovery'),
+    ).resolves.toMatchObject({
+      tabId: 'owned-target',
+      observedUrl: 'chrome-error://chromewebdata/',
+    });
+    for (const operation of [
+      'get_page_text',
+      'read_page',
+      'screenshot',
+      'click',
+      'navigate',
+    ] as const)
+      await expect(access.authorize('s', operation, undefined)).rejects.toMatchObject({
+        code: 'CDP_PAGE_UNAVAILABLE',
+        failure: { code: 'PAGE_UNAVAILABLE', recovery: 'navigate' },
+      });
+    const count = calls.length;
+    await expect(access.authorize('s', 'navigate', 'javascript:alert(1)')).rejects.toThrow();
+    expect(calls).toHaveLength(count);
+    expect(calls.flat()).not.toContain('open');
+  });
+  it.each([
+    'chrome://settings/',
+    'file:///private',
+    'data:text/html,private',
+    'chrome-error://other/',
+  ])('does not generalize error-page recovery to %s', async (url) => {
+    const { access } = assembly(url);
+    await expect(access.authorize('s', 'navigate', 'https://example.com/')).rejects.toMatchObject({
+      code: 'CDP_UNSUPPORTED_DOCUMENT',
+      failure: { code: 'NOT_AUTHORIZED', recovery: 'conclude' },
+    });
+  });
   it('rejects unexpected document changes and cancellation', async () => {
     const { access, calls } = assembly();
     await expect(
@@ -248,4 +284,35 @@ it('restores the owned Chrome target from committed session results after adapte
   expect(calls.findIndex((args) => args.at(-1) === 'owned-target')).toBeLessThan(
     calls.findIndex((args) => args.includes('eval')),
   );
+});
+
+it('rechecks the authenticated parent for an isolated delegated binding and denies revocation before CLI effects', async () => {
+  const { sandbox, store, calls, access } = assembly();
+  const parent = await access.authorize('parent', 'navigate', 'https://example.com/');
+  let parentAllowed = true;
+  let ownershipChecks = 0;
+  const child = new TrustedCdpBrowserAccess({
+    endpoint: '9222',
+    sandbox,
+    store,
+    authorizeSession: async (sessionId) => {
+      ownershipChecks += 1;
+      return sessionId === 'child' && parentAllowed;
+    },
+  });
+  const binding = await child.authorize('child', 'navigate', 'https://example.com/');
+  expect(binding.cliSession).not.toBe(parent.cliSession);
+  expect(binding.bindingId).not.toBe(parent.bindingId);
+  parentAllowed = false;
+  const count = calls.length;
+  await expect(child.authorize('child', 'navigate', 'https://example.com/')).rejects.toMatchObject({
+    code: 'CDP_OWNER_DENIED',
+  });
+  expect(calls).toHaveLength(count);
+  parentAllowed = true;
+  await expect(child.authorize('forged', 'navigate', 'https://example.com/')).rejects.toMatchObject(
+    { code: 'CDP_OWNER_DENIED' },
+  );
+  expect(calls).toHaveLength(count);
+  expect(ownershipChecks).toBe(3);
 });

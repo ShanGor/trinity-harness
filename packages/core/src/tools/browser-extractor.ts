@@ -34,12 +34,9 @@ export function browserExtractor(mode: 'article' | 'documentation', scopePath?: 
     }
     const blocks = []; let sectionId = null, bytes = 0, nodes = 0;
     const encoder = new TextEncoder();
-    const walk = (node) => {
-      if (++nodes > 20000 || blocks.length >= 1000) { truncated = true; return; }
-      if (!node || node.nodeType !== 1 || excluded.has(node.tagName) || !visible(node)) return;
-      const tag = node.tagName;
-      if (/^H[1-6]$/.test(tag) || ['P','LI','PRE','TABLE'].includes(tag)) {
-        const clone = clean(node); if (!clone) return;
+    const semantic = tag => /^H[1-6]$/.test(tag) || ['P','LI','PRE','TABLE'].includes(tag);
+    const emit = (clone, tag) => {
+        if (blocks.length >= 1000) { truncated = true; return; }
         if (tag === 'LI') clone.querySelectorAll('ul,ol').forEach(list => list.remove());
         const raw = tag === 'PRE' ? clone.textContent : clone.textContent.replace(/\\s+/g, ' ').trim();
         let text = Array.from(raw).slice(0, 16000).join('');
@@ -57,15 +54,39 @@ export function browserExtractor(mode: 'article' | 'documentation', scopePath?: 
         const size = encoder.encode(JSON.stringify(block)).length;
         if (bytes + size > 180000) { truncated = true; return; }
         bytes += size; blocks.push(block);
+    };
+    const walk = (node) => {
+      if (++nodes > 20000 || blocks.length >= 1000) { truncated = true; return; }
+      if (!node || node.nodeType !== 1 || excluded.has(node.tagName) || node.getAttribute('contenteditable') === 'true' || node.getAttribute('role') === 'textbox' || !visible(node)) return;
+      const tag = node.tagName;
+      if (semantic(tag)) {
+        const clone = clean(node); if (!clone) return;
+        emit(clone, tag);
         if (tag === 'LI') for (const child of node.children) if (['UL','OL'].includes(child.tagName)) walk(child);
         return;
       }
-      for (const child of node.children) { walk(child); if (truncated) break; }
+      // Preserve text between block containers, including SPA div/span content.
+      // Inline runs share one block so links and adjacent text keep their order.
+      let run = document.createElement('div');
+      const flush = () => { if (run.childNodes.length) emit(run, 'DIV'); run = document.createElement('div'); };
+      for (const child of node.childNodes) {
+        if (++nodes > 20000) { truncated = true; break; }
+        if (child.nodeType === 3) { const copied = clean(child); if (copied) run.appendChild(copied); }
+        else if (child.nodeType === 1) {
+          if (excluded.has(child.tagName) || child.getAttribute('contenteditable') === 'true' || child.getAttribute('role') === 'textbox' || !visible(child)) continue;
+          const display = getComputedStyle(child).display;
+          if (semantic(child.tagName) || /^(block|flow-root|flex|grid|table|list-item)/.test(display) || child.querySelector('h1,h2,h3,h4,h5,h6,p,li,pre,table,div,section,article')) {
+            flush(); if (truncated) break; walk(child);
+          } else { const copied = clean(child); if (copied) run.appendChild(copied); }
+        }
+        if (truncated) break;
+      }
+      flush();
     };
     walk(root);
     const metadata = document.querySelector('meta[property="article:published_time"],meta[name="datePublished"],meta[itemprop="datePublished"]');
     const date = metadata?.getAttribute('content');
-    return {schemaVersion:1,extractorVersion:'semantic-v1',url:location.href,title:document.title.slice(0,500),publishedAt:date ? {value:date.slice(0,200),origin:metadata.getAttribute('property') || metadata.getAttribute('name') || metadata.getAttribute('itemprop')} : null,
-      readiness:document.readyState === 'loading' ? 'partial':'ready',representation:mode,scope:selected ? selected.tagName.toLowerCase():'body-fallback',exclusions:['hidden/collapsed','navigation','form values','scripts/styles','cross-origin frames'],blocks,captureTruncated:truncated};
+    return {schemaVersion:1,extractorVersion:'semantic-v2',url:location.href,title:document.title.slice(0,500),publishedAt:date ? {value:date.slice(0,200),origin:metadata.getAttribute('property') || metadata.getAttribute('name') || metadata.getAttribute('itemprop')} : null,
+      readiness:document.readyState === 'loading' || !blocks.length ? 'partial':'ready',representation:mode,scope:selected ? selected.tagName.toLowerCase():'body-fallback',exclusions:['hidden/collapsed','navigation','form values','scripts/styles','cross-origin frames'],blocks,captureTruncated:truncated};
   })()`;
 }

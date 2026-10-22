@@ -1,3 +1,5 @@
+import { personalModelMessages, fitDialogue } from '../personal-assistant/memory.js';
+import type { PersonalContextPort, SessionMetaStore } from '@trinity-harness/contracts';
 import type { SkillRuntimePort } from '@trinity-harness/contracts';
 import type {
   AgentLoop,
@@ -24,12 +26,7 @@ import type {
   TaskExecutionPort,
   TaskBudgetScope,
 } from '@trinity-harness/contracts';
-import {
-  BROWSER_LIMITS,
-  browserErrorSchema,
-  turnStepBudgetSchema,
-  windowStart,
-} from '@trinity-harness/contracts';
+import { BROWSER_LIMITS, turnStepBudgetSchema, windowStart } from '@trinity-harness/contracts';
 import { sumTokenUsage, newId } from '@trinity-harness/shared';
 
 import { normalizeTokenUsage, priceUsage } from '../llm/usage.js';
@@ -43,21 +40,26 @@ import {
   turnDuration,
   turnSteps,
 } from '../telemetry.js';
-import { browserDiagnosticBytes, resolveBrowserImage } from '../tools/browser-artifacts.js';
+import { resolveBrowserImage } from '../tools/browser-artifacts.js';
 import { matchesCommandPrefix } from '../tools/command-prefix.js';
 import { bashReferencesSensitiveFile } from '../tools/sensitive-files.js';
 import { progressGuidance } from './progress-guidance.js';
-import { taskVerification, verificationToolAllowed } from './task-verification.js';
+import { taskVerification, verificationToolAllowed, hasTaskEffects } from './task-verification.js';
 import { estimateRequestTokens, observedInputAdjustment } from '../context/estimate-tokens.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { toModelMessages } from './to-model-messages.js';
 import { answerGrounding } from './answer-grounding.js';
+import { modelContextRecord } from './model-context.js';
+import { classifyModelFailure, modelRetry, retryProgress } from './model-retry.js';
+export { classifyModelFailure } from './model-retry.js';
 
 const DEFAULT_MAX_PARALLEL_TOOLS = 4;
 /** M4 spill default: tool results above 50 KB go to the BlobStore (§7). */
 const DEFAULT_SPILL_THRESHOLD_BYTES = 50_000;
 
 export interface AgentLoopOptions {
+  personalContext?: PersonalContextPort | undefined;
+  sessionMetas?: SessionMetaStore | undefined;
   llm: LLMPort;
   /** e.g. "anthropic/claude-sonnet-4-20250514". */
   model: string;
@@ -74,6 +76,8 @@ export interface AgentLoopOptions {
   maxRetries?: number | undefined;
   /** Injected clock/backoff for deterministic recovery tests. */
   wait?: ((ms: number, signal?: AbortSignal) => Promise<void>) | undefined;
+  /** Clock for durable retry scheduling; production uses UTC epoch milliseconds. */
+  now?: (() => number) | undefined;
   /** Rolling pool size for parallel-class tools (design.md §6.3). */
   maxParallelTools?: number | undefined;
   /**
@@ -131,31 +135,6 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function classifyModelFailure(error: unknown): 'overflow' | 'retry' | 'fatal' {
-  const value = error as {
-    statusCode?: unknown;
-    code?: unknown;
-    isRetryable?: unknown;
-    cause?: unknown;
-  } | null;
-  const message = errorMessage(error).toLowerCase();
-  if (
-    /(context[_ -]?(length|window)|maximum context|too many tokens|prompt.{0,30}too long)/.test(
-      message,
-    )
-  )
-    return 'overflow';
-  if (
-    value?.isRetryable === true ||
-    [408, 429, 500, 502, 503, 504].includes(Number(value?.statusCode)) ||
-    ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED'].includes(String(value?.code)) ||
-    /stream interrupted|socket closed|fetch failed/.test(message)
-  )
-    return 'retry';
-  if (value?.cause && value.cause !== error) return classifyModelFailure(value.cause);
-  return 'fatal';
-}
-
 /** Bounded, log-safe argument preview for approval requests (§5 redaction). */
 function preview(value: unknown, max = 500): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
@@ -187,7 +166,11 @@ export class CoreAgentLoop implements AgentLoop {
   ): Promise<TurnOutcome> {
     let signal = runOpts?.signal;
     let taskBudget: TaskBudgetScope | undefined = runOpts?.taskBudget;
-    const { store, tools, llm } = this.opts;
+    const { store, llm } = this.opts;
+    const creation = (await store.loadRange(sessionId, { afterSeq: 0, toSeq: 1 }))[0]?.event;
+    const isChat = creation?.type === 'session/created' && creation.kind === 'chat';
+    const verificationEnabled = this.opts.verification;
+    const tools = this.opts.tools;
     const actor = runOpts?.actor;
     const tenantId = runOpts?.tenantId;
     const appendOpts = actor !== undefined ? { actor } : undefined;
@@ -196,6 +179,7 @@ export class CoreAgentLoop implements AgentLoop {
       workspaceRoot: this.opts.workspaceRoot,
       signal,
       tenantId,
+      permissionPolicy: runOpts?.policy,
     };
     // M5 OTel: one span per turn/step/tool/approval (design.md §17). No-op
     // without a registered SDK (@opentelemetry/api global fallthrough).
@@ -230,7 +214,7 @@ export class CoreAgentLoop implements AgentLoop {
         runOpts?.content !== undefined && runOpts.content.length > 0
           ? runOpts.content
           : [{ kind: 'text', text: prompt }];
-      const promptPreview =
+      let promptPreview =
         userContent.find((b) => b.kind === 'text')?.text ??
         userContent
           .map((b) =>
@@ -253,7 +237,41 @@ export class CoreAgentLoop implements AgentLoop {
             )
           : null;
       const promptSeq = runOpts?.promptSeq ?? appendedUser!.from;
-      const promptId = (await store.load(sessionId))[promptSeq - 1]!.eventId;
+      const committedPrompt = (await store.load(sessionId))[promptSeq - 1]!;
+      const promptId = committedPrompt.eventId;
+      const previousStart = (await store.load(sessionId)).findLast(
+        (event) => event.type === 'turn/start' && event.promptId === promptId,
+      );
+      const executionVersion =
+        previousStart?.type === 'turn/start' ? (previousStart.executionVersion ?? 1) : 2;
+      if (committedPrompt.type !== 'message/user')
+        throw new Error('Committed user request is missing');
+      ctx.userRequest = committedPrompt.content
+        .filter((block) => block.kind === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      promptPreview =
+        ctx.userRequest ||
+        committedPrompt.content
+          .map((block) =>
+            block.kind === 'image' || block.kind === 'file'
+              ? `[${block.kind}: ${block.uri}]`
+              : '[content block]',
+          )
+          .join(' ');
+      if (this.opts.personalContext || runOpts?.contextGuard)
+        ctx.contextGuard = async () => {
+          await runOpts?.contextGuard?.();
+          if (!this.opts.personalContext?.validate || !this.opts.sessionMetas) return;
+          const receipt = (await store.load(sessionId)).findLast(
+            (event) => event.type === 'memory/selection' && event.receipt.promptId === promptId,
+          );
+          if (receipt?.type !== 'memory/selection') return;
+          const owner = await this.opts.sessionMetas.get(sessionId);
+          if (!owner || owner.closedAt) throw new Error('Session access unavailable');
+          await this.opts.personalContext.validate(owner, receipt.receipt, signal);
+        };
+
       const persistUsage = async (usage: ModelUsage): Promise<void> => {
         if (
           !(await store.load(sessionId)).some(
@@ -264,6 +282,23 @@ export class CoreAgentLoop implements AgentLoop {
         sink.emit({ type: 'model/usage', usage });
       };
       ctx.recordUsage = (usage) => persistUsage({ ...usage, promptId, purpose: 'subagent' });
+      ctx.reportProgress = async (content) => {
+        if (signal?.aborted || (await checkCancellation())) return;
+        await store.append(
+          sessionId,
+          [
+            {
+              ...meta(),
+              type: 'message/assistant',
+              phase: 'progress',
+              surfaceOp: 'append',
+              content: [{ kind: 'text', text: content }],
+            },
+          ],
+          appendOpts,
+        );
+        sink.emit({ type: 'message/assistant', phase: 'progress', content });
+      };
       const recordUsage = async (
         model: string,
         purpose: ModelUsage['purpose'],
@@ -304,6 +339,7 @@ export class CoreAgentLoop implements AgentLoop {
         purpose: ModelUsage['purpose'],
       ): Promise<AsyncIterable<StreamChunk>> => {
         if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
+        await ctx.contextGuard?.();
         if (signal?.aborted) signal.throwIfAborted();
         const denied = this.opts.usage && tenantId ? await this.checkQuota(tenantId) : null;
         if (denied) throw new Error(denied);
@@ -314,6 +350,20 @@ export class CoreAgentLoop implements AgentLoop {
             effectivePurpose,
             purpose === 'compaction' ? 'work' : lane,
           )) ?? newId();
+        if (executionVersion === 2) {
+          const record = await modelContextRecord(
+            request,
+            await store.load(sessionId),
+            sessionId,
+            promptId,
+            requestId,
+            purpose === 'compaction' ? 'compaction' : 'assistant',
+            this.opts.spill?.store,
+          );
+          await store.append(sessionId, [{ ...meta(), ...record }], appendOpts);
+        }
+        await ctx.contextGuard?.();
+        throwIfAborted();
         let stream: AsyncIterable<StreamChunk>;
         try {
           stream = await llm.stream(request);
@@ -337,6 +387,7 @@ export class CoreAgentLoop implements AgentLoop {
         kind: 'retry' | 'overflow' | 'length' | 'interrupted' | 'verification',
         advice: string,
         limit: number,
+        failure?: unknown,
       ): Promise<boolean> => {
         const events = await store.load(sessionId);
         const attempts = events
@@ -346,44 +397,118 @@ export class CoreAgentLoop implements AgentLoop {
               event.type === 'task/recovery' && event.promptId === promptId && event.kind === kind,
           ).length;
         if (attempts >= limit || steps >= stepLimit) return false;
+        const retry =
+          failure === undefined
+            ? undefined
+            : modelRetry(failure, attempts + 1, (this.opts.now ?? Date.now)());
+        const progress = retry ? retryProgress(retry) : undefined;
         await store.append(
           sessionId,
-          [{ ...meta(), type: 'task/recovery', promptId, kind, advice }],
+          [
+            {
+              ...meta(),
+              type: 'task/recovery',
+              promptId,
+              kind,
+              advice,
+              ...(retry ? { retry } : {}),
+            },
+            ...(progress
+              ? [
+                  {
+                    ...meta(),
+                    type: 'message/assistant' as const,
+                    surfaceOp: 'append' as const,
+                    phase: 'progress' as const,
+                    content: [{ kind: 'text' as const, text: progress }],
+                  },
+                ]
+              : []),
+          ],
           appendOpts,
         );
-        if (kind === 'retry')
+        if (progress)
+          sink.emit({ type: 'message/assistant', phase: 'progress', content: progress });
+        return true;
+      };
+      const waitForRetry = async (): Promise<void> => {
+        const events = await store.load(sessionId);
+        const index = events.findLastIndex(
+          (event) =>
+            event.type === 'task/recovery' &&
+            event.promptId === promptId &&
+            event.retry !== undefined,
+        );
+        const recovery = events[index];
+        if (recovery?.type !== 'task/recovery' || !recovery.retry) return;
+        // A later attempt consumes this schedule. Old prompts and legacy events
+        // cannot impose a new wait, and replay uses the original deadline.
+        if (
+          events
+            .slice(index + 1)
+            .some(
+              (event) =>
+                ((event.type === 'task/request' || event.type === 'task/step') &&
+                  event.promptId === promptId) ||
+                (event.type === 'model/usage' && event.usage.promptId === promptId),
+            )
+        )
+          return;
+        const remaining = Date.parse(recovery.retry.retryAt) - (this.opts.now ?? Date.now)();
+        if (remaining > 0)
           await (
             this.opts.wait ??
             (async (ms, abort) => {
               await delay(ms, undefined, { signal: abort });
             })
-          )(Math.min(1000 * 2 ** attempts, 8000), signal);
-        return true;
+          )(remaining, signal);
+        throwIfAborted();
+        if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
       };
       const compact = async (force = false, system?: string): Promise<boolean> => {
         if (!this.opts.context) return false;
-        try {
-          const result = await this.opts.context.compact(sessionId, {
-            signal,
-            appendOpts,
-            sink,
-            force,
-            model: this.opts.model,
-            ...(system ? { system } : {}),
-            tools: tools.schemas(),
-            llm: { stream: (request) => requestStream(request, 'compaction') },
-          });
-          return result.compacted;
-        } catch (error) {
-          // Preserve the parent conclusion allowance. Quota/security failures still propagate.
-          if ((error as { code?: unknown } | null)?.code === 'TASK_BUDGET_EXHAUSTED') return false;
-          throw error;
+        for (;;) {
+          try {
+            const result = await this.opts.context.compact(sessionId, {
+              signal,
+              appendOpts,
+              sink,
+              force,
+              memoryPromptId:
+                creation?.type === 'session/created' && creation.kind ? promptId : undefined,
+              model: this.opts.model,
+              ...(system ? { system } : {}),
+              tools: tools.schemas(),
+              llm: { stream: (request) => requestStream(request, 'compaction') },
+            });
+            return result.compacted;
+          } catch (error) {
+            // Preserve the parent conclusion allowance. Quota/security failures still propagate.
+            if ((error as { code?: unknown } | null)?.code === 'TASK_BUDGET_EXHAUSTED')
+              return false;
+            if (signal?.aborted || isAbortError(error)) throw error;
+            if (
+              classifyModelFailure(error) === 'retry' &&
+              (await recover(
+                'retry',
+                'The previous compaction request failed before a complete checkpoint. Retry from committed task state.',
+                this.opts.maxRetries ?? 3,
+                error,
+              ))
+            ) {
+              await waitForRetry();
+              continue;
+            }
+            throw error;
+          }
         }
       };
 
       const checkCancellation = async (): Promise<boolean> =>
         (await store.load(sessionId)).some(
-          (event) => event.type === 'turn/cancel_requested' && promptSeq <= event.throughPromptSeq,
+          (event) =>
+            event.type === 'turn/cancel_requested' &&
+            (runOpts?.cancellationSeq ?? promptSeq) <= event.throughPromptSeq,
         );
       if (await checkCancellation()) reason = 'aborted';
 
@@ -417,7 +542,30 @@ export class CoreAgentLoop implements AgentLoop {
       }
 
       try {
+        if (isChat) {
+          const binding = (await store.load(sessionId)).findLast(
+            (event) => event.type === 'session/workspace_bound',
+          );
+          const workspace =
+            binding?.type === 'session/workspace_bound'
+              ? binding.workspaceUri
+              : creation.workspaceUri;
+          if (!workspace || workspace !== this.opts.workspaceRoot)
+            throw new Error('Chat workspace must be bound before execution');
+        }
         if (reason === 'completed') {
+          if (
+            creation?.type === 'session/created' &&
+            creation.kind &&
+            !(await store.load(sessionId)).some(
+              (event) => event.type === 'turn/start' && event.promptId === promptId,
+            )
+          )
+            await store.append(
+              sessionId,
+              [{ ...meta(), type: 'turn/start', promptId, executionVersion: 2 }],
+              appendOpts,
+            );
           taskBudget ??= await this.opts.execution?.open(sessionId, promptId, signal, actor);
           if (taskBudget) {
             stepLimit = Math.min(stepLimit, taskBudget.maxSteps ?? Infinity);
@@ -441,7 +589,60 @@ export class CoreAgentLoop implements AgentLoop {
             detail = `step limit (${stepLimit}) reached`;
             break;
           }
+          await waitForRetry();
           steps += 1;
+          await ctx.contextGuard?.();
+          if (
+            creation?.type === 'session/created' &&
+            creation.kind &&
+            this.opts.personalContext &&
+            this.opts.sessionMetas
+          ) {
+            const selectionEvents = await store.load(sessionId);
+            const selected = selectionEvents.findLast(
+              (event) => event.type === 'memory/selection' && event.receipt.promptId === promptId,
+            );
+            if (!selected) {
+              const owner = await this.opts.sessionMetas.get(sessionId);
+              if (!owner || owner.closedAt) throw new Error('Session access unavailable');
+              if (owner.scope !== 'team') {
+                const active = personalModelMessages(selectionEvents, {
+                  promptId,
+                  policyRevision: 0,
+                  memories: [],
+                  episodes: [],
+                  omitted: false,
+                });
+                const inputTokens = estimateRequestTokens({
+                  messages: active,
+                  system: this.opts.systemPrompt,
+                  tools: tools.schemas(),
+                });
+                const dialogueCharacters = Math.max(
+                  0,
+                  Math.floor(
+                    ((this.opts.maxContextTokens ?? 200_000) -
+                      (this.opts.maxOutputTokens ?? 8192) -
+                      inputTokens * 1.15) *
+                      2,
+                  ),
+                );
+                const receipt = await this.opts.personalContext.select(
+                  owner,
+                  promptId,
+                  ctx.userRequest ?? '',
+                  signal,
+                  committedPrompt.at,
+                  dialogueCharacters,
+                );
+                await store.append(
+                  sessionId,
+                  [{ ...meta(), type: 'memory/selection', receipt }],
+                  appendOpts,
+                );
+              }
+            }
+          }
 
           // M4 context pressure: compact BEFORE the request so history entering
           // a new turn is bounded, and again between steps after tool waves
@@ -452,7 +653,7 @@ export class CoreAgentLoop implements AgentLoop {
           await this.opts.skills?.prepare({
             sessionId,
             workspaceRoot: this.opts.workspaceRoot,
-            prompt: steps === 1 ? prompt : undefined,
+            prompt: steps === 1 ? ctx.userRequest : undefined,
             policy: runOpts?.policy,
             signal,
             appendOpts,
@@ -478,17 +679,10 @@ export class CoreAgentLoop implements AgentLoop {
               appendOpts,
             );
             history = await store.load(sessionId);
+            sink.emit({ type: 'turn/guidance', advice: currentAdvice });
           }
           // M4: per-step system augmentation (LSP diagnostics injection, §9).
           const augmented = await this.opts.augmentSystem?.(sessionId);
-          const browserBudgetExhausted = history.slice(promptSeq).some((event) => {
-            if (event.type !== 'tool/result' || !event.isError) return false;
-            const parsed = browserErrorSchema.safeParse(event.value);
-            return parsed.success && parsed.data.recovery === 'conclude';
-          });
-          const diagnosticsExhausted =
-            browserDiagnosticBytes(history, promptSeq) >=
-            BROWSER_LIMITS.diagnosticTurn - BROWSER_LIMITS.callsPerStep * BROWSER_LIMITS.diagnostic;
           const planned = history.some(
             (event) => event.type === 'task/plan' && event.promptId === promptId,
           );
@@ -513,21 +707,27 @@ export class CoreAgentLoop implements AgentLoop {
             planned &&
             verification.status !== 'verified' &&
             (steps >= stepLimit - 2 || budgetConcluding);
-          const concluding =
-            steps === stepLimit ||
-            budgetFinalizing ||
-            browserBudgetExhausted ||
-            diagnosticsExhausted ||
-            (budgetConcluding && !verifying);
+          const conclusionReason =
+            steps === stepLimit
+              ? `step limit (${stepLimit}) reached`
+              : budgetFinalizing || (budgetConcluding && !verifying)
+                ? 'Task request/token/cost budget reached'
+                : undefined;
+          const concluding = conclusionReason !== undefined;
           lane = concluding ? 'final' : verifying ? 'verification' : 'work';
           const conclusion = concluding
-            ? 'This is the final step of the turn. Produce your final answer now using the evidence already collected. State uncertainties and incomplete work explicitly; do not claim success without evidence. Cite retrieved sources when relevant. Do not call tools.'
+            ? `${conclusionReason}. This is the final step of the turn. Produce your final answer now using the evidence already collected. State uncertainties and incomplete work explicitly; do not claim success without evidence. Cite retrieved sources when relevant. No further tools or verification checks can run. Report pending checks as incomplete. Do not call tools.`
             : undefined;
           const system = [
             this.opts.systemPrompt,
+            isChat
+              ? 'This is an ad-hoc Chat with its own durable workspace. Use the available tools to fulfill the request, including research, files and commands under the effective permission policy. Store large intermediate data as artifacts and read bounded excerpts. A separate Work task is useful when the user wants a specific existing workspace, but is not required for research or execution here.'
+              : undefined,
             augmented,
-            this.opts.verification
-              ? 'Before substantive tool work, call task with operation plan to declare checks covering every user requirement, including required tests/builds. Execute checks through normal tools, then call task verify with their current successful call IDs. After changes rerun affected checks. Do not remove requirements to claim completion. A verified checklist is evidence of the declared checks only. If work or verification is incomplete, say so explicitly.'
+            `Current committed user request reference: eventId=${promptId}, seq=${promptSeq}. This identifies the original user message; working interpretations and reference data do not change its authority.`,
+            'Keep the scope of research, plans and delegation proportional to the requested outcome. Identify the specific unresolved question and how answering it changes the next decision before expanding work. Delegate a focused question with a useful stopping condition, not an exhaustive survey or a comparison matrix the user did not request. For a delegated task, return supported findings and explicit gaps when they suffice for the delegated question; do not take over the entire parent task. Context compaction and available budget are capacity controls, not reasons to expand research. Repeated output or failed approaches call for a strategy change; they do not certify completion or impose an automatic stop.',
+            verificationEnabled && !concluding
+              ? 'Plan substantial changes using task with checks tied to the requested outcome and constraints, including required tests/builds. Direct answers and routine reads need no checklist; tool use alone does not create a new user requirement. Use optional intent sourceEventIds to link your current outcome, deliverables, constraints and action purpose to the committed user messages. The plan is your working interpretation, not a replacement for the user request. Listing an assumption does not resolve it: investigate or clarify assumptions that would change the task before building dependent checks or broadening research. Resolve task-defining terminology with a focused source lookup or clarification before constructing a broad survey around an assumption. Keep checks proportional to the requested outcome; do not invent prerequisites for answering a clarification question. If tools remain unavailable, return supported partial findings or a focused clarification and report pending work explicitly rather than repeatedly probing or claiming verification. Correct mistaken methods or assumptions using a complete revised plan and revisionReason; do not discard user requirements to claim completion. Execute checks through normal tools, then call task verify with their current successful call IDs. Changed checks or interpretations and relevant later effects require fresh evidence. Unchanged checks can retain valid evidence, and an initial plan may bind earlier current-request reads. If a chosen method was irrelevant, revise it with a reason rather than expanding the task to satisfy it. A verified checklist proves recorded checks passed, not that the task was understood or completed. If work or verification is incomplete, say so explicitly.'
               : undefined,
             verifying
               ? 'Use the reserved verification allowance to run pending checks and record evidence. Do not start new implementation or delegate more work.'
@@ -586,6 +786,41 @@ export class CoreAgentLoop implements AgentLoop {
           if (await compact(false, system)) {
             history = await store.load(sessionId);
             request.messages = toModelMessages(history);
+          }
+          // Optional dialogue yields space to the active request, instructions
+          // and tool pairs. Each changed selection remains replayable.
+          for (;;) {
+            const rawEstimate = estimateRequestTokens({
+              ...request,
+              estimatedInputTokens: undefined,
+            });
+            if (
+              Math.ceil(rawEstimate * 1.15) + (this.opts.maxOutputTokens ?? 8192) <=
+              (this.opts.maxContextTokens ?? 200_000)
+            )
+              break;
+            const selection = history.findLast(
+              (event) => event.type === 'memory/selection' && event.receipt.promptId === promptId,
+            );
+            if (
+              selection?.type !== 'memory/selection' ||
+              selection.receipt.version !== 2 ||
+              !selection.receipt.dialogue?.length
+            )
+              break;
+            const characters = selection.receipt.dialogue.reduce(
+              (n, exchange) => n + exchange.request.text.length + exchange.answer.text.length,
+              0,
+            );
+            const receipt = fitDialogue(selection.receipt, Math.floor(characters / 2));
+            await store.append(
+              sessionId,
+              [{ ...meta(), type: 'memory/selection', receipt }],
+              appendOpts,
+            );
+            history = await store.load(sessionId);
+            request.messages = toModelMessages(history);
+            request.estimatedInputTokens = undefined;
           }
           request.estimatedInputTokens =
             estimateRequestTokens(request) + observedInputAdjustment(history, this.opts.model);
@@ -674,6 +909,7 @@ export class CoreAgentLoop implements AgentLoop {
                 'retry',
                 'The previous model request failed before output. Retry from the committed task state.',
                 this.opts.maxRetries ?? 3,
+                failure,
               ))
             )
               continue;
@@ -685,6 +921,7 @@ export class CoreAgentLoop implements AgentLoop {
                 'interrupted',
                 'The previous model response was interrupted. Continue from the recorded partial response without repeating it. Inspect state before retrying effects.',
                 2,
+                failure,
               ))
             ) {
               await store.append(
@@ -712,17 +949,61 @@ export class CoreAgentLoop implements AgentLoop {
 
           const truncated = finish === 'length';
           const needsVerification =
-            this.opts.verification &&
+            verificationEnabled &&
             toolCalls.length === 0 &&
             !truncated &&
-            (planned ||
-              history
-                .slice(promptSeq)
-                .some((event) => event.type === 'tool/call' && event.name !== 'task'));
+            (executionVersion === 2
+              ? planned || hasTaskEffects(history, promptId)
+              : planned ||
+                history
+                  .slice(promptSeq)
+                  .some(
+                    (event) =>
+                      event.type === 'tool/call' &&
+                      !['task', 'skill', 'recall'].includes(event.name),
+                  ));
           const assessment = taskVerification(await store.load(sessionId), promptId);
           const rejectedCompletion = needsVerification && assessment.status !== 'verified';
           let repairCompletion = false;
           if (rejectedCompletion) {
+            if (executionVersion === 2) {
+              const candidateEvents = await store.load(sessionId);
+              const plan = candidateEvents.findLast(
+                (event) => event.type === 'task/plan' && event.promptId === promptId,
+              );
+              const context = candidateEvents.findLast(
+                (event) =>
+                  event.type === 'model/context' &&
+                  event.promptId === promptId &&
+                  event.purpose === 'assistant',
+              );
+              const priorCandidate = candidateEvents.findLast(
+                (event) => event.type === 'response/candidate' && event.promptId === promptId,
+              );
+              if (
+                priorCandidate?.type !== 'response/candidate' ||
+                priorCandidate.text !== text ||
+                priorCandidate.planId !== plan?.eventId ||
+                priorCandidate.contextId !== context?.eventId ||
+                JSON.stringify(priorCandidate.failedConditions) !==
+                  JSON.stringify(assessment.pending)
+              )
+                await store.append(
+                  sessionId,
+                  [
+                    {
+                      ...meta(),
+                      type: 'response/candidate',
+                      promptId,
+                      text,
+                      failedConditions: assessment.pending,
+                      ...(plan ? { planId: plan.eventId } : {}),
+                      ...(context ? { contextId: context.eventId } : {}),
+                    },
+                  ],
+                  appendOpts,
+                );
+            }
             await store.append(
               sessionId,
               [{ ...meta(), type: 'task/assessment', promptId, ...assessment }],
@@ -731,13 +1012,16 @@ export class CoreAgentLoop implements AgentLoop {
             if (!concluding)
               repairCompletion = await recover(
                 'verification',
-                `Completion is not verified. Complete the pending checks using task before the final answer: ${assessment.pending.join('; ').slice(0, 1400)}`,
+                `Repair the rejected candidate against the committed user request and its actual source context. First reconsider whether the interpretation, expanded scope or method checks were mistaken; revise them with a reason while preserving user outcomes and constraints. Complete relevant required checks if tools and evidence are available. Otherwise return a qualified useful result or focused clarification; do not invent prerequisites or retry unavailable tools for bookkeeping. Pending checks: ${assessment.pending.join('; ').slice(0, 1100)}`,
                 2,
               );
             if (!repairCompletion) {
               reason = 'error';
               detail = `Task incomplete: ${assessment.pending.join('; ').slice(0, 1400)}`;
-              text = `Task verification is incomplete. ${assessment.pending.join('; ')}\n\n${text}`;
+              text =
+                executionVersion === 2
+                  ? `Required verification remains incomplete; this result is provisional.\n\n${text}`
+                  : `Task verification is incomplete. ${assessment.pending.join('; ')}\n\n${text}`;
             }
           } else if (needsVerification)
             await store.append(
@@ -835,7 +1119,7 @@ export class CoreAgentLoop implements AgentLoop {
 
           if (concluding) {
             reason = 'error';
-            detail = `step limit (${stepLimit}) reached`;
+            detail = conclusionReason;
             break;
           }
 
@@ -872,6 +1156,10 @@ export class CoreAgentLoop implements AgentLoop {
                 callId: call.id,
                 name: call.name,
                 args: call.args,
+                effect: tools.effectOf?.(call) ?? {
+                  kind: 'unknown' as const,
+                  scope: 'unknown' as const,
+                },
               })),
               appendOpts,
             );
@@ -997,6 +1285,16 @@ export class CoreAgentLoop implements AgentLoop {
                   callId: call.id,
                   value: result.value,
                   isError: result.isError,
+                  effect: presolved.has(call.id)
+                    ? {
+                        kind: 'read' as const,
+                        scope: 'control' as const,
+                        evidence: 'none' as const,
+                      }
+                    : (tools.effectOf?.(call) ?? {
+                        kind: 'unknown' as const,
+                        scope: 'unknown' as const,
+                      }),
                 };
               }),
               appendOpts,
@@ -1023,9 +1321,15 @@ export class CoreAgentLoop implements AgentLoop {
         }
       }
 
-      if (this.opts.verification || taskBudget) {
+      if (verificationEnabled || taskBudget) {
         const events = await store.load(sessionId);
         const assessment = taskVerification(events, promptId);
+        if (
+          executionVersion === 2 &&
+          !hasTaskEffects(events, promptId) &&
+          !events.some((event) => event.type === 'task/plan' && event.promptId === promptId)
+        )
+          assessment.pending = [];
         if (reason !== 'completed') {
           assessment.status = 'incomplete';
           if (!assessment.pending.length)
@@ -1045,12 +1349,45 @@ export class CoreAgentLoop implements AgentLoop {
             appendOpts,
           );
       }
+      if (executionVersion === 2) {
+        const events = await store.load(sessionId);
+        const plan = events.findLast(
+          (event) => event.type === 'task/plan' && event.promptId === promptId,
+        );
+        const assessment = taskVerification(events, promptId);
+        const outcomeIndex = events.findLastIndex(
+          (event) => event.type === 'task/outcome' && event.promptId === promptId,
+        );
+        const outcome = events[outcomeIndex];
+        const effectAfter =
+          outcomeIndex < 0 ||
+          hasTaskEffects([committedPrompt, ...events.slice(outcomeIndex + 1)], promptId);
+        await store.append(
+          sessionId,
+          [
+            {
+              ...meta(),
+              type: 'task/completion',
+              promptId,
+              checksStatus: assessment.status,
+              executionReason: reason,
+              ...(outcome?.type === 'task/outcome' &&
+              outcome.planId === plan?.eventId &&
+              !effectAfter
+                ? { outcomeId: outcome.eventId }
+                : {}),
+            },
+          ],
+          appendOpts,
+        );
+      }
       await store.append(
         sessionId,
         [
           {
             ...meta(),
             type: 'turn/end',
+            promptId,
             reason,
             ...(detail !== undefined ? { detail } : {}),
           },
@@ -1131,7 +1468,7 @@ export class CoreAgentLoop implements AgentLoop {
     result: ToolResult,
   ): Promise<ToolResult> {
     const spill = this.opts.spill;
-    if (!spill || call.name === 'skill' || call.name === 'browser') return result;
+    if (!spill || ['skill', 'browser', 'recall'].includes(call.name)) return result;
     let serialized: string;
     try {
       serialized = typeof result.value === 'string' ? result.value : JSON.stringify(result.value);
@@ -1298,6 +1635,7 @@ export class CoreAgentLoop implements AgentLoop {
     });
     const startedAt = Date.now();
     try {
+      await ctx.contextGuard?.();
       const result = await tools.execute(call, ctx);
       toolCounter.add(1, {
         'trinity.tool': call.name,

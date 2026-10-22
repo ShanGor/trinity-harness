@@ -263,6 +263,49 @@ describe('research evidence notes', () => {
       researchNotesSchema.safeParse({ ...notes, findings: [], readyToAnswer: false }).success,
     ).toBe(true);
   });
+  it('identifies invalid research fields without echoing submitted claims', async () => {
+    const { registry } = await assembly();
+    const invalid = structuredClone(notes);
+    const args = {
+      action: 'record',
+      notes: {
+        ...invalid,
+        findings: [
+          { ...invalid.findings[0], claim: 'private submitted content', relation: 'invalid' },
+        ],
+      },
+    };
+    const result = await registry.execute({ id: 'invalid-relation', name: 'research', args }, ctx);
+    expect(result).toMatchObject({
+      isError: true,
+      value: {
+        issues: [expect.stringContaining('notes.findings.0.relation')],
+      },
+    });
+    expect(JSON.stringify(result.value)).not.toContain('private submitted content');
+  });
+  it.each(['', 'not a URL', 'https://'])(
+    'rejects invalid source %j without throwing or ending the turn',
+    async (url) => {
+      const invalid = structuredClone(notes);
+      invalid.findings[0]!.sources[0] = { url, quote: '' };
+      expect(researchNotesSchema.safeParse(invalid).success).toBe(false);
+      const { registry } = await assembly();
+      const result = await registry.execute(
+        { id: 'bad-url', name: 'research', args: { action: 'record', notes: invalid } },
+        ctx,
+      );
+      expect(result.isError).toBe(true);
+      expect(
+        (
+          await registry.execute(
+            { id: 'recover', name: 'research', args: { action: 'status' } },
+            ctx,
+          )
+        ).isError,
+      ).toBe(false);
+    },
+  );
   it('honors cancellation before accessing the store', async () => {
     const { registry } = await assembly();
     const signal = AbortSignal.abort();

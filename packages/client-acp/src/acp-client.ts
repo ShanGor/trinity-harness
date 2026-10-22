@@ -1,13 +1,26 @@
 import {
+  newId,
   personalFoldersResponseSchema,
   serverEventSchema,
   turnCancelResponseSchema,
+  memorySnapshotSchema,
+  sessionSummaryListSchema,
+  historyPageSchema,
+  memorySelectionsResponseSchema,
+  timelinePageSchema,
 } from '@trinity-harness/shared';
 import type {
   ServerEvent,
   SurfaceMessage,
   WorkspaceSelection,
   TurnCancelResponse,
+  MemoryCommand,
+  MemorySnapshot,
+  HistoryPage,
+  MemorySelectionsResponse,
+  TimelinePage,
+  SessionSummary,
+  HistoryQuery,
 } from '@trinity-harness/shared';
 
 export type { WorkspaceSelection } from '@trinity-harness/shared';
@@ -16,15 +29,7 @@ export interface EventStreamHandle {
   close(): void;
 }
 
-export interface SessionSummary {
-  sessionId: string;
-  userId: string;
-  title: string;
-  createdAt: string;
-  workspaceUri: string;
-  scope: 'personal' | 'team';
-  scopeId?: string;
-}
+export type { SessionSummary } from '@trinity-harness/shared';
 
 export interface TeamMemberView {
   userId: string;
@@ -99,21 +104,69 @@ export class AcpClient {
     title?: string,
     policy?: string,
     workspace?: WorkspaceSelection,
+    options?: {
+      kind: 'chat' | 'work';
+      sessionRole?: 'main' | 'side' | 'task';
+      creationOperationId: string;
+      originSessionId?: string;
+    },
   ): Promise<string> {
     const res = await fetch(`${this.baseUrl}/api/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify({
+        ...options,
         ...(title ? { title } : {}),
         ...(policy ? { policy } : {}),
         ...(workspace ? { workspace } : {}),
       }),
     });
     if (!res.ok) {
-      throw new Error(`createSession failed: ${res.status}`);
+      throw Object.assign(new Error(`createSession failed: ${res.status}`), { status: res.status });
     }
     const body = (await res.json()) as { sessionId: string };
     return body.sessionId;
+  }
+
+  async ensureMainChat(): Promise<string> {
+    return this.createSession('Main chat', 'read-only', undefined, {
+      kind: 'chat',
+      sessionRole: 'main',
+      creationOperationId: newId(),
+    });
+  }
+
+  private async assistantRequest(path: string, method = 'GET', body?: unknown): Promise<unknown> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', ...this.authHeaders() },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    if (!res.ok) throw new Error(`Request failed (${res.status})`);
+    return res.json();
+  }
+  async getMemory(): Promise<MemorySnapshot> {
+    return memorySnapshotSchema.parse(await this.assistantRequest('/api/memory'));
+  }
+  async changeMemory(command: MemoryCommand): Promise<void> {
+    await this.assistantRequest('/api/memory', 'POST', command);
+  }
+  async getHistory(query: Partial<HistoryQuery> = {}): Promise<HistoryPage> {
+    const params = new URLSearchParams(
+      Object.entries(query)
+        .filter(([, value]) => value !== undefined)
+        .map(([key, value]) => [key, String(value)]),
+    );
+    return historyPageSchema.parse(await this.assistantRequest(`/api/history?${params}`));
+  }
+
+  async reviseEpisode(id: string, change: { topic?: string; excluded?: boolean }): Promise<void> {
+    await this.assistantRequest(`/api/history/${encodeURIComponent(id)}`, 'PATCH', change);
+  }
+  async getMemorySelections(id: string): Promise<MemorySelectionsResponse> {
+    return memorySelectionsResponseSchema.parse(
+      await this.assistantRequest(`/api/sessions/${id}/memory`),
+    );
   }
 
   async listSessions(): Promise<SessionSummary[]> {
@@ -121,7 +174,7 @@ export class AcpClient {
     if (!res.ok) {
       throw new Error(`listSessions failed: ${res.status}`);
     }
-    const body = (await res.json()) as { sessions: SessionSummary[] };
+    const body = sessionSummaryListSchema.parse(await res.json());
     return body.sessions;
   }
 
@@ -187,6 +240,18 @@ export class AcpClient {
     if (!res.ok) {
       throw new Error(`addTeamMember failed: ${res.status}`);
     }
+  }
+
+  async shareBack(sessionId: string, eventId: string): Promise<void> {
+    await this.assistantRequest(`/api/sessions/${sessionId}/share-back`, 'POST', { eventId });
+  }
+
+  async getTimeline(sessionId: string, beforeSeq?: number): Promise<TimelinePage> {
+    return timelinePageSchema.parse(
+      await this.assistantRequest(
+        `/api/sessions/${sessionId}/timeline${beforeSeq ? `?beforeSeq=${beforeSeq}` : ''}`,
+      ),
+    );
   }
 
   async getMessages(sessionId: string): Promise<SurfaceMessage[]> {
@@ -285,6 +350,7 @@ export class AcpClient {
     const afterSeq = opts?.afterSeq ?? this.lastSeq.get(sessionId) ?? 0;
     const url = `${this.baseUrl}/api/sessions/${sessionId}/events?afterSeq=${afterSeq}${this.tokenQuery()}`;
     const source = this.eventSourceFactory(url);
+    let deliveredSeq = afterSeq;
 
     source.onmessage = (msg: { data: unknown; lastEventId?: string }) => {
       try {
@@ -299,7 +365,8 @@ export class AcpClient {
           (parsed.update.kind === 'agent_message_chunk' ||
             parsed.update.kind === 'agent_thought_chunk');
         if (!liveDelta && Number.isInteger(seq) && seq > 0) {
-          if (seq <= this.getSeq(sessionId)) return;
+          if (seq <= deliveredSeq) return;
+          deliveredSeq = seq;
           this.noteSeq(sessionId, seq);
           handlers.onSeq?.(seq);
         }

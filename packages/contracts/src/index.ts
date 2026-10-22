@@ -17,4 +17,8 @@ export * from './skills.js';
 export * from './research.js';
 export * from './citations.js';
 export * from './browser.js';
+export * from './browser-driver.js';
 export * from './task.js';
+export * from './execution-context.js';
+
+export * from './personal-assistant.js';

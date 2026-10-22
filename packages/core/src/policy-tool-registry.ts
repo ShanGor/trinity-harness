@@ -6,6 +6,7 @@ import type {
   ToolRegistry,
   ToolResult,
   ToolSchema,
+  ToolEffect,
 } from '@trinity-harness/contracts';
 
 import { matchesCommandPrefix } from './tools/command-prefix.js';
@@ -42,6 +43,10 @@ export class PolicyToolRegistry implements ToolRegistry {
 
   concurrencyOf(name: string): 'parallel' | 'exclusive' {
     return this.inner.concurrencyOf(name);
+  }
+
+  effectOf(call: ToolCall): ToolEffect {
+    return this.inner.effectOf?.(call) ?? { kind: 'unknown', scope: 'unknown' };
   }
 
   /** Policy decision for one call; 'ask' means the loop must gate it. */

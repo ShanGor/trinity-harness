@@ -1,20 +1,12 @@
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
 import {
   browserInteractionSchema,
-  browserViewportSchema,
-  browserTargetSchema,
+  type BrowserSurface,
   type BrowserInteraction,
 } from '@trinity-harness/contracts';
 import { canonicalBrowserJson } from './browser-artifacts.js';
 
-export const browserSurfaceSchema = z.object({
-  context: browserViewportSchema,
-  targets: z.array(browserTargetSchema).max(100),
-  truncated: z.boolean(),
-  privacyDenied: z.boolean(),
-});
-export type BrowserSurface = z.infer<typeof browserSurfaceSchema>;
+export { browserSurfaceSchema, type BrowserSurface } from '@trinity-harness/contracts';
 export function interactionFromSurface(surface: BrowserSurface): BrowserInteraction {
   const { privacyDenied: _privacy, ...payload } = surface;
   void _privacy;

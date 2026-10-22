@@ -43,3 +43,16 @@ it.each(budgetKeys)('rejects invalid configured server ceiling %s', (key) => {
   vi.stubEnv(key, 'invalid');
   expect(() => loadServerEnv()).toThrow(key);
 });
+
+it('requires an explicit authenticated runtime for Zendriver and rejects simultaneous CDP attachment', () => {
+  vi.stubEnv('BROWSER_DRIVER', 'zendriver');
+  vi.stubEnv('BROWSER_CDP_ENDPOINT', undefined);
+  vi.stubEnv('BROWSER_RUNTIME_ENDPOINT', undefined);
+  vi.stubEnv('BROWSER_RUNTIME_TOKEN', undefined);
+  expect(() => loadServerEnv()).toThrow('BROWSER_RUNTIME');
+  vi.stubEnv('BROWSER_RUNTIME_ENDPOINT', 'http://127.0.0.1:3010');
+  vi.stubEnv('BROWSER_RUNTIME_TOKEN', 't'.repeat(32));
+  expect(loadServerEnv().BROWSER_DRIVER).toBe('zendriver');
+  vi.stubEnv('BROWSER_CDP_ENDPOINT', '9222');
+  expect(() => loadServerEnv()).toThrow('BROWSER_CDP_ENDPOINT');
+});

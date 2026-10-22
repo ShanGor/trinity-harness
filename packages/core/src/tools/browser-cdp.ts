@@ -12,6 +12,7 @@ import {
   type UserStore,
 } from '@trinity-harness/contracts';
 import { browserDeliveries } from './browser-artifacts.js';
+import { BrowserDriverError } from './browser-driver-error.js';
 
 /** CLI envelopes are untrusted external JSON; callers validate the unwrapped DTO. */
 export function unwrapBrowserCliOutput(stdout: string): unknown {
@@ -72,8 +73,74 @@ export function matchesBrowserCdpEndpoint(expected: string, observed: string): b
   }
 }
 export class CdpAccessError extends Error {
+  readonly failure: BrowserDriverError;
   constructor(readonly code: string) {
     super(code);
+    switch (code) {
+      case 'CDP_OWNER_DENIED':
+        this.failure = new BrowserDriverError(
+          'NOT_AUTHORIZED',
+          'Browser session ownership was denied. Report the access limitation; changing sites will not resolve it.',
+          'conclude',
+        );
+        break;
+      case 'CDP_PAGE_UNAVAILABLE':
+        this.failure = new BrowserDriverError(
+          'PAGE_UNAVAILABLE',
+          'The owned tab is on a Chrome network error page. Navigate to a valid HTTP(S) source to recover; reading or screenshotting this error page cannot produce evidence.',
+          'navigate',
+        );
+        break;
+      case 'CDP_DOCUMENT_CHANGED':
+        this.failure = new BrowserDriverError(
+          'STALE_TARGET',
+          'The owned document changed. Observe the current page before acting.',
+          'reobserve',
+        );
+        break;
+      case 'CDP_UNSUPPORTED_CLI':
+      case 'CDP_BOUNDED_EXEC_REQUIRED':
+        this.failure = new BrowserDriverError(
+          'DISABLED',
+          'The configured browser adapter is unavailable or incompatible. Report the limitation; do not launch a replacement.',
+          'conclude',
+        );
+        break;
+      case 'CDP_CONNECTION_MISMATCH':
+        this.failure = new BrowserDriverError(
+          'NOT_AUTHORIZED',
+          'The browser connection does not match the configured CDP endpoint. Report the connection limitation; do not change endpoints or launch a replacement.',
+          'conclude',
+        );
+        break;
+      case 'CDP_TAB_CHANGED':
+        this.failure = new BrowserDriverError(
+          'NOT_AUTHORIZED',
+          'The owned browser tab could not be restored or identified. Report the tab binding limitation; do not take over another tab.',
+          'conclude',
+        );
+        break;
+      case 'CDP_UNEXPECTED_LAUNCH':
+        this.failure = new BrowserDriverError(
+          'NOT_AUTHORIZED',
+          'The browser reported an unexpected launch instead of attachment to the existing configured browser. Report the limitation; do not launch a replacement.',
+          'conclude',
+        );
+        break;
+      case 'CDP_UNSUPPORTED_DOCUMENT':
+        this.failure = new BrowserDriverError(
+          'NOT_AUTHORIZED',
+          'The owned tab contains an unsupported document scheme. Only HTTP(S) evidence is allowed; report the document access limitation.',
+          'conclude',
+        );
+        break;
+      default:
+        this.failure = new BrowserDriverError(
+          'DRIVER_FAILED',
+          'The configured browser connection could not be inspected. Report the connection limitation if it persists; do not launch a replacement.',
+          'conclude',
+        );
+    }
   }
 }
 export interface TrustedCdpBrowserOptions {
@@ -165,8 +232,14 @@ export class TrustedCdpBrowserAccess implements BrowserAccessPort {
     const state = stateSchema.parse(
       unwrapBrowserCliOutput(await run([...flags, 'eval', stateScript], 8192)),
     );
-    // Only an adapter-created blank tab may precede the first HTTP navigation.
-    if (state.url !== 'about:blank') browserUrlSchema.parse(state.url);
+    // An owned failed navigation can leave Chrome on its internal error page.
+    // Permit only an explicit validated destination to leave it; never capture it.
+    if (state.url === 'chrome-error://chromewebdata/') {
+      if (operation !== 'navigate' || url === undefined)
+        throw new CdpAccessError('CDP_PAGE_UNAVAILABLE');
+    } else if (state.url !== 'about:blank' && !browserUrlSchema.safeParse(state.url).success) {
+      throw new CdpAccessError('CDP_UNSUPPORTED_DOCUMENT');
+    }
     if (url !== undefined && operation !== 'navigate' && state.url !== url)
       throw new CdpAccessError('CDP_DOCUMENT_CHANGED');
     return {

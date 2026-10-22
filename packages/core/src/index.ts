@@ -12,3 +12,7 @@ export * from './context/index.js';
 export * from './multimodal/index.js';
 export * from './lsp/index.js';
 export * from './skills/index.js';
+
+export * from './personal-assistant/memory.js';
+export * from './personal-assistant/ordered-turns.js';
+export * from './personal-assistant/recall-tool.js';

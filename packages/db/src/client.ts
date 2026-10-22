@@ -6,8 +6,11 @@ import * as schema from './schema.js';
 
 export type Db = NodePgDatabase<typeof schema>;
 
-export function createPool(databaseUrl: string): pg.Pool {
-  return new pg.Pool({ connectionString: databaseUrl });
+export function createPool(
+  databaseUrl: string,
+  options?: Omit<pg.PoolConfig, 'connectionString'>,
+): pg.Pool {
+  return new pg.Pool({ ...options, connectionString: databaseUrl });
 }
 
 export function createDb(pool: pg.Pool): Db {

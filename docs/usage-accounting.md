@@ -20,9 +20,9 @@ models:
       minInputTokens: 0
 ```
 
-The checked-in catalog contains direct-provider reference rates for Kimi K3, MiniMax M3, and DeepSeek V4.1 Flash. Rates are snapshots dated in the YAML; update them when provider prices change, and replace them when a proxy, discount, priority tier, or account-specific contract changes the actual rate. A model without an entry has unavailable cost. Update the file and redeploy the server and worker images when rates change. New requests save the selected rate snapshot alongside their cost, so existing sessions are never repriced.
+The checked-in catalog contains direct-provider reference rates for Kimi K3, MiniMax M3, MiniMax M3.1 Flash (China), and DeepSeek V4.1 Flash. Rates are snapshots dated in the YAML; update them when provider prices change, and replace them when a proxy, discount, priority tier, or account-specific contract changes the actual rate. A model without an entry has unavailable cost. Update the file and redeploy the server and worker images when rates change. New requests save the selected rate snapshot alongside their cost, so existing sessions are never repriced.
 
-The catalog keeps prices in each provider's published currency; totals in different currencies remain separate. DeepSeek's configured rates use its peak schedule because the catalog cannot represent time-based rates. Kimi K2.8 Preview is available through the Kimi Code subscription/quota product as `kimi-for-coding`, not with a published per-token API rate, so it is intentionally not assigned a money rate. MiniMax M3's public pricing table does not list a cache-write price; requests reporting cache writes therefore have unavailable cost rather than an assumed rate.
+The catalog keeps prices in each provider's published currency; totals in different currencies remain separate. DeepSeek's configured rates use its peak schedule because the catalog cannot represent time-based rates. Kimi K2.8 Preview is available through the Kimi Code subscription/quota product as `kimi-for-coding`, not with a published per-token API rate, so it is intentionally not assigned a money rate. The public pricing tables for MiniMax M3 and M3.1 Flash do not list a cache-write price; requests reporting cache writes therefore have unavailable cost rather than an assumed rate.
 
 Each tier supports:
 
@@ -47,6 +47,21 @@ cost = (uncached input × input rate
       + one-hour cache writes × one-hour rate
       + output × output rate) / 1,000,000
 ```
+
+### MiniMax M3.1 Flash (China)
+
+Use the existing Anthropic-compatible gateway with these settings on both server and worker:
+
+```dotenv
+MODEL=anthropic/MiniMax-M3.1-Flash
+ANTHROPIC_BASE_URL=https://api.minimax.cn/anthropic/v1
+ANTHROPIC_API_KEY=<your-minimax-api-key>
+MODEL_CONTEXT_TOKENS=1000000
+```
+
+The AI SDK Anthropic provider requires `/anthropic/v1` as its base URL. Keep the key server-side. Thinking is mandatory and enabled by default; leave `REASONING_BUDGET_TOKENS` unset to avoid Claude-style budgeted thinking. The provider defaults to maximum thinking effort. The existing output and compaction budgets remain independently configurable.
+
+The [China pricing table](https://platform.minimax.cn/docs/pricing/overview#models/text), checked on 2026-10-20, lists flat rates per million tokens: CNY 1 input, CNY 4 output (including reasoning), and CNY 0.1 cache reads. No cache-write rate is published. This catalog entry describes China pay-as-you-go billing; change the rates if using a different region or billing arrangement. Restart server and worker after changing the environment or catalog; deployed images need rebuilding for catalog updates. Existing sessions may retain their selected model, so select the new model in Session settings or start a new session.
 
 ## Missing data and scope
 

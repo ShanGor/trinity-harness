@@ -1,3 +1,18 @@
+import { turnMessageProjection } from '@trinity-harness/contracts';
+import {
+  chatWorkspaceDir,
+  runOrderedPrompts,
+  saveWorkspaceAttachment,
+  sessionWorkspaceRoot,
+} from '@trinity-harness/core';
+import type { SessionRunPort, TurnTask } from '@trinity-harness/contracts';
+import {
+  memoryCommandSchema,
+  historyQuerySchema,
+  type MemoryStorePort,
+  type ConversationIndexPort,
+} from '@trinity-harness/contracts';
+import { validateMemoryCommand } from '@trinity-harness/core';
 import type {
   AgentLoop,
   AgentTaskQueue,
@@ -56,6 +71,10 @@ export const NIL_TENANT = '00000000-0000-0000-0000-000000000000';
 
 /** Inbound payload validation at the HTTP boundary (AGENTS.md §5). */
 const createSessionSchema = z.object({
+  kind: z.enum(['chat', 'work']).optional(),
+  sessionRole: z.enum(['main', 'side', 'task']).optional(),
+  creationOperationId: z.uuid().optional(),
+  originSessionId: z.uuid().optional(),
   title: z.string().min(1).max(200).optional(),
   /** M3: permission preset name ('workspace-write' | 'read-only' | 'danger-full-access') or a JSON policy. */
   policy: z.string().min(1).max(4000).optional(),
@@ -111,6 +130,24 @@ const eventsQuerySchema = z.object({
   afterSeq: z.coerce.number().int().nonnegative().optional(),
   token: z.string().optional(),
 });
+
+function credentialMemoryRequest(text: string): boolean {
+  if (!/^(remember\b|change my\b)/iu.test(text.trim())) return false;
+  try {
+    validateMemoryCommand({
+      operationId: NIL_TENANT,
+      memoryId: NIL_TENANT,
+      expectedRevision: 0,
+      operation: 'save',
+      subject: 'Me',
+      predicate: 'explicit request',
+      value: text,
+    });
+    return false;
+  } catch {
+    return true;
+  }
+}
 
 function preview(value: unknown, max = 2000): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value);
@@ -435,6 +472,31 @@ export function logEventToServerEvent(sessionId: string, event: SessionEvent): S
         status: 'running',
         detail: `approval ${event.outcome} by ${event.decidedBy}`,
       };
+    case 'activity/reference':
+      return {
+        type: 'session/activity',
+        sessionId,
+        sourceSessionId: event.sourceSessionId,
+        sourceEventId: event.sourceEventId,
+        kind: event.kind,
+      };
+    case 'memory/selection':
+      return { type: 'session/memory_selection', sessionId, receipt: event.receipt };
+    case 'prompt/queued':
+      return {
+        type: 'session/prompt_queue',
+        sessionId,
+        promptId: event.promptId,
+        state: 'queued',
+        text: blocksToText(event.content),
+      };
+    case 'prompt/discarded':
+      return {
+        type: 'session/prompt_queue',
+        sessionId,
+        promptId: event.promptId,
+        state: 'cancelled',
+      };
     case 'turn/start':
       return { type: 'session/turn_status', sessionId, status: 'running' };
     case 'turn/end':
@@ -459,6 +521,9 @@ export interface ServerAuthDeps {
 }
 
 export interface ServerDeps {
+  sessionRuns?: SessionRunPort | undefined;
+  memory?: MemoryStorePort | undefined;
+  conversationIndex?: ConversationIndexPort | undefined;
   store: SessionStore;
   workspaceRoot: string;
   /** Inline mode (M1/tests): runs the Loop in this process, sandboxed to the session workspace. */
@@ -599,6 +664,7 @@ export async function buildServer(
     inlineTurns.set(sessionId, controllers);
     const job = run(controller.signal)
       .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
         broadcast(sessionId, {
           type: 'error',
           sessionId,
@@ -612,6 +678,42 @@ export async function buildServer(
       });
     inlineJobs.add(job);
   };
+  app.addHook('onReady', async () => {
+    if (deps.queue || !deps.createLoop || !deps.sessionRuns?.pending) return;
+    let cursor: string | undefined;
+    for (;;) {
+      const tasks = await deps.sessionRuns.pending(cursor);
+      for (const task of tasks)
+        runInline(task.sessionId, (signal) =>
+          runOrderedPrompts(
+            deps.sessionRuns!,
+            deps.store,
+            task,
+            async (ordered) => {
+              const meta = await auth?.metas.get(ordered.sessionId);
+              if (!meta || meta.closedAt || meta.sessionRole !== 'main')
+                throw new Error('Main chat unavailable');
+              await deps.createLoop!(
+                ordered.sessionId,
+                await workspaceRootFor(meta, ordered.sessionId),
+              ).run(ordered.sessionId, ordered.prompt, sinkFor(ordered.sessionId), {
+                signal,
+                actor: ordered.actor,
+                tenantId: ordered.tenantId,
+                policy: ordered.policy,
+                promptSeq: ordered.promptSeq,
+                cancellationSeq: ordered.cancellationSeq,
+                contextGuard: executionGuard(ordered.sessionId, ordered.actor),
+                content: ordered.content,
+              });
+            },
+            signal,
+          ),
+        );
+      if (tasks.length < 100) break;
+      cursor = tasks.at(-1)!.sessionId;
+    }
+  });
   app.addHook('onClose', async () => {
     for (const controllers of inlineTurns.values())
       for (const controller of controllers) controller.abort();
@@ -625,7 +727,7 @@ export async function buildServer(
     let promptSeq = 0;
     let terminalSeq = 0;
     history.forEach((event, index) => {
-      if (event.type === 'message/user') promptSeq = index + 1;
+      if (event.type === 'message/user' || event.type === 'prompt/queued') promptSeq = index + 1;
       if (event.type === 'turn/end') terminalSeq = index + 1;
     });
     if (promptSeq > 0)
@@ -639,6 +741,27 @@ export async function buildServer(
             throughPromptSeq: promptSeq,
           },
         ],
+        { actor },
+      );
+    const discarded = history.filter(
+      (event) =>
+        event.type === 'prompt/queued' &&
+        !history.some(
+          (item) =>
+            (item.type === 'message/user' && item.eventId === event.promptId) ||
+            (item.type === 'prompt/discarded' && item.promptId === event.promptId),
+        ),
+    );
+    if (discarded.length)
+      await deps.store.append(
+        sessionId,
+        discarded.map((event) => ({
+          type: 'prompt/discarded' as const,
+          eventId: newId(),
+          at: new Date().toISOString(),
+          promptId: event.type === 'prompt/queued' ? event.promptId : event.eventId,
+          reason: 'cancelled' as const,
+        })),
         { actor },
       );
     for (const controller of inlineTurns.get(sessionId) ?? []) controller.abort();
@@ -679,8 +802,38 @@ export async function buildServer(
       await reply.code(404).send({ error: 'session not found' });
       return null;
     }
+    if (
+      meta.scope === 'team' &&
+      (!meta.scopeId || !deps.teams || !(await deps.teams.isMember(meta.scopeId, identity.userId)))
+    ) {
+      await reply.code(404).send({ error: 'session not found' });
+      return null;
+    }
     return { sessionId, meta };
   };
+
+  const executionGuard = (sessionId: string, actor: string): (() => Promise<void>) | undefined =>
+    !auth
+      ? undefined
+      : async () => {
+          const meta = await auth.metas.get(sessionId);
+          const user = await auth.users.findById(actor);
+          if (
+            !meta ||
+            meta.closedAt ||
+            !user ||
+            user.tenantId !== meta.tenantId ||
+            user.role === 'viewer'
+          )
+            throw new Error('Execution access revoked');
+          if (
+            meta.scope === 'team' &&
+            (!meta.scopeId || !deps.teams || !(await deps.teams.isMember(meta.scopeId, actor)))
+          )
+            throw new Error('Team access revoked');
+          if (meta.scope !== 'team' && meta.userId !== actor && user.role !== 'admin')
+            throw new Error('Session access revoked');
+        };
 
   /** Path-param validation for :sessionId routes (400 on malformed uuid). */
   const sessionIdOf = async (req: FastifyRequest, reply: FastifyReply): Promise<string | null> => {
@@ -702,11 +855,90 @@ export async function buildServer(
 
   /**
    * Sandbox root for a session: the directory bound at creation
-   * (`$WORKSPACE_ROOT/<user_id>` or `<team_id>`). Meta-less sessions
-   * (M1 memory mode) fall back to the deployment root.
+   * (automatic Chat storage or a selected personal/team workspace).
+   * Legacy Chat is bound durably; meta-less Chat uses its creation receipt.
    */
-  const workspaceRootFor = (meta: SessionMeta | null | undefined): string =>
-    meta?.workspaceUri ?? deps.workspaceRoot;
+  const workspaceRootFor = async (
+    meta: SessionMeta | null | undefined,
+    sessionId: string,
+  ): Promise<string> => {
+    if (meta) return sessionWorkspaceRoot(meta, deps.workspaceRoot, auth?.metas);
+    const creation = (await deps.store.loadRange(sessionId, { afterSeq: 0, toSeq: 1 }))[0]?.event;
+    if (creation?.type === 'session/created' && creation.kind === 'chat') {
+      if (!creation.workspaceUri) throw new Error('Chat workspace unavailable');
+      return creation.workspaceUri;
+    }
+    return deps.workspaceRoot;
+  };
+
+  const enqueueMain = async (
+    meta: SessionMeta,
+    identity: Identity,
+    text: string,
+    content: ContentBlock[],
+  ): Promise<{ promptId: string; afterSeq: number }> => {
+    if (!deps.sessionRuns || (!deps.queue && !deps.createLoop))
+      throw new Error('No main chat runner configured');
+    const promptId = newId();
+    const source = await deps.store.append(
+      meta.id,
+      [
+        {
+          type: 'prompt/queued',
+          eventId: newId(),
+          promptId,
+          at: new Date().toISOString(),
+          content,
+          actor: identity.userId,
+          tenantId: identity.tenantId,
+          policy: policyFor(meta),
+        },
+      ],
+      { actor: identity.userId },
+    );
+    const task: TurnTask = {
+      sessionId: meta.id,
+      prompt: text,
+      content,
+      actor: identity.userId,
+      tenantId: identity.tenantId,
+      policy: policyFor(meta),
+      promptSeq: source.from,
+    };
+    if (deps.queue) {
+      try {
+        await deps.queue.enqueue(task);
+      } catch {
+        app.log.warn('Main chat request committed; durable dispatcher will retry delivery');
+      }
+    } else
+      runInline(meta.id, (signal) =>
+        runOrderedPrompts(
+          deps.sessionRuns!,
+          deps.store,
+          task,
+          async (ordered) => {
+            await deps.createLoop!(meta.id, await workspaceRootFor(meta, ordered.sessionId)).run(
+              meta.id,
+              ordered.prompt,
+              sinkFor(meta.id),
+              {
+                signal,
+                actor: ordered.actor,
+                tenantId: ordered.tenantId,
+                policy: ordered.policy,
+                promptSeq: ordered.promptSeq,
+                cancellationSeq: ordered.cancellationSeq,
+                contextGuard: executionGuard(ordered.sessionId, ordered.actor),
+                content: ordered.content,
+              },
+            );
+          },
+          signal,
+        ),
+      );
+    return { promptId, afterSeq: source.from };
+  };
 
   app.get('/api/health', async () => ({ ok: true }));
 
@@ -812,6 +1044,10 @@ export async function buildServer(
           title: m.title,
           createdAt: m.createdAt,
           workspaceUri: m.workspaceUri,
+          kind: m.kind,
+          sessionRole: m.sessionRole,
+          taskState: m.taskState,
+          originSessionId: m.originSessionId,
           scope: m.scope ?? 'personal',
           ...(m.scopeId !== undefined ? { scopeId: m.scopeId } : {}),
         })),
@@ -991,6 +1227,91 @@ export async function buildServer(
     }
   }
 
+  app.get('/api/memory', async (req, reply) => {
+    if (!req.identity || !deps.memory)
+      return reply.code(503).send({ error: 'Durable memory unavailable' });
+    return deps.memory.snapshot(req.identity);
+  });
+  app.post('/api/memory', async (req, reply) => {
+    if (!req.identity || !deps.memory)
+      return reply.code(503).send({ error: 'Durable memory unavailable' });
+    if (req.identity.role === 'viewer') return reply.code(403).send({ error: 'read-only' });
+    const parsed = memoryCommandSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid memory command' });
+    try {
+      validateMemoryCommand(parsed.data);
+      if (parsed.data.source) {
+        const source = await auth?.metas.get(parsed.data.source.sessionId);
+        if (
+          !source ||
+          source.tenantId !== req.identity.tenantId ||
+          source.userId !== req.identity.userId ||
+          source.scope === 'team' ||
+          source.closedAt
+        )
+          return reply.code(403).send({ error: 'invalid personal source' });
+        const events = await deps.store.load(parsed.data.source.sessionId);
+        const event = events.find((item) => item.eventId === parsed.data.source!.eventId);
+        if (
+          !event ||
+          event.type !== 'message/user' ||
+          (parsed.data.source.at !== undefined && parsed.data.source.at !== event.at) ||
+          !blocksToText(event.content).includes(parsed.data.source.excerpt)
+        )
+          return reply.code(400).send({ error: 'source excerpt not found' });
+      }
+      const item = await deps.memory.change(req.identity, parsed.data);
+      return { item };
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code === 'MEMORY_CONFLICT')
+        return reply.code(409).send({ error: 'Memory changed; refresh and retry.' });
+      if (code === 'MEMORY_SECRET')
+        return reply.code(400).send({ error: 'Use secret storage for credentials.' });
+      throw error;
+    }
+  });
+  app.get('/api/history', async (req, reply) => {
+    if (!req.identity || !deps.conversationIndex)
+      return reply.code(503).send({ error: 'History index unavailable' });
+    const query = historyQuerySchema.safeParse(req.query);
+    if (!query.success) return reply.code(400).send({ error: 'invalid history query' });
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: query.data.timezone });
+    } catch {
+      return reply.code(400).send({ error: 'invalid timezone' });
+    }
+    return deps.conversationIndex.history(req.identity, query.data);
+  });
+  app.patch('/api/history/:episodeId', async (req, reply) => {
+    if (!req.identity || !deps.conversationIndex)
+      return reply.code(503).send({ error: 'History index unavailable' });
+    if (req.identity.role === 'viewer') return reply.code(403).send({ error: 'read-only' });
+    const id = z.object({ episodeId: z.uuid() }).safeParse(req.params);
+    const body = z
+      .object({ topic: z.string().min(1).max(200).optional(), excluded: z.boolean().optional() })
+      .strict()
+      .safeParse(req.body);
+    if (!id.success || !body.success)
+      return reply.code(400).send({ error: 'invalid history update' });
+    await deps.conversationIndex.revise(req.identity, id.data.episodeId, body.data);
+    return { ok: true };
+  });
+  app.get('/api/sessions/:sessionId/memory', async (req, reply) => {
+    const id = await sessionIdOf(req, reply);
+    if (!id || !(await authorizeSession(id, req.identity, reply))) return;
+    const events = deps.store.loadPage
+      ? (await deps.store.loadPage(id, { limit: 300 })).entries.map((entry) => entry.event)
+      : await deps.store.load(id);
+    return { selections: events.filter((event) => event.type === 'memory/selection').slice(-20) };
+  });
+
+  app.get('/api/main-chat', async (req, reply) => {
+    if (!auth || !req.identity) return reply.code(401).send({ error: 'authentication required' });
+    const meta = await auth.metas.getMain?.(req.identity.tenantId, req.identity.userId);
+    return { sessionId: meta?.id ?? null };
+  });
+
   // ---- Sessions --------------------------------------------------------------
 
   app.get('/api/workspaces/personal', async (req, reply) => {
@@ -1025,8 +1346,54 @@ export async function buildServer(
         return reply.code(400).send({ error: 'invalid permission policy' });
       }
     }
-    const sessionId = newId();
+    let sessionId = newId();
     const identity = req.identity;
+    const kind = body.data.kind;
+    const sessionRole =
+      body.data.sessionRole ?? (kind === 'chat' ? 'side' : kind === 'work' ? 'task' : undefined);
+    if (identity?.role === 'viewer' && kind)
+      return reply.code(403).send({ error: 'viewer role is read-only' });
+    if (
+      (kind === 'chat' && (body.data.workspace || sessionRole === 'task')) ||
+      (kind === 'work' && (!body.data.workspace || sessionRole !== 'task')) ||
+      (!kind && sessionRole) ||
+      (sessionRole === 'main' && kind !== 'chat')
+    )
+      return reply.code(400).send({ error: 'invalid session kind, role or workspace' });
+    if (
+      body.data.originSessionId &&
+      !(await authorizeSession(body.data.originSessionId, identity, reply))
+    )
+      return;
+    const operationId = body.data.creationOperationId;
+    let existing =
+      identity && auth && operationId
+        ? await auth.metas.findByOperation?.(identity.tenantId, identity.userId, operationId)
+        : null;
+    if (!existing && identity && auth && sessionRole === 'main')
+      existing = await auth.metas.getMain?.(identity.tenantId, identity.userId);
+    if (existing) {
+      if (existing.closedAt)
+        return reply.code(409).send({ error: 'creation operation belongs to a closed session' });
+      sessionId = existing.id;
+      await deps.store.append(
+        sessionId,
+        [
+          {
+            type: 'session/created',
+            eventId: newId(),
+            at: existing.createdAt,
+            workspaceUri: existing.workspaceUri,
+            kind: existing.kind,
+            sessionRole: existing.sessionRole,
+            creationOperationId: existing.creationOperationId,
+            originSessionId: existing.originSessionId,
+          },
+        ],
+        { actor: identity?.userId ?? 'anonymous' },
+      );
+      return reply.code(201).send({ sessionId });
+    }
 
     // Workspace scope: personal or team (fail-closed membership check, §12).
     const ws = body.data.workspace;
@@ -1060,8 +1427,10 @@ export async function buildServer(
       }
       scopeId = team.id;
     }
-    let workspaceDir: string;
-    if (scope === 'personal' && identity) {
+    let workspaceDir: string | null;
+    if (kind === 'chat') {
+      workspaceDir = await chatWorkspaceDir(deps.workspaceRoot, scopeOwnerId, sessionId);
+    } else if (scope === 'personal' && identity) {
       try {
         workspaceDir = await personalWorkspaceDir(
           deps.workspaceRoot,
@@ -1077,18 +1446,33 @@ export async function buildServer(
       await mkdir(workspaceDir, { recursive: true });
     }
 
-    if (auth) {
+    if (auth && !existing) {
       // Ownership row first; the event log references it by id.
-      await auth.metas.create({
-        id: sessionId,
-        tenantId: identity!.tenantId,
-        userId: identity!.userId,
-        title: body.data.title ?? '',
-        workspaceUri: workspaceDir,
-        scope,
-        ...(scopeId !== undefined ? { scopeId } : {}),
-        ...(policyName !== undefined ? { policy: policyName } : {}),
-      });
+      try {
+        await auth.metas.create({
+          kind,
+          sessionRole,
+          creationOperationId: operationId,
+          originSessionId: body.data.originSessionId,
+          id: sessionId,
+          tenantId: identity!.tenantId,
+          userId: identity!.userId,
+          title: body.data.title ?? '',
+          workspaceUri: workspaceDir,
+          scope,
+          ...(scopeId !== undefined ? { scopeId } : {}),
+          ...(policyName !== undefined ? { policy: policyName } : {}),
+        });
+      } catch (error) {
+        existing =
+          identity && operationId
+            ? await auth.metas.findByOperation?.(identity.tenantId, identity.userId, operationId)
+            : null;
+        if (!existing && identity && sessionRole === 'main')
+          existing = await auth.metas.getMain?.(identity.tenantId, identity.userId);
+        if (!existing) throw error;
+        sessionId = existing.id;
+      }
     }
     await deps.store.append(
       sessionId,
@@ -1097,7 +1481,11 @@ export async function buildServer(
           type: 'session/created',
           eventId: newId(),
           at: new Date().toISOString(),
-          workspaceUri: workspaceDir,
+          workspaceUri: existing ? existing.workspaceUri : workspaceDir,
+          kind: existing ? existing.kind : kind,
+          sessionRole: existing ? existing.sessionRole : sessionRole,
+          creationOperationId: existing ? existing.creationOperationId : operationId,
+          originSessionId: existing ? existing.originSessionId : body.data.originSessionId,
         },
       ],
       { actor: identity?.userId ?? 'anonymous' },
@@ -1113,6 +1501,66 @@ export async function buildServer(
       result: 'ok',
     });
     return reply.code(201).send({ sessionId });
+  });
+
+  app.post('/api/sessions/:sessionId/share-back', async (req, reply) => {
+    const id = await sessionIdOf(req, reply);
+    if (!id) return;
+    const granted = await authorizeSession(id, req.identity, reply);
+    if (!granted || !auth || !req.identity) return;
+    if (req.identity.role === 'viewer') return reply.code(403).send({ error: 'read-only' });
+    const body = z.object({ eventId: z.uuid() }).strict().safeParse(req.body);
+    if (!body.success)
+      return reply.code(400).send({ error: 'Select a completed answer to share.' });
+    const main = await auth.metas.getMain?.(req.identity.tenantId, req.identity.userId);
+    if (!main || main.id === id || main.closedAt)
+      return reply.code(409).send({ error: 'Main chat is unavailable.' });
+    const events = await deps.store.load(id);
+    const source = events.findIndex(
+      (event) => event.eventId === body.data.eventId && event.type === 'message/assistant',
+    );
+    if (source < 0 || !turnMessageProjection(events).finals.has(source))
+      return reply.code(400).send({ error: 'Only completed final answers can be shared.' });
+    await deps.store.append(
+      main.id,
+      [
+        {
+          type: 'activity/reference',
+          eventId: newId(),
+          at: new Date().toISOString(),
+          sourceSessionId: id,
+          sourceEventId: body.data.eventId,
+          kind: granted.meta?.kind === 'work' ? 'work' : 'chat',
+        },
+      ],
+      { actor: req.identity.userId },
+    );
+    broadcast(main.id, {
+      type: 'session/activity',
+      sessionId: main.id,
+      sourceSessionId: id,
+      sourceEventId: body.data.eventId,
+      kind: granted.meta?.kind === 'work' ? 'work' : 'chat',
+    });
+    return { ok: true };
+  });
+
+  app.get('/api/sessions/:sessionId/timeline', async (req, reply) => {
+    const id = await sessionIdOf(req, reply);
+    if (!id || !(await authorizeSession(id, req.identity, reply))) return;
+    const query = z
+      .object({ beforeSeq: z.coerce.number().int().positive().optional() })
+      .safeParse(req.query);
+    if (!query.success) return reply.code(400).send({ error: 'invalid cursor' });
+    if (!deps.store.loadPage) return reply.code(503).send({ error: 'Bounded paging unavailable' });
+    const page = await deps.store.loadPage(id, { ...query.data, limit: 200 });
+    return {
+      events: page.entries
+        .map(({ event }) => logEventToServerEvent(id, event))
+        .filter((event) => event !== null),
+      nextBefore: page.nextBefore,
+      lastSeq: page.lastSeq,
+    };
   });
 
   app.get('/api/sessions/:sessionId/messages', async (req, reply) => {
@@ -1164,6 +1612,10 @@ export async function buildServer(
     ) {
       return reply.code(403).send({ error: 'session deletion requires a developer or admin' });
     }
+    if (granted.meta.sessionRole === 'main')
+      return reply
+        .code(409)
+        .send({ error: 'Main chat remains ongoing; manage topics in History.' });
     await cancelTurn(sessionId, identity?.userId ?? 'anonymous');
     await deps.store.append(
       sessionId,
@@ -1205,6 +1657,8 @@ export async function buildServer(
       });
       return reply.code(403).send({ error: 'viewer role is read-only' });
     }
+    if (credentialMemoryRequest(body.data.text))
+      return reply.code(400).send({ error: 'Credentials cannot be stored in personal memory.' });
     await auth?.metas.setTitleIfEmpty(sessionId, body.data.text.trim().slice(0, 200));
     emitAudit({
       id: newId(),
@@ -1215,6 +1669,16 @@ export async function buildServer(
       action: 'session/prompt',
       result: 'ok',
     });
+
+    if (granted.meta?.sessionRole === 'main' && deps.sessionRuns) {
+      await enqueueMain(
+        granted.meta,
+        identity!,
+        body.data.text,
+        promptContent(body.data.text, body.data.attachments),
+      );
+      return reply.code(202).send({ accepted: true, queued: true });
+    }
 
     if (deps.queue) {
       // M3: the user message is committed HERE (server-side, actor-stamped)
@@ -1264,11 +1728,12 @@ export async function buildServer(
       { actor: identity?.userId ?? 'anonymous' },
     );
     const sink = sinkFor(sessionId);
-    const loop = deps.createLoop(sessionId, workspaceRootFor(granted.meta));
+    const loop = deps.createLoop(sessionId, await workspaceRootFor(granted.meta, sessionId));
     runInline(sessionId, (signal) =>
       loop.run(sessionId, body.data.text, sink, {
         signal,
         actor: identity?.userId ?? 'anonymous',
+        contextGuard: executionGuard(sessionId, identity?.userId ?? 'anonymous'),
         tenantId: identity?.tenantId,
         policy: policyFor(granted.meta),
         promptSeq: appended.from,
@@ -1347,6 +1812,26 @@ export async function buildServer(
         const blob = await deps.blobs!.put(undefined, new Uint8Array(data), {
           mimeType: query.data.mime,
         });
+        const workspacePath = await saveWorkspaceAttachment(
+          await workspaceRootFor(granted.meta, sessionId),
+          new Uint8Array(data),
+          query.data.filename,
+        );
+        await deps.store.append(
+          sessionId,
+          [
+            {
+              type: 'session/attachment',
+              eventId: newId(),
+              at: new Date().toISOString(),
+              uri: blob.uri,
+              workspacePath,
+              mimeType: query.data.mime,
+              size: data.byteLength,
+            },
+          ],
+          { actor: identity?.userId ?? 'anonymous' },
+        );
         emitAudit({
           id: newId(),
           at: new Date().toISOString(),
@@ -1360,7 +1845,7 @@ export async function buildServer(
         });
         return reply
           .code(201)
-          .send({ uri: blob.uri, mimeType: query.data.mime, size: data.byteLength });
+          .send({ uri: blob.uri, mimeType: query.data.mime, size: data.byteLength, workspacePath });
       },
     );
 
@@ -1371,6 +1856,10 @@ export async function buildServer(
       if (!key || key.includes('..') || key.includes('\\')) {
         return reply.code(400).send({ error: 'invalid blob key' });
       }
+      if (key.split('/').includes('model-context'))
+        return reply
+          .code(403)
+          .send({ error: 'model context snapshots are private runtime artifacts' });
       if (key.split('/').includes('browser')) {
         return reply
           .code(403)
@@ -1576,6 +2065,36 @@ export async function buildServer(
     event: ServerEvent,
   ): { method: 'session/update'; params: unknown } | null => {
     switch (event.type) {
+      case 'session/activity':
+        return {
+          method: 'session/update',
+          params: {
+            sessionId,
+            update: { sessionUpdate: 'session_info_update', _meta: { 'trinity.activity': event } },
+          },
+        };
+      case 'session/memory_selection':
+        return {
+          method: 'session/update',
+          params: {
+            sessionId,
+            update: {
+              sessionUpdate: 'session_info_update',
+              _meta: { 'trinity.memorySelection': event.receipt },
+            },
+          },
+        };
+      case 'session/prompt_queue':
+        return {
+          method: 'session/update',
+          params: {
+            sessionId,
+            update: {
+              sessionUpdate: 'session_info_update',
+              _meta: { 'trinity.promptQueue': event },
+            },
+          },
+        };
       case 'session/update': {
         const u = event.update;
         if (u.kind === 'agent_message_chunk') {
@@ -1841,6 +2360,7 @@ export async function buildServer(
   const waitForTurnEnd = (
     sessionId: string,
     timeoutMs = 600_000,
+    target?: { promptId: string; afterSeq: number },
   ): Promise<'completed' | 'aborted' | 'error'> =>
     new Promise((resolve) => {
       let settled = false;
@@ -1853,10 +2373,41 @@ export async function buildServer(
         resolve(status);
       };
       const listener = (event: ServerEvent): void => {
+        if (target) {
+          if (
+            event.type === 'session/turn_status' ||
+            event.type === 'error' ||
+            event.type === 'session/prompt_queue'
+          )
+            void checkTarget();
+          return;
+        }
         if (event.type === 'session/turn_status') {
           if (event.status === 'completed') done('completed');
           else if (event.status === 'aborted') done('aborted');
         } else if (event.type === 'error') {
+          done('error');
+        }
+      };
+      const checkTarget = async (): Promise<void> => {
+        if (!target || settled) return;
+        try {
+          const entries = await deps.store.loadRange(sessionId, { afterSeq: target.afterSeq });
+          const terminal = entries.find(
+            ({ event }) =>
+              (event.type === 'turn/end' || event.type === 'prompt/discarded') &&
+              event.promptId === target.promptId,
+          )?.event;
+          if (terminal?.type === 'prompt/discarded') done('aborted');
+          if (terminal?.type === 'turn/end')
+            done(
+              terminal.reason === 'completed'
+                ? 'completed'
+                : terminal.reason === 'aborted'
+                  ? 'aborted'
+                  : 'error',
+            );
+        } catch {
           done('error');
         }
       };
@@ -1868,6 +2419,21 @@ export async function buildServer(
         cleanupFns.push(() => {
           map.get(sessionId)?.delete(listener);
         });
+      }
+      if (target) {
+        if (deps.eventReader) {
+          const reader = deps.eventReader.open(sessionId, target.afterSeq, ({ event }) => {
+            if (
+              (event.type === 'turn/end' || event.type === 'prompt/discarded') &&
+              event.promptId === target.promptId
+            )
+              void checkTarget();
+          });
+          cleanupFns.push(() => reader.dispose());
+          if (settled) reader.dispose();
+          void reader.started.then(checkTarget).catch(() => done('error'));
+        }
+        void checkTarget();
       }
     });
 
@@ -1994,6 +2560,25 @@ export async function buildServer(
               content.map((b) => (b.kind === 'image' ? '[image]' : `[${b.kind}]`)).join(' ');
           }
 
+          if (credentialMemoryRequest(text))
+            return reply.send(
+              jsonRpcError(id, -32602, 'Credentials cannot be stored in personal memory.'),
+            );
+          if (granted.meta?.sessionRole === 'main') {
+            if (!identity || !deps.sessionRuns)
+              return reply.send(jsonRpcError(id, -32603, 'Main chat queue unavailable'));
+            const target = await enqueueMain(
+              granted.meta,
+              identity,
+              text,
+              content ?? [{ kind: 'text', text }],
+            );
+            const stop = await waitForTurnEnd(granted.sessionId, undefined, target);
+            return result({
+              stopReason:
+                stop === 'completed' ? 'end_turn' : stop === 'aborted' ? 'cancelled' : 'refusal',
+            });
+          }
           // Same pipeline as POST /api/sessions/:id/messages.
           await auth?.metas.setTitleIfEmpty(granted.sessionId, text.trim().slice(0, 200));
           const appended = await deps.store.append(
@@ -2021,11 +2606,15 @@ export async function buildServer(
             });
           } else if (deps.createLoop) {
             const sink = sinkFor(granted.sessionId);
-            const loop = deps.createLoop(granted.sessionId, workspaceRootFor(granted.meta));
+            const loop = deps.createLoop(
+              granted.sessionId,
+              await workspaceRootFor(granted.meta, granted.sessionId),
+            );
             runInline(granted.sessionId, (signal) =>
               loop.run(granted.sessionId, text, sink, {
                 signal,
                 actor: identity?.userId,
+                contextGuard: executionGuard(granted.sessionId, identity?.userId ?? 'anonymous'),
                 tenantId: identity?.tenantId,
                 policy: policyFor(granted.meta),
                 promptSeq: appended.from,
@@ -2168,6 +2757,9 @@ export async function buildServer(
           liveSubs.get(sessionId)?.delete(liveListener);
         };
       }
+      // Audit-only log entries need not produce wire frames. Flush readiness
+      // after both durable and live subscriptions are installed.
+      reply.raw.write(': connected\n\n');
     } else {
       reply.raw.write(': connected\n\n');
       // Inline execution uses the same durable replay cursor as workers.

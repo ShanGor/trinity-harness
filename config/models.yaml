@@ -1,6 +1,6 @@
 # Model prices are keyed by the exact routed provider/model identifier.
 # Rates are decimal strings in native currency units per million tokens.
-# These are direct-provider standard/list rates checked on 2026-10-12; update
+# These are direct-provider standard/list rates; check dates are in each version. Update
 # the version when the provider changes a rate or when this deployment uses a
 # different billing arrangement. Unlisted models have unavailable cost.
 models:
@@ -14,6 +14,16 @@ models:
       output: '100'
       cacheRead: '2'
       cacheWrite: '20'
+
+  # MiniMax-M3.1-Flash via the China Anthropic-compatible endpoint.
+  # Flat pricing across its 1M context; no cache-write rate is published.
+  # Source: https://platform.minimax.cn/docs/pricing/overview#models/text
+  anthropic/MiniMax-M3.1-Flash:
+    - currency: CNY
+      version: official-2026-10-20-cn
+      input: '1'
+      output: '4'
+      cacheRead: '0.1'
 
   # MiniMax-M3 standard tier via the Anthropic-compatible route. The API rate
   # table publishes input/output/cache-read only; no cache-write rate is listed.

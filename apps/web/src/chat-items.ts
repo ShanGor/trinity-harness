@@ -7,6 +7,8 @@
 import {
   newId,
   type AnswerCitation,
+  type ServerEvent,
+  type RecallReceipt,
   type ModelUsage,
   type SurfaceMessage,
   type SessionUpdate,
@@ -36,9 +38,11 @@ export type ChatItem = {
   final?: boolean;
   stopped?: boolean;
   error?: boolean;
+  errorDetail?: string;
   awaitingApproval?: boolean;
   citationList?: AnswerCitation[];
   usage?: ModelUsage[];
+  recall?: RecallReceipt;
 };
 
 export type CommittedUserMessage = {
@@ -170,7 +174,7 @@ export function mergeCommittedAssistantMessage(
   content: string,
   newKey: () => string,
   at?: string,
-  metadata: Pick<SurfaceMessage, 'phase' | 'citationList'> = {},
+  metadata: Pick<SurfaceMessage, 'phase' | 'citationList' | 'id'> = {},
 ): ChatItem[] {
   const last = items.at(-1);
   let item: ChatItem =
@@ -188,6 +192,7 @@ export function mergeCommittedAssistantMessage(
   item = {
     ...item,
     content,
+    ...(metadata.id ? { messageId: metadata.id } : {}),
     ...(at !== undefined ? { at } : {}),
     citationList: metadata.citationList,
     stopped: false,
@@ -259,6 +264,7 @@ export function setAssistantApproval(
 export function settleAssistantItems(
   items: readonly ChatItem[],
   status: 'completed' | 'aborted' | 'error' = 'completed',
+  errorDetail?: string,
 ): ChatItem[] {
   return items.map((item) => {
     if (item.role !== 'assistant' || item !== items.at(-1)) return item;
@@ -269,7 +275,8 @@ export function settleAssistantItems(
       !item.streaming &&
       !pending &&
       !item.awaitingApproval &&
-      !(item.stepCommitted && !item.final)
+      !(item.stepCommitted && !item.final) &&
+      !(status === 'error' && !item.final)
     )
       return item;
     const base = status !== 'completed' && !item.final ? archiveAssistantStep(item) : item;
@@ -280,6 +287,7 @@ export function settleAssistantItems(
       final: status === 'completed' && base.content.trim().length > 0,
       stopped: status === 'aborted',
       error: status === 'error',
+      ...(status === 'error' && errorDetail ? { errorDetail } : {}),
       tools: item.tools.map((tool) =>
         tool.status === 'pending' || tool.status === 'in_progress'
           ? {
@@ -321,4 +329,59 @@ export function mergeModelUsage(
     usage: [usage],
   });
   return result;
+}
+
+export function mergeRecallSelection(
+  items: readonly ChatItem[],
+  receipt: RecallReceipt,
+): ChatItem[] {
+  const userIndex = items.findIndex(
+    (item) => item.role === 'user' && item.messageId === receipt.promptId,
+  );
+  if (userIndex < 0) return [...items];
+  const next = items[userIndex + 1];
+  if (next?.role === 'assistant')
+    return items.map((item) => (item === next ? { ...item, recall: receipt } : item));
+  const result = [...items];
+  result.splice(userIndex + 1, 0, {
+    key: newItemKey(),
+    role: 'assistant',
+    content: '',
+    streaming: true,
+    tools: [],
+    attachments: [],
+    recall: receipt,
+  });
+  return result;
+}
+
+/** Same ACP projection for bounded pages and the independent detail pane. */
+export function applyTimelineEvent(items: ChatItem[], event: ServerEvent): ChatItem[] {
+  if (event.type === 'session/memory_selection') return mergeRecallSelection(items, event.receipt);
+  if (event.type === 'message/committed')
+    return event.message.role === 'user'
+      ? mergeCommittedUserMessage(items, event.message, newItemKey)
+      : mergeCommittedAssistantMessage(
+          items,
+          event.message.content,
+          newItemKey,
+          event.message.at,
+          event.message,
+        );
+  if (event.type === 'model/usage') return mergeModelUsage(items, event.usage, newItemKey);
+  if (event.type === 'session/update') {
+    if (event.update.kind === 'agent_message_chunk')
+      return mergeAssistantChunk(items, event.update.text, newItemKey, new Date().toISOString());
+    if (event.update.kind === 'tool_call')
+      return mergeToolUpdate(items, event.update, newItemKey, new Date().toISOString());
+    if (event.update.kind === 'permission_request')
+      return setAssistantApproval(items, event.update.status === 'pending');
+  }
+  if (event.type === 'error') return settleAssistantItems(items, 'error', event.message);
+  if (
+    event.type === 'session/turn_status' &&
+    (event.status === 'completed' || event.status === 'aborted')
+  )
+    return settleAssistantItems(items, event.status);
+  return items;
 }

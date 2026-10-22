@@ -43,6 +43,48 @@
       "when": 1790684823785,
       "tag": "0005_groovy_robbie_robertson",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792506690215,
+      "tag": "0006_yielding_raza",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792507076902,
+      "tag": "0007_chilly_typhoid_mary",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792507651774,
+      "tag": "0008_fearless_meltdown",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792507790883,
+      "tag": "0009_assistant_prompt_dispatch",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1792542806251,
+      "tag": "0010_abnormal_blizzard",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1792555238574,
+      "tag": "0011_organic_jimmy_woo",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { loadModelPricingConfig } from '../src/llm/model-pricing-config.js';
+import { priceUsage } from '../src/llm/usage.js';
 
 describe('loadModelPricingConfig', () => {
   it('loads the bundled default price catalog', () => {
@@ -13,6 +14,15 @@ describe('loadModelPricingConfig', () => {
           output: '100',
           cacheRead: '2',
           cacheWrite: '20',
+        },
+      ],
+      'anthropic/MiniMax-M3.1-Flash': [
+        {
+          currency: 'CNY',
+          version: 'official-2026-10-20-cn',
+          input: '1',
+          output: '4',
+          cacheRead: '0.1',
         },
       ],
       'anthropic/MiniMax-M3': [
@@ -29,6 +39,26 @@ describe('loadModelPricingConfig', () => {
         { currency: 'USD', input: '0.3', output: '1.2', cacheRead: '0.006' },
       ],
     });
+  });
+
+  it('prices MiniMax M3.1 Flash without a long-context surcharge or assumed cache-write rate', () => {
+    const catalog = loadModelPricingConfig(new URL('../../../config/models.yaml', import.meta.url));
+    const model = 'anthropic/MiniMax-M3.1-Flash';
+    const tokens = {
+      inputTokens: 600_000,
+      uncachedInputTokens: 500_000,
+      cacheReadTokens: 100_000,
+      cacheWriteTokens: 0,
+      outputTokens: 10_000,
+      reasoningTokens: 2_000,
+    };
+    const result = priceUsage(model, tokens, catalog);
+    expect(result.cost).toEqual({ currency: 'CNY', amount: '0.55000000000000' });
+    expect(result.pricing?.cacheWrite).toBeUndefined();
+    expect(
+      priceUsage(model, { ...tokens, uncachedInputTokens: 499_999, cacheWriteTokens: 1 }, catalog)
+        .cost,
+    ).toBeUndefined();
   });
 
   it('loads validated rates by exact provider/model key', () => {

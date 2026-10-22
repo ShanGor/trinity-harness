@@ -282,11 +282,14 @@ export class LocalSandbox implements SandboxPort {
    * raw byte chunks and does its own framing (LSP Content-Length headers).
    */
   openProcess(command: string, args: string[], opts?: OpenProcessOptions): LongRunningProcess {
+    if (opts?.processGroup && process.platform === 'win32')
+      throw new Error('Browser process groups require POSIX');
     const cwd = opts?.cwd ? this.resolve(opts.cwd) : this.workspaceRoot;
     const child = spawn(command, args, {
       cwd,
       env: this.childEnv(opts?.env),
       stdio: ['pipe', 'pipe', 'ignore'],
+      detached: opts?.processGroup === true,
     });
     let exitResolve!: (code: number | null) => void;
     const exited = new Promise<number | null>((resolve) => {
@@ -294,13 +297,18 @@ export class LocalSandbox implements SandboxPort {
     });
     child.once('exit', (code) => exitResolve(code));
     child.once('error', () => exitResolve(null));
-    opts?.signal?.addEventListener(
-      'abort',
-      () => {
-        child.kill('SIGTERM');
-      },
-      { once: true },
-    );
+    const kill = (): void => {
+      if (opts?.processGroup && child.pid) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch (err) {
+          if (!(err instanceof Error && 'code' in err && err.code === 'ESRCH')) throw err;
+        }
+      } else child.kill('SIGTERM');
+    };
+    opts?.signal?.addEventListener('abort', kill, { once: true });
+    child.once('close', () => opts?.signal?.removeEventListener('abort', kill));
+    if (opts?.signal?.aborted) kill();
     const stdout = child.stdout;
     return {
       write: (data) => {
@@ -314,9 +322,7 @@ export class LocalSandbox implements SandboxPort {
             yield chunk as Uint8Array;
           }
         })(),
-      kill: () => {
-        child.kill('SIGTERM');
-      },
+      kill,
       exited,
     };
   }

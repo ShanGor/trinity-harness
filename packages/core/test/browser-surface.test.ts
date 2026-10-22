@@ -93,6 +93,24 @@ it('uses mutation events and an injected fake clock for readiness and timeout', 
   await vi.advanceTimersByTimeAsync(100);
   expect(await timeout).toBe('timed_out');
 });
+it('captures SPA content mounted after the initial empty shell', async () => {
+  setup('<body><main id="app"></main></body>');
+  vi.useFakeTimers();
+  expect(
+    browserCaptureSchema.parse(browser.window.eval(browserExtractor('article'))),
+  ).toMatchObject({
+    blocks: [],
+    readiness: 'partial',
+  });
+  const ready = browser.window.eval(
+    browserReadinessScript('Model details', 1000),
+  ) as Promise<string>;
+  browser.document.getElementById('app')!.innerHTML = '<div><span>Model details</span></div>';
+  expect(await ready).toBe('ready');
+  const capture = browserCaptureSchema.parse(browser.window.eval(browserExtractor('article')));
+  expect(capture.blocks.map((block) => block.text)).toEqual(['Model details']);
+  expect(capture.extractorVersion).toBe('semantic-v2');
+});
 it('compares article selection with Readability while retaining canonical punctuation, table cells and code', () => {
   setup(
     `<body><nav>${'Navigation '.repeat(50)}</nav><main><article><h1>Evidence</h1><p>论文标题：Late-life treatment 查看更多 期刊：Nature “原文” 😀</p><p>${'The study investigated a treatment in aged mice and does not establish human benefit. '.repeat(20)}</p><pre>const policy = {\n  egress: false\n};</pre><table><tr><th>Product</th><th>UI</th></tr><tr><td>Teams</td><td>Unconfirmed</td></tr></table></article></main></body>`,

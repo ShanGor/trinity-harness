@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { CoreToolRegistry, writeFileTool } from '../src/index.js';
@@ -7,6 +7,37 @@ import { FakeSandbox } from '../src/testing/fake-sandbox.js';
 const baseCtx = { sessionId: 's1', workspaceRoot: '/ws' };
 
 describe('CoreToolRegistry', () => {
+  it('allows composite tools to inherit cancellation without an implicit deadline', async () => {
+    const registry = new CoreToolRegistry(new FakeSandbox());
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    try {
+      registry.register({
+        name: 'composite',
+        description: 'Runs under the task deadline',
+        parameters: z.object({}),
+        timeoutMs: null,
+        execute: async (_args, ctx) => {
+          expect(ctx.signal).toBe(controller.signal);
+          controller.abort(new Error('Task cancelled'));
+          ctx.signal?.throwIfAborted();
+          return { value: 'unexpected', isError: false };
+        },
+      });
+      expect(
+        await registry.execute(
+          { id: 'c', name: 'composite', args: {} },
+          { ...baseCtx, signal: controller.signal },
+        ),
+      ).toMatchObject({
+        isError: true,
+        value: { message: 'Task cancelled' },
+      });
+      expect(timeout).not.toHaveBeenCalled();
+    } finally {
+      timeout.mockRestore();
+    }
+  });
   it('injects the sandbox and executes a registered tool', async () => {
     const registry = new CoreToolRegistry(new FakeSandbox());
     registry.register(writeFileTool);

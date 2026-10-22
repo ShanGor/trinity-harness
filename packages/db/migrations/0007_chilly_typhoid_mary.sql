@@ -1,0 +1,1 @@
+ALTER TABLE "sessions" ADD CONSTRAINT "sessions_kind_workspace_check" CHECK ((kind is null and session_role is null and workspace_uri is not null) or (kind = 'chat' and session_role in ('main', 'side') and workspace_uri is null and scope = 'personal' and scope_id is null) or (kind = 'work' and session_role = 'task' and workspace_uri is not null));

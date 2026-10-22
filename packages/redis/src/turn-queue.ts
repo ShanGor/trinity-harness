@@ -1,5 +1,4 @@
 import type { AgentTaskQueue, TurnTask } from '@trinity-harness/contracts';
-import { newId } from '@trinity-harness/shared';
 import { Queue, Worker, type ConnectionOptions, type Job } from 'bullmq';
 
 /**
@@ -30,7 +29,13 @@ export class RedisTurnQueue implements AgentTaskQueue {
   }
 
   async enqueue(task: TurnTask): Promise<void> {
-    await this.queue.add('turn', task, { jobId: newId() });
+    const jobId = `${task.sessionId}-${task.promptSeq}`;
+    const previous = await this.queue.getJob(jobId);
+    if (previous && (await previous.isFailed())) {
+      await previous.retry();
+      return;
+    }
+    await this.queue.add('turn', task, { jobId });
   }
 
   /**
@@ -48,6 +53,11 @@ export class RedisTurnQueue implements AgentTaskQueue {
     return Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, Number(v)]));
   }
 
+  /** Recover terminal notifications lost when a worker exited. Retention is bounded to 1000. */
+  async reconcileFailed(handler: (task: TurnTask) => Promise<void>): Promise<void> {
+    for (const job of await this.queue.getFailed(0, 999)) await handler(job.data);
+  }
+
   async close(): Promise<void> {
     await this.queue.close();
   }
@@ -55,7 +65,7 @@ export class RedisTurnQueue implements AgentTaskQueue {
 
 export interface TurnWorker {
   /** Resolves when the worker has been asked to close (drains in-flight). */
-  close(): Promise<void>;
+  close(options?: { abortActive?: boolean }): Promise<void>;
   /**
    * M3 `session/cancel`: abort the in-flight turn of `sessionId` (no-op when
    * the session is not running on this worker replica).
@@ -75,26 +85,56 @@ export function createTurnWorker(
   connection: ConnectionOptions,
   handler: (task: TurnTask, job: Job<TurnTask>, signal: AbortSignal) => Promise<void>,
   queueName: string = TURN_QUEUE_NAME,
+  options: {
+    concurrency?: number;
+    onTerminalFailure?: (task: TurnTask) => Promise<void>;
+  } = {},
 ): TurnWorker {
-  const active = new Map<string, AbortController>();
+  const active = new Map<string, Set<AbortController>>();
+  const failureNotifications = new Set<Promise<void>>();
   const worker = new Worker<TurnTask>(
     queueName,
     async (job) => {
       const controller = new AbortController();
-      active.set(job.data.sessionId, controller);
+      const controllers = active.get(job.data.sessionId) ?? new Set<AbortController>();
+      controllers.add(controller);
+      active.set(job.data.sessionId, controllers);
       try {
         await handler(job.data, job, controller.signal);
       } finally {
-        active.delete(job.data.sessionId);
+        controllers.delete(controller);
+        if (!controllers.size) active.delete(job.data.sessionId);
       }
     },
-    { connection, concurrency: 1 },
+    { connection, concurrency: options.concurrency ?? 1 },
   );
   worker.on('failed', (job, err) => {
-    console.error(`[turn-worker] job ${job?.id} failed (attempt ${job?.attemptsMade})`, err);
+    // Provider/driver error objects can contain secrets or full input.
+    console.error(`[turn-worker] job ${job?.id} failed (attempt ${job?.attemptsMade})`, err.name);
+    if (!job || !options.onTerminalFailure) return;
+    const notify = (async (): Promise<void> => {
+      // Automatic retries are not terminal and must not close the turn.
+      if ((await job.getState()) === 'failed') await options.onTerminalFailure!(job.data);
+    })().catch(() => {
+      // PG remains authoritative; startup reconciliation retries this delivery.
+      console.error(`[turn-worker] terminal notification failed for job ${job.id}`);
+    });
+    failureNotifications.add(notify);
+    void notify.finally(() => failureNotifications.delete(notify));
   });
   return {
-    close: () => worker.close(),
-    cancel: (sessionId) => active.get(sessionId)?.abort(),
+    close: async (closeOptions) => {
+      // Development watchers have a short kill deadline. Abort before draining
+      // so the loop can persist its terminal state before the process exits.
+      const closing = worker.close();
+      if (closeOptions?.abortActive)
+        for (const controllers of active.values())
+          for (const controller of controllers) controller.abort();
+      await closing;
+      await Promise.all(failureNotifications);
+    },
+    cancel: (sessionId) => {
+      for (const controller of active.get(sessionId) ?? []) controller.abort();
+    },
   };
 }

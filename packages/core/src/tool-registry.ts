@@ -7,9 +7,10 @@ import type {
   ToolRegistry,
   ToolResult,
   ToolSchema,
+  ToolEffect,
 } from '@trinity-harness/contracts';
 import { z } from 'zod';
-import { browserErrorSchema } from '@trinity-harness/contracts';
+import { browserErrorSchema, toolEffectSchema } from '@trinity-harness/contracts';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -50,6 +51,16 @@ export class CoreToolRegistry implements ToolRegistry {
     return this.tools.get(name)?.concurrency ?? 'parallel';
   }
 
+  effectOf(call: ToolCall): ToolEffect {
+    const def = this.tools.get(call.name);
+    const args = def?.parameters.safeParse(call.args);
+    if (!def || !args?.success) return { kind: 'read', scope: 'control', evidence: 'none' };
+    if (!def.effect && !def.effectFor) return { kind: 'unknown', scope: 'unknown' };
+    const classified = def.effectFor ? def.effectFor(args.data) : def.effect;
+    const parsed = toolEffectSchema.safeParse(classified);
+    return parsed.success ? parsed.data : { kind: 'unknown', scope: 'unknown' };
+  }
+
   async execute(call: ToolCall, ctx: ToolContextInput): Promise<ToolResult> {
     const def = this.tools.get(call.name);
     if (!def) {
@@ -76,11 +87,13 @@ export class CoreToolRegistry implements ToolRegistry {
         isError: true,
       };
     }
-    const signals = [
-      AbortSignal.timeout(def.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-      ...(ctx.signal ? [ctx.signal] : []),
-    ];
-    const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals as AbortSignal[]);
+    const signal =
+      def.timeoutMs === null
+        ? ctx.signal
+        : AbortSignal.any([
+            AbortSignal.timeout(def.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+            ...(ctx.signal ? [ctx.signal] : []),
+          ]);
     try {
       return await def.execute(parsed.data, {
         ...ctx,
@@ -94,7 +107,7 @@ export class CoreToolRegistry implements ToolRegistry {
           isError: true,
           value: browserErrorSchema.parse({
             kind: 'browser-error-v1',
-            code: signal.aborted ? 'CANCELLED' : 'DRIVER_FAILED',
+            code: signal?.aborted ? 'CANCELLED' : 'DRIVER_FAILED',
             operation: 'browser',
             effect: 'unknown',
             message: 'Browser execution failed. Reobserve before retrying effects.',

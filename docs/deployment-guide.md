@@ -1,6 +1,6 @@
 # Browser deployment
 
-Trinity currently attaches to an existing user-owned Chrome over CDP. On this machine the endpoint is port **9222**, already configured by `BROWSER_CDP_ENDPOINT=9222` in the local environment. Managed Chrome is not launched or used.
+Trinity defaults to attaching to an existing user-owned Chrome over CDP. On this machine that endpoint remains port **9222**. An explicitly configured Zendriver runtime is now available as an alternative; this implementation does not switch the local configuration automatically.
 
 ## Existing CDP Chrome
 
@@ -43,9 +43,9 @@ TRINITY_TEST_CDP_ENDPOINT=9222 pnpm exec vitest run packages/core/test/browser-c
 
 Normal `pnpm test` skips this check unless the endpoint is supplied. Unit tests cover missing/wrong owners, endpoints, unsupported versions, unexpected launch, malformed output, cancellation and committed target recovery without a real browser.
 
-## TODO: managed Chrome deployment
+## TODO: enforced managed Chrome deployment
 
-Managed Chrome is outside the current implementation and must not be used as an automatic fallback. Future deployment work includes:
+The trusted-owner Zendriver mode below is implemented. Enforced multi-tenant managed browsing remains future deployment work, and must not be used as an automatic fallback. Remaining work includes:
 
 - provisioning Chrome and session-isolated profiles without ambient credentials;
 - enforcing browser-side egress for redirects, subresources, DNS/private destinations, WebSockets, workers and control endpoints;
@@ -58,7 +58,7 @@ Managed Chrome is outside the current implementation and must not be used as an 
 
 Actions default to per-operation approval. Explicit policy entries `browser.click`, `browser.fill`, `browser.key`, and `browser.scroll` can allow/deny them. A broad `browser: allowed` or `agent-browser` executable grant does not authorize actions. `danger-full-access` deliberately permits all operations. Missing approval channels deny. Use a fresh delivered snapshot and inspect post-action output; provide optional `readiness: {text, timeoutMs}` when a visible outcome matters. Live browser races remain possible in shared owner-controlled Chrome; avoid concurrent interacting turns and user input on the same browser during critical actions. An `applied` driver acknowledgment does not establish that a website accepted or completed the task.
 
-Screenshots are bounded to 2048×2048, 2 MiB each, four images and 6 MiB per turn. Crop coordinates are viewport CSS pixels; returned image coordinates map through `crop` and `scale`. Suspected credential URLs and recognized sensitive forms are refused. This is conservative detection, not complete private-page redaction. Images appear in Sources / View evidence through a dedicated session-authorized endpoint; generic browser artifact downloads stay blocked. PNG bytes are carried through the model image path, never inline base64 in tool JSON.
+Screenshots are bounded to 2048×2048 and 2 MiB each. There is no cumulative screenshot count or image-byte ceiling per turn. Crop coordinates are viewport CSS pixels; returned image coordinates map through `crop` and `scale`. Suspected credential URLs and recognized sensitive forms are refused. This is conservative detection, not complete private-page redaction. Images appear in Sources / View evidence through a dedicated session-authorized endpoint; generic browser artifact downloads stay blocked. PNG bytes are carried through the model image path, never inline base64 in tool JSON.
 
 Artifacts referenced by retained events/citations are kept. Automatic GC is disabled. Orphan cleanup must use the full retained PostgreSQL log, wait beyond the longest execution/recovery window, and remove only confirmed unreferenced keys; Redis truncation and copied fork receipts are insufficient authority.
 
@@ -74,3 +74,54 @@ TRINITY_RUN_BROWSER_EVAL=1 TRINITY_TEST_CDP_ENDPOINT=9222 \
 Results default to `/tmp/trinity-browser-evaluation.json`; override `TRINITY_BROWSER_EVAL_REPORT`. The runner records actual cumulative provider tokens, calls, bytes, latency, citation failures, answers and explicit coverage checks. It does not contact public websites or submit external account actions. Review the answers as well as metrics before rollout; synthetic fixtures do not establish current-world research quality. See [research-evaluation.md](./research-evaluation.md).
 
 Screenshot paint readiness is bounded. A background or minimized shared Chrome may not produce animation frames: the PNG is retained as partial visual evidence, with an explicit warning that pixels may lag the DOM. Coordinate actions require a ready screenshot; reobserve after bringing Chrome into view. Native controls use a fixed checked DOM activation, which does not supply a trusted user gesture. Custom controls and coordinate input use the pointer path; do not automatically retry an unknown effect.
+
+## Chat session storage
+
+Chat allocates `$WORKSPACE_ROOT/sessions/<user_id>/<session_uuid_v7>` automatically; Task/Work uses the selected personal/team workspace. Keep this directory on the same persistent shared workspace disk accessible to server and workers. Chat uploads retain blob storage references and writable copies under their session's `uploads/` directory. Browser evidence continues to use the existing artifact store with bounded retrieval.
+
+Apply migration 0010 before running this version. Existing null-workspace Chat sessions acquire their immutable binding on first execution or upload through a logged transaction; no original event is rewritten. A missing binder or invalid directory prevents execution instead of falling back to the deployment root. Configured tools and permissions apply equally to Chat and Task/Work.
+
+## Managed Zendriver (opt-in)
+
+This mode uses the Rust `zendriver-mcp` from TurtIeSocks/zendriver-rs, pinned to **0.16.37** with its published lockfile and default optional features disabled. Trinity applies a small tracked patch adding the private process-level `--user-data-dir` argument; the model-facing MCP schema remains unchanged. Build the patched executable at setup time, never during a turn:
+
+```bash
+./scripts/build-zendriver-mcp.sh /opt/zendriver
+```
+
+The script applies `apps/browser-runtime/patches/zendriver-mcp-user-data-dir.patch` to the pinned crate source and installs the executable under `/opt/zendriver/bin`. `deploy/docker/Dockerfile.browser-runtime` performs this build automatically. An unpatched binary rejects the runtime's `--user-data-dir` argument and fails closed.
+
+The tested Chrome build is **155.0.8059.84**. Runtime startup verifies the binary version; each launch verifies the Chrome product version, native profile and requested isolation/CSP overrides. `ZENDRIVER_CHROME_VERSION` explicitly selects another administrator-validated build. Upstream reports RMCP 2.2.0 in its MCP handshake; this is checked separately from executable identity. Chrome must run with its sandbox available as a non-root user. The child environment is minimal and does not inherit CI's automatic no-sandbox switch, runtime credentials or provider keys.
+
+Run `pnpm db:migrate` for migration 0011. The supervisor requires PostgreSQL ownership metadata and the same `WORKSPACE_ROOT`/blob storage as server and worker. Configure the same administrator-generated `BROWSER_RUNTIME_TOKEN` (at least 32 characters) in the supervisor and every server/worker. Remove any `BROWSER_CDP_ENDPOINT` assignment from the environment **and dotenv files** when selecting Zendriver:
+
+```dotenv
+BROWSER_DRIVER=zendriver
+BROWSER_RUNTIME_ENDPOINT=http://127.0.0.1:3010
+BROWSER_RUNTIME_TOKEN=<administrator-generated-random-secret>
+BROWSER_PROFILE_DIR=/opt/local/browser-data
+ZENDRIVER_BINARY=/opt/zendriver/bin/zendriver-mcp
+ZENDRIVER_CHROME_VERSION=155.0.8059.84
+```
+
+`BROWSER_PROFILE_DIR` is required by the supervisor and must point to operator-provisioned persistent encrypted storage, writable by the browser-runtime service UID/GID. Mount it only into the browser-runtime process/container. Trinity creates private directories at `<root>/<tenant-id>/<user-id>`; Chrome stores its `Default` profile inside each directory. Profile paths come from authenticated session metadata and are never model arguments or event data. Directory permissions are set to `0700` and lock files to `0600`.
+
+Start the separate supervisor with `pnpm start:browser-runtime` (or `pnpm dev:browser-runtime` for development), then run server/worker normally. `DATABASE_URL`, `WORKSPACE_ROOT` and the configured owner's `ADMIN_EMAIL` or `BROWSER_CDP_OWNER_ID` must agree across processes. Only that owner's personal sessions can use this trusted local process mode, for both Chat and Work. Team/other-owner/closed sessions are denied. Worker subagents remain saved-only.
+
+The supervisor binds loopback by default on port 3010 and authenticates every request. A remote `BROWSER_RUNTIME_ENDPOINT` must use HTTPS; expose the supervisor only through an operator-provided authenticated TLS proxy/network policy, never directly on the public internet. No arbitrary upstream MCP endpoint is accepted. `BROWSER_RUNTIME_MAX_SESSIONS` defaults to 4 and `BROWSER_RUNTIME_IDLE_MS` to 300000. Exhausted capacity refuses new allocations. Restarting workers keeps the surviving supervisor/browser; idle expiry, session closure and normal supervisor shutdown stop owned processes while retaining durable user profiles. Only one Chrome process may use a user's profile at a time; another session for that user fails closed until the current runtime releases it. The current managed mode remains restricted to the configured owner's personal sessions and does not provide hostile-tenant isolation.
+
+`deploy/docker/Dockerfile.browser-runtime` is an opt-in build recipe: supply an HTTPS `CHROME_DEB_URL` and its independently verified `CHROME_DEB_SHA256` as build arguments. It compiles the pinned Rust binary and verifies the supplied Chrome version. This recipe requires compatible amd64 Chrome packaging and a deployment that permits Chrome's sandbox. The stock Helm chart does not provision managed-browser isolation, TLS proxying or this workload; those remain deployment gates. Use a private container network/sidecar proxy or trusted host topology and a writable shared workspace. Do not call this `enforced` mode: LocalSandbox and separate profiles do not provide hostile-tenant isolation or a network firewall. Existing Bash routes remain subject to their existing policies.
+
+### Recovery and uncertain outcomes
+
+The runtime holds a PostgreSQL session lock through the complete operation, evidence capture and command-journal outcome write. Request identity includes the originating tool call and normalized arguments. Duplicate completed commands return the recorded result; a durable dispatch without an outcome returns an unknown effect and is never resent. HTTP timeout/cancellation does not assert that website effects were undone. The supervisor stops its owned process group before releasing local control and invalidates old target generations. Saved observations remain readable offline and retain their original capture time.
+
+After a **graceful** stop, the next call can allocate a new generation and reuse the same durable profile. After a **crash**, an active row owned by an old supervisor blocks automatic takeover: first stop the old runtime container/process group and confirm its Chrome descendants cannot continue. Only then may an administrator invalidate the matching `browser_runtimes` row (`status='invalid'`, scoped to its session ID and old owner ID) and remove the corresponding stale `<BROWSER_PROFILE_DIR>/.locks/<tenant-id>-<user-id>.lock`. Keep the user's profile directory, `browser_commands` and evidence intact. Delete the profile directory only after stopping its browser and when intentionally revoking that user's stored login state. This explicit recovery requirement prevents a second browser from acting alongside an unconfirmed old process; it is not automatic process reclamation.
+
+The real browser compatibility check contacts only a local fixture:
+
+```bash
+ZENDRIVER_INTEGRATION=1 ZENDRIVER_BINARY=/absolute/path/to/zendriver-mcp pnpm exec vitest run packages/core/test/zendriver-integration.test.ts
+```
+
+It checks Unicode evidence, input replacement, key/click behavior, PNG capture, successful receipts and offline screenshot replay. Ordinary deterministic tests fake MCP/runtime peers. Public-site bot-defense improvements have not been measured; compare user-identified failing sites separately before changing the default driver.

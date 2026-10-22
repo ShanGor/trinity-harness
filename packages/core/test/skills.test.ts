@@ -250,7 +250,8 @@ describe('SkillRuntime and model projection', () => {
       spill: {
         thresholdBytes: 1,
         store: {
-          put: async () => {
+          put: async (key, data, options) => {
+            if (key?.startsWith('model-context/')) return {key, uri: `blob://${key}`, mimeType: options.mimeType, size: data.byteLength};
             throw new Error('skill must not spill');
           },
           get: async () => null,
@@ -572,9 +573,7 @@ describe('SkillRuntime and model projection', () => {
     expect(toModelMessages(await store.load('s'))[0]!.content).not.toContain(
       'A browser connection is configured',
     );
-    expect(toModelMessages(await store.load('s'))[0]!.content).toContain(
-      'do not launch managed Chrome',
-    );
+    expect(toModelMessages(await store.load('s'))[0]!.content).toContain('launch managed Chrome');
     for (const value of [
       '9222',
       'http://127.0.0.1:9222',
@@ -590,6 +589,28 @@ describe('SkillRuntime and model projection', () => {
       '9222; echo bad',
     ])
       expect(browserCdpEndpointSchema.safeParse(value).success).toBe(false);
+  });
+  it('advertises managed lifecycle through the typed browser without granting restricted sessions live access', async () => {
+    const store = new MemorySessionStore();
+    await new SkillRuntime(new FileSkillCatalog(), store, {
+      managedBrowser: true,
+      now: () => new Date('2026-01-01T00:00:00.000Z'),
+    }).prepare({ sessionId: 'managed', workspaceRoot: root });
+    const instructions = toModelMessages(await store.load('managed'))[0]!.content;
+    expect(instructions).toContain('Managed browsing is configured');
+    expect(instructions).toContain('only the browser operations advertised');
+    expect(instructions).toContain('Never launch browsers');
+    expect(instructions).not.toContain('--cdp');
+    expect(instructions).not.toContain('BROWSER_RUNTIME_TOKEN');
+    const restricted = createBrowserTool({
+      store,
+      blobs: new LocalBlobStore(root),
+      now: () => new Date('2026-01-01T00:00:00.000Z'),
+    });
+    expect(
+      restricted.parameters.safeParse({ operation: 'navigate', url: 'https://example.com/' })
+        .success,
+    ).toBe(false);
   });
 
   it('refreshes a loaded skill after edits and suppresses obsolete instructions on replay', async () => {

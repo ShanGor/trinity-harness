@@ -82,7 +82,8 @@ export function turnMessageProjection(events: readonly SessionEvent[]): {
       progress.add(candidate);
       candidate = -1;
     }
-    if (event.type === 'turn/end') close(i, event);
+    if (event.type === 'turn/end' && (!event.promptId || events[start]?.eventId === event.promptId))
+      close(i, event);
   });
   return { closed, finals, progress, terminalFallbacks };
 }
@@ -118,6 +119,15 @@ export interface SessionStore {
     sessionId: string,
     opts: { afterSeq: number; toSeq?: number },
   ): Promise<{ seq: number; event: SessionEvent }[]>;
+  /** Bounded chronological UI page; execution replay continues to use load/loadRange. */
+  loadPage?(
+    sessionId: string,
+    opts: { beforeSeq?: number; limit: number },
+  ): Promise<{
+    entries: { seq: number; event: SessionEvent }[];
+    nextBefore: number | null;
+    lastSeq: number;
+  }>;
   projectMessages(sessionId: string): Promise<Message[]>;
   /**
    * M3: best-effort removal of one just-appended event, used ONLY when the

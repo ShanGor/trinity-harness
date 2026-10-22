@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { modelUsageSchema, answerCitationListSchema } from '@trinity-harness/contracts';
+import {
+  modelUsageSchema,
+  answerCitationListSchema,
+  recallReceiptSchema,
+} from '@trinity-harness/contracts';
 export {
   answerCitationSchema,
   answerCitationListSchema,
@@ -75,6 +79,25 @@ export const surfaceMessageSchema = z.object({
 export type SurfaceMessage = z.infer<typeof surfaceMessageSchema>;
 
 export const serverEventSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('session/activity'),
+    sessionId: z.string(),
+    sourceSessionId: z.uuid(),
+    sourceEventId: z.uuid(),
+    kind: z.enum(['chat', 'work']),
+  }),
+  z.object({
+    type: z.literal('session/memory_selection'),
+    sessionId: z.string(),
+    receipt: recallReceiptSchema,
+  }),
+  z.object({
+    type: z.literal('session/prompt_queue'),
+    sessionId: z.string(),
+    promptId: z.uuid(),
+    state: z.enum(['queued', 'cancelled']),
+    text: z.string().optional(),
+  }),
   z.object({ type: z.literal('model/usage'), sessionId: z.string(), usage: modelUsageSchema }),
   z.object({
     type: z.literal('session/update'),
@@ -129,3 +152,10 @@ export const approvalResponseSchema = z
   .refine((value) => value.commandPrefix === undefined || value.outcome === 'allowed', {
     message: 'Only allowed requests can grant a command prefix',
   });
+
+export const timelinePageSchema = z.object({
+  events: z.array(serverEventSchema).max(300),
+  nextBefore: z.number().int().positive().nullable(),
+  lastSeq: z.number().int().nonnegative(),
+});
+export type TimelinePage = z.infer<typeof timelinePageSchema>;

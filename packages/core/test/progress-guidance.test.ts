@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { SessionEvent } from '@trinity-harness/contracts';
+import { browserResultSchema, type SessionEvent } from '@trinity-harness/contracts';
 import { progressGuidance } from '../src/loop/progress-guidance.js';
 import { toModelMessages } from '../src/index.js';
 
@@ -165,7 +165,7 @@ describe('progress guidance', () => {
   });
 });
 
-it('requests an evidence checkpoint after multiple sources and prompts a conclusion when notes are ready', () => {
+it('does not prescribe research from source counts and respects model-authored readiness', () => {
   const document = (url: string) => ({
     kind: 'trinity-research-page-v1',
     url,
@@ -188,7 +188,7 @@ it('requests an evidence checkpoint after multiple sources and prompts a conclus
       JSON.stringify(document('https://example.com/b')),
     ),
   ];
-  expect(progressGuidance(events, 1, 3, 64, true)).toContain('Evidence checkpoint');
+  expect(progressGuidance(events, 1, 3, 64, true)).toBeNull();
   expect(progressGuidance(events, 1, 3, 64, false)).toBeNull();
   const recorded: SessionEvent[] = [
     ...events,
@@ -202,7 +202,7 @@ it('requests an evidence checkpoint after multiple sources and prompts a conclus
         kind: 'research-notes',
         promptSeq: 1,
         notes: {
-          question: 'Which product supports this feature?',
+          question: 'What does the evidence establish?',
           findings: [
             {
               claim: 'Observed context',
@@ -224,7 +224,7 @@ it('requests an evidence checkpoint after multiple sources and prompts a conclus
   result.value = {
     ...(result.value as object),
     notes: {
-      question: 'Which product supports this feature?',
+      question: 'What does the evidence establish?',
       findings: [
         {
           claim: 'Observed',
@@ -232,7 +232,7 @@ it('requests an evidence checkpoint after multiple sources and prompts a conclus
           sources: [{ url: 'https://example.com/a', quote: 'An observed passage.' }],
         },
       ],
-      openQuestions: ['Is there a roadmap?'],
+      openQuestions: ['What remains uncertain?'],
       readyToAnswer: false,
     },
   };
@@ -249,10 +249,184 @@ it('requests an evidence checkpoint after multiple sources and prompts a conclus
       JSON.stringify(document('https://example.com/d')),
     ),
   ];
-  expect(progressGuidance([...pending, ...extraSources], 1, 6, 64, true)).toContain(
-    'two more sources',
-  );
+  expect(progressGuidance([...pending, ...extraSources], 1, 6, 64, true)).toBeNull();
   expect(
     progressGuidance([...pending, ...extraSources, { ...result, callId: 'notes' }], 1, 7, 64, true),
   ).toBeNull();
+});
+
+function browserPair(
+  id: string,
+  operation: string,
+  isError = false,
+  code = 'DRIVER_FAILED',
+): SessionEvent[] {
+  const saved = ['read_observation', 'search_observation'].includes(operation);
+  return [
+    { ...meta(), type: 'tool/call', callId: id, name: 'browser', args: { operation } },
+    {
+      ...meta(),
+      type: 'tool/result',
+      callId: id,
+      isError,
+      value: isError
+        ? { kind: 'browser-error-v1', operation, code, effect: 'none', message: 'Failure' }
+        : {
+            kind: 'browser-result-v1',
+            operation,
+            callId: id,
+            sessionId: 's',
+            observationId: id,
+            artifactUri: `blob://browser/s/${id}.json`,
+            url: 'https://example.com/',
+            title: 'Evidence',
+            capturedAt: meta().at,
+            bindingId: 'binding',
+            tabId: 'tab',
+            documentRevision: 'rev',
+            readiness: 'ready',
+            saved,
+            representation: 'article',
+            scope: 'main',
+            captureTruncated: false,
+            outputTruncated: false,
+            exclusions: [],
+            publishedAt: null,
+            outline: [],
+            duplicateSuppressed: false,
+            continuation: null,
+            blocks: [{ id: 'b0', kind: 'paragraph', text: id, start: 0, end: id.length }],
+            receipt: [{ blockId: 'b0', start: 0, end: id.length }],
+          },
+    },
+  ];
+}
+
+it('keeps live failure guidance across saved reads, replay and a process restart', () => {
+  const events = [
+    user(),
+    ...browserPair('failed1', 'navigate', true),
+    ...browserPair('saved1', 'read_observation'),
+    ...browserPair('failed2', 'navigate', true),
+    ...browserPair('saved2', 'search_observation'),
+    ...browserPair('failed3', 'read_page', true),
+  ];
+  const warning = progressGuidance(events, 1, 6, Infinity);
+  expect(warning).toContain('three consecutive browser commands');
+  expect(warning).toContain('Successful saved reads do not demonstrate live recovery');
+  expect(
+    progressGuidance(
+      structuredClone([...events, ...browserPair('saved3', 'read_observation')]),
+      1,
+      7,
+      Infinity,
+    ),
+  ).toBe(warning);
+  expect(
+    progressGuidance([...events, ...browserPair('recovered', 'navigate')], 1, 8, Infinity),
+  ).toBeNull();
+  const next = [...events, user()];
+  expect(progressGuidance(next, next.length, 1, Infinity)).toBeNull();
+});
+
+it('reports live denial immediately and only clears it after live success', () => {
+  for (const code of ['NOT_AUTHORIZED', 'DISABLED']) {
+    const events = [user(), ...browserPair('denied', 'navigate', true, code)];
+    expect(progressGuidance(events, 1, 1, Infinity)).toContain(
+      'Live browser access was denied or disabled',
+    );
+    expect(
+      progressGuidance([...events, ...browserPair('saved', 'read_observation')], 1, 2, Infinity),
+    ).toContain('does not restore live authorization');
+    expect(
+      progressGuidance([...events, ...browserPair('recovered', 'get_page_text')], 1, 3, Infinity),
+    ).toBeNull();
+  }
+  expect(
+    progressGuidance(
+      [user(), ...browserPair('missing', 'read_observation', true, 'ARTIFACT_UNAVAILABLE')],
+      1,
+      1,
+      Infinity,
+    ),
+  ).toBeNull();
+});
+
+function evidencePair(
+  id: string,
+  texts: string[],
+  headingOnly = false,
+  operation = 'read_observation',
+): SessionEvent[] {
+  const events = browserPair(id, operation);
+  const call = events[0]!;
+  const result = events[1]!;
+  if (call.type !== 'tool/call' || result.type !== 'tool/result') throw new Error('Expected pair');
+  call.args = { operation, ...(headingOnly ? { blockIds: ['b0'] } : {}) };
+  const value = browserResultSchema.parse(result.value);
+  value.blocks = texts.map((text, index) => ({
+    id: `b${index}`,
+    kind: headingOnly ? 'heading' : 'paragraph',
+    text,
+    start: 0,
+    end: text.length,
+  }));
+  result.value = value;
+  return events;
+}
+
+it('explains heading-only selections and clears advice after reading section content', () => {
+  const events = [user(), ...evidencePair('heading', ['Memory requirements'], true)];
+  expect(progressGuidance(events, 1, 2, Infinity)).toContain('selected only heading blocks');
+  expect(progressGuidance(events, 1, 2, Infinity)).toContain('sectionId');
+  expect(progressGuidance(structuredClone(events), 1, 2, Infinity)).toBe(
+    progressGuidance(events, 1, 2, Infinity),
+  );
+  expect(
+    progressGuidance(
+      [...events, ...evidencePair('body', ['Requires 16 GB of memory.'])],
+      1,
+      3,
+      Infinity,
+    ),
+  ).toBeNull();
+  const next = [...events, user()];
+  expect(progressGuidance(next, next.length, 1, Infinity)).toBeNull();
+});
+
+it('detects interspersed repeated blocks across captures and regroupings without ending work', () => {
+  const events = [
+    user(),
+    ...evidencePair('original', ['alpha', 'beta']),
+    ...evidencePair('repeat1', ['beta']),
+    ...evidencePair('new1', ['gamma'], false, 'navigate'),
+    ...evidencePair('repeat2', ['beta', 'alpha']),
+    ...evidencePair('new2', ['delta']),
+    ...evidencePair('repeat3', ['alpha']),
+  ];
+  const warning = progressGuidance(events, 1, 7, Infinity);
+  expect(warning).toContain('three of the last six browser reads');
+  expect(warning).toContain('not a completion or stop rule');
+  expect(progressGuidance(structuredClone(events), 1, 7, Infinity)).toBe(warning);
+  expect(progressGuidance([...events, ...evidencePair('fresh', ['epsilon'])], 1, 8, Infinity)).toBe(
+    warning,
+  );
+  expect(
+    progressGuidance(
+      [...events, ...evidencePair('fresh1', ['epsilon']), ...evidencePair('fresh2', ['zeta'])],
+      1,
+      9,
+      Infinity,
+    ),
+  ).toBeNull();
+  const next = [...events, user()];
+  expect(progressGuidance(next, next.length, 1, Infinity)).toBeNull();
+});
+
+it('does not mistake genuinely new saved pages for stalled research regardless of step count', () => {
+  const events = [
+    user(),
+    ...Array.from({ length: 12 }, (_, i) => evidencePair(`page${i}`, [`New evidence ${i}`])).flat(),
+  ];
+  expect(progressGuidance(events, 1, 100, Infinity)).toBeNull();
 });

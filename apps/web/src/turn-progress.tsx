@@ -58,6 +58,9 @@ export function TurnProgress({ item }: { item: ChatItem }): ReactElement | null 
           </span>
         )}
       </div>
+      {item.error && item.errorDetail && (
+        <p className="task-progress-warning">{item.errorDetail}</p>
+      )}
       {active && failed > 0 && (
         <p className="task-progress-warning">
           {failed} tool {failed === 1 ? 'call failed' : 'calls failed'} · Agent is continuing

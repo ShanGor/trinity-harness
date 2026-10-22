@@ -5,6 +5,7 @@ const sourceUrlSchema = z
   .url()
   .max(2000)
   .refine((value) => {
+    if (!URL.canParse(value)) return false;
     const url = new URL(value);
     return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
   }, 'Expected an HTTP(S) source URL without credentials');

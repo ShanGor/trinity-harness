@@ -54,7 +54,7 @@ export function observedInputAdjustment(events: readonly SessionEvent[], model: 
 export const heuristicEstimator: TokenEstimator = (messages, system) => {
   let total = system !== undefined ? estimateTextTokens(system) : 0;
   for (const m of messages) {
-    total += estimateTextTokens(m.content);
+    total += estimateTextTokens(m.content) + (m.context ? 32 : 0);
     for (const r of m.reasoning ?? []) {
       total += estimateTextTokens(r.text);
     }

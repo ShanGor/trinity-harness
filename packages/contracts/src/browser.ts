@@ -6,13 +6,8 @@ export const BROWSER_LIMITS = {
   overview: 6 * 1024,
   focused: 8 * 1024,
   diagnostic: 2 * 1024,
-  softTurn: 32 * 1024,
-  hardTurn: 64 * 1024,
-  diagnosticTurn: 64 * 1024,
   callsPerStep: 16,
   image: 2 * 1024 * 1024,
-  imageTurn: 6 * 1024 * 1024,
-  imagesPerTurn: 4,
   imageDimension: 2048,
 } as const;
 const id = z
@@ -24,6 +19,7 @@ export const browserUrlSchema = z
   .url()
   .max(2000)
   .refine((value) => {
+    if (!URL.canParse(value)) return false;
     const url = new URL(value);
     return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
   }, 'Expected credential-free HTTP(S) URL');
@@ -54,7 +50,7 @@ export const browserBlockSchema = z.object({
 });
 export const browserCaptureSchema = z.object({
   schemaVersion: z.literal(1),
-  extractorVersion: z.literal('semantic-v1'),
+  extractorVersion: z.enum(['semantic-v1', 'semantic-v2']),
   url: browserUrlSchema,
   title: z.string().max(1000),
   publishedAt: z.object({ value: z.string().max(200), origin: z.string().max(200) }).nullable(),
@@ -119,6 +115,19 @@ export const browserReadinessSchema = z.object({
   timeoutMs: z.number().int().min(100).max(10000).default(3000),
 });
 const scope = z.object({ snapshotId: id, ref: id });
+export const browserDriverMetadataSchema = z.object({
+  engine: z.enum(['agent-browser', 'zendriver']),
+  adapterVersion: z.literal(1),
+  upstreamVersion: z.string().min(1).max(100),
+  runtimeGeneration: id.optional(),
+});
+export const browserSurfaceSchema = z.object({
+  context: browserViewportSchema,
+  targets: z.array(browserTargetSchema).max(100),
+  truncated: z.boolean(),
+  privacyDenied: z.boolean(),
+});
+export type BrowserSurface = z.infer<typeof browserSurfaceSchema>;
 export const browserObservationSchema = browserCaptureSchema.extend({
   observationId: id,
   sessionId: z.string().min(1).max(200),
@@ -128,7 +137,8 @@ export const browserObservationSchema = browserCaptureSchema.extend({
   cliVersion: z.string().min(1).max(100),
   browserVersion: z.string().min(1).max(100),
   capturedAt: z.iso.datetime(),
-  securityMode: z.enum(['trusted-cdp', 'enforced']).optional(),
+  driver: browserDriverMetadataSchema.optional(),
+  securityMode: z.enum(['trusted-cdp', 'trusted-managed', 'enforced']).optional(),
   hash: z.string().regex(/^[a-f0-9]{64}$/),
   interaction: browserInteractionSchema.optional(),
   image: browserImageSchema.optional(),
@@ -139,6 +149,10 @@ const navigate = z.object({
   operation: z.literal('navigate'),
   url: browserUrlSchema,
   readiness: browserReadinessSchema.optional(),
+});
+const webSearch = z.object({
+  operation: z.literal('web_search'),
+  query: z.string().trim().min(1).max(200),
 });
 const readPage = z.object({
   operation: z.literal('read_page'),
@@ -210,6 +224,7 @@ const search = z.object({
 });
 export const browserArgumentsSchema = z.discriminatedUnion('operation', [
   navigate,
+  webSearch,
   readPage,
   getText,
   read,
@@ -225,6 +240,7 @@ export const browserResultSchema = z.object({
   kind: z.literal('browser-result-v1'),
   operation: z.enum([
     'navigate',
+    'web_search',
     'read_page',
     'get_page_text',
     'read_observation',
@@ -242,18 +258,24 @@ export const browserResultSchema = z.object({
   url: browserUrlSchema,
   title: z.string().max(1000),
   capturedAt: z.iso.datetime(),
+  driver: browserDriverMetadataSchema.optional(),
   bindingId: id,
   tabId: id,
   documentRevision: id,
   readiness: z.enum(['ready', 'partial', 'timed_out']),
   saved: z.boolean(),
-  securityMode: z.enum(['trusted-cdp', 'enforced']).optional(),
+  securityMode: z.enum(['trusted-cdp', 'trusted-managed', 'enforced']).optional(),
   captureTruncated: z.boolean(),
   representation: browserCaptureSchema.shape.representation,
   scope: z.string().max(200),
   exclusions: browserCaptureSchema.shape.exclusions,
   publishedAt: browserCaptureSchema.shape.publishedAt,
   outline: z.array(z.object({ blockId: id, title: z.string().max(160) })).max(16),
+  links: z
+    .array(z.object({ blockId: id, title: z.string().max(200), url: browserUrlSchema }))
+    .max(20)
+    .optional(),
+  linksTruncated: z.boolean().optional(),
   duplicateSuppressed: z.boolean(),
   outputTruncated: z.boolean(),
   blocks: z
@@ -289,6 +311,7 @@ export const browserErrorSchema = z.object({
     'INVALID_OUTPUT',
     'TRANSPORT_OVERFLOW',
     'DRIVER_FAILED',
+    'PAGE_UNAVAILABLE',
     'ARTIFACT_UNAVAILABLE',
     'PERSIST_FAILED',
     'NOT_AUTHORIZED',
@@ -301,7 +324,7 @@ export const browserErrorSchema = z.object({
   operation: z.string().max(40),
   effect: z.enum(['none', 'applied', 'unknown']),
   message: z.string().max(500),
-  recovery: z.enum(['focused_read', 'conclude', 'reobserve']).optional(),
+  recovery: z.enum(['focused_read', 'conclude', 'reobserve', 'navigate']).optional(),
 });
 export type BrowserError = z.infer<typeof browserErrorSchema>;
 
@@ -329,6 +352,7 @@ export interface BrowserBinding {
   /** Administrator-owned named CLI session; never model supplied. */
   cliSession: string;
   cdpEndpoint?: string;
-  securityMode?: 'trusted-cdp' | 'enforced';
+  securityMode?: 'trusted-cdp' | 'trusted-managed' | 'enforced';
   observedUrl?: string;
+  driver?: z.infer<typeof browserDriverMetadataSchema>;
 }

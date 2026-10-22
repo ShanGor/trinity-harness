@@ -4,6 +4,7 @@ import { defineTool } from './define-tool.js';
 
 export const readFileTool = defineTool({
   name: 'read_file',
+  effect: { kind: 'read', scope: 'workspace', evidence: 'observation' },
   description:
     'Inspect a UTF-8 text file in the workspace. Prefer this over Bash commands such as cat, head, tail, sed, or grep when reading file contents. Reads of sensitive paths are checked by the agent and may require approval. Returns bounded content (maxBytes) with a truncated flag.',
   parameters: z.object({
@@ -18,6 +19,7 @@ export const readFileTool = defineTool({
 
 export const writeFileTool = defineTool({
   name: 'write_file',
+  effect: { kind: 'mutation', scope: 'workspace', evidence: 'none' },
   description:
     'Write (create or overwrite) a UTF-8 text file in the workspace. Parent directories are created automatically.',
   parameters: z.object({
@@ -32,6 +34,7 @@ export const writeFileTool = defineTool({
 
 export const editFileTool = defineTool({
   name: 'edit_file',
+  effect: { kind: 'mutation', scope: 'workspace', evidence: 'none' },
   description:
     'Precise string replacement in a workspace file. old_text must match EXACTLY ONE occurrence — read the file first. Fails if found zero or multiple times.',
   parameters: z.object({
@@ -47,6 +50,7 @@ export const editFileTool = defineTool({
 
 export const globTool = defineTool({
   name: 'glob',
+  effect: { kind: 'read', scope: 'workspace', evidence: 'observation' },
   description: 'Find files in the workspace matching a glob pattern (e.g. "src/**/*.ts").',
   parameters: z.object({
     pattern: z.string().min(1).describe('Glob pattern, relative to the workspace root'),
@@ -59,6 +63,7 @@ export const globTool = defineTool({
 
 export const bashTool = defineTool({
   name: 'bash',
+  effect: { kind: 'unknown', scope: 'workspace', evidence: 'none' },
   description:
     'Run a shell command via `bash -c` inside the workspace. Use read_file to inspect workspace text files; sensitive-file access through Bash is approval-gated too. Reserve Bash for executing commands, tests, builds, and other shell tasks. Commands run with a timeout; exit code 124 means killed by timeout.',
   parameters: z.object({

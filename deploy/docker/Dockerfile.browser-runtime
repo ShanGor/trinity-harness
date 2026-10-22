@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+# Opt-in, trusted-owner runtime. Supply a verified Chrome installer at build time.
+FROM rust:1.95-slim-bookworm AS zendriver
+RUN apt-get update && apt-get install -y --no-install-recommends patch \
+    && rm -rf /var/lib/apt/lists/*
+COPY apps/browser-runtime/patches/zendriver-mcp-user-data-dir.patch /tmp/zendriver-mcp-user-data-dir.patch
+COPY scripts/build-zendriver-mcp.sh /tmp/build-zendriver-mcp.sh
+RUN bash /tmp/build-zendriver-mcp.sh /opt/zendriver
+
+FROM node:22-slim AS deps
+WORKDIR /repo
+RUN corepack enable
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages ./packages
+COPY apps ./apps
+COPY config ./config
+COPY skills ./skills
+RUN pnpm install --frozen-lockfile
+
+FROM node:22-slim
+ARG CHROME_DEB_URL
+ARG CHROME_DEB_SHA256
+ARG CHROME_VERSION=155.0.8059.84
+RUN test -n "$CHROME_DEB_URL" && test -n "$CHROME_DEB_SHA256" \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl --fail --location --proto '=https' "$CHROME_DEB_URL" -o /tmp/chrome.deb \
+    && printf '%s  /tmp/chrome.deb\n' "$CHROME_DEB_SHA256" | sha256sum --check \
+    && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+    && test "$(google-chrome --product-version)" = "$CHROME_VERSION" \
+    && rm -f /tmp/chrome.deb && rm -rf /var/lib/apt/lists/*
+WORKDIR /repo
+ENV NODE_ENV=production
+ENV ZENDRIVER_CHROME_VERSION=$CHROME_VERSION
+COPY --from=deps /repo /repo
+COPY --from=zendriver /opt/zendriver/bin/zendriver-mcp /usr/local/bin/zendriver-mcp
+USER node
+CMD ["pnpm", "--filter", "@trinity-harness/browser-runtime", "start"]

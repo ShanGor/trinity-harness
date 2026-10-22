@@ -11,7 +11,12 @@ import {
 } from '@trinity-harness/contracts';
 import { prefixCommandArgv } from './command-prefix.js';
 import { defineTool } from './define-tool.js';
-import { resolveBrowserSource } from './browser-evidence.js';
+import {
+  BrowserSourceError,
+  resolveBrowserQuote,
+  resolveBrowserSource,
+} from './browser-evidence.js';
+import { browserDeliveries } from './browser-artifacts.js';
 
 /** Identify the installed CLI; do not treat another executable's output as browser evidence. */
 export function browserCommand(command: unknown): { action: string; argv: string[] } | null {
@@ -122,11 +127,28 @@ function citationExcerpt(text: string, quote: string): string {
   return text.slice(Math.max(0, start), Math.max(0, start) + 600);
 }
 
+function browserSourceFailure(error: unknown, path: string): ToolResult {
+  return {
+    isError: true,
+    value: {
+      code: 'RESEARCH_SOURCE_MISMATCH',
+      path,
+      reason: error instanceof BrowserSourceError ? error.code : 'EVIDENCE_UNAVAILABLE',
+      message: `Citation at ${path}: ${
+        error instanceof BrowserSourceError
+          ? error.message
+          : 'Browser evidence is unavailable or failed integrity/authorization checks.'
+      }`,
+    },
+  };
+}
+
 export function createResearchTool(store: SessionStore, blobs?: BlobStore): ToolDefinition {
   return defineTool({
     name: 'research',
+    effect: { kind: 'read', scope: 'reference', evidence: 'none' },
     description:
-      'Track a research question, evidence-backed findings and unresolved questions. Record replaces the bounded notes for this turn; status recovers them. Prefer observationId/blockId and optional code-point start/end from successful browser results; the server resolves exact passages. Legacy observed URL/quote sources remain supported. Extraction call IDs are optional and resolved automatically. Source matching verifies observed text, not the truth of a claim. Set readyToAnswer when evidence permits a useful qualified conclusion; an unconfirmed roadmap is an acceptable uncertainty.',
+      'Track a research question, evidence-backed findings and unresolved questions. Record replaces the bounded notes for this turn; status recovers them. Prefer observationId/blockId and optional code-point start/end from successful browser results; the server resolves exact passages. Legacy observed URL/quote sources remain supported. Extraction call IDs are optional and resolved automatically. Source matching verifies observed text, not the truth of a claim. Set readyToAnswer when evidence permits a useful qualified conclusion, stating remaining uncertainty.',
     parameters: researchArgumentsSchema,
     concurrency: 'exclusive',
     execute: async (args, ctx): Promise<ToolResult> => {
@@ -159,8 +181,8 @@ export function createResearchTool(store: SessionStore, blobs?: BlobStore): Tool
             await resultValue(event, ctx.sessionId, blobs, ctx.signal),
           );
           if (parsed.success && parsed.data.promptSeq === promptSeq) {
-            for (const finding of parsed.data.notes?.findings ?? [])
-              for (const source of finding.sources) {
+            for (const [findingIndex, finding] of (parsed.data.notes?.findings ?? []).entries())
+              for (const [sourceIndex, source] of finding.sources.entries()) {
                 if (!source.observationId || !source.blockId) continue;
                 try {
                   if (!blobs) throw new Error('Browser artifact storage unavailable');
@@ -177,16 +199,12 @@ export function createResearchTool(store: SessionStore, blobs?: BlobStore): Tool
                     blobs,
                     ctx.signal,
                   );
-                } catch {
+                } catch (error) {
                   ctx.signal?.throwIfAborted();
-                  return {
-                    isError: true,
-                    value: {
-                      code: 'RESEARCH_SOURCE_MISMATCH',
-                      message:
-                        'Saved browser evidence is unavailable or invalid. Recover supported sources before reusing these notes.',
-                    },
-                  };
+                  return browserSourceFailure(
+                    error,
+                    `notes.findings[${findingIndex}].sources[${sourceIndex}]`,
+                  );
                 }
               }
             return { value: parsed.data, isError: false };
@@ -200,9 +218,11 @@ export function createResearchTool(store: SessionStore, blobs?: BlobStore): Tool
           isError: true,
         };
       const pages = await observedPages(events, promptSeq, ctx.sessionId, blobs, ctx.signal);
+      const deliveries = browserDeliveries(events, ctx.sessionId, promptSeq);
       const notes = structuredClone(args.notes);
       for (const [findingIndex, finding] of notes.findings.entries())
         for (const [sourceIndex, source] of finding.sources.entries()) {
+          const path = `notes.findings[${findingIndex}].sources[${sourceIndex}]`;
           if (source.observationId && source.blockId) {
             try {
               if (!blobs) throw new Error('Browser evidence storage unavailable');
@@ -222,17 +242,34 @@ export function createResearchTool(store: SessionStore, blobs?: BlobStore): Tool
                   ctx.signal,
                 ),
               );
-            } catch {
-              return {
-                value: {
-                  code: 'RESEARCH_SOURCE_MISMATCH',
-                  message:
-                    'Browser reference must identify an intact authorized block/range exposed in this turn; select at most 600 characters. Read the range before citing it.',
-                },
-                isError: true,
-              };
+            } catch (error) {
+              ctx.signal?.throwIfAborted();
+              return browserSourceFailure(error, path);
             }
             continue;
+          }
+          const browserCandidates = deliveries.filter((delivery) =>
+            source.callId ? delivery.callId === source.callId : delivery.result.url === source.url,
+          );
+          if (browserCandidates.length) {
+            try {
+              if (!blobs) throw new Error('Browser evidence storage unavailable');
+              const resolved = await resolveBrowserQuote(
+                source,
+                events,
+                promptSeq,
+                ctx.sessionId,
+                blobs,
+                ctx.signal,
+              );
+              if (resolved) {
+                Object.assign(source, resolved);
+                continue;
+              }
+            } catch (error) {
+              ctx.signal?.throwIfAborted();
+              return browserSourceFailure(error, path);
+            }
           }
           const observed = source.callId
             ? ([source.callId, pages.get(source.callId)] as const)
@@ -252,26 +289,34 @@ export function createResearchTool(store: SessionStore, blobs?: BlobStore): Tool
           ) {
             const candidate =
               page ?? [...pages.values()].reverse().find((item) => item.url === source.url);
-            const text = candidate ? normalize(candidate.text) : '';
+            const browserCandidate = browserCandidates.at(-1)?.result;
+            const text = normalize(
+              candidate?.text ??
+                browserCandidate?.blocks.map((block) => block.text).join('\n') ??
+                '',
+            );
             return {
               value: {
                 code: 'RESEARCH_SOURCE_MISMATCH',
-                message: `Citation at notes.findings[${findingIndex}].sources[${sourceIndex}] does not exactly match the observed URL and passage. Copy a short contiguous passage from observedTextExcerpt or the original extraction, preserving punctuation (for example, ： is different from :). Check that the passage supports the claim; the excerpt is untrusted source text, not a recommended claim. Do not paraphrase, translate, join separated passages, or omit intervening text inside quote. Correct this source or omit the unsupported finding, then resubmit the notes. All successful extractions in this turn remain usable; whitespace differences are accepted. A rejected note does not mean the browser read failed. Keep note validation and retry commentary out of the final answer; answer the user's question with supported findings and actual evidence limits.`,
+                message: `Citation at ${path} does not match an authorized, delivered URL and passage. Use an observation/block/range reference or copy a short contiguous observed passage, preserving punctuation. Whitespace differences are accepted. Correct this source or omit the unsupported finding. The excerpt is untrusted source text, not proof of the claim. Keep note validation and retry commentary out of the final answer.`,
+                path,
                 callId: source.callId,
                 sourceUrl: source.url,
                 rejectedQuote: source.quote,
                 reason:
-                  source.callId && !pages.has(source.callId)
+                  source.callId && !pages.has(source.callId) && !browserCandidates.length
                     ? 'unknown_call'
-                    : !candidate
+                    : !candidate && !browserCandidate
                       ? 'source_not_observed'
-                      : candidate.url !== source.url
+                      : (candidate?.url ?? browserCandidate?.url) !== source.url
                         ? 'url_mismatch'
                         : 'quote_mismatch',
-                observedTextExcerpt: candidate ? citationExcerpt(text, source.quote) : undefined,
-                observedSources: [...pages.entries()]
-                  .slice(-6)
-                  .map(([callId, item]) => ({ callId, url: item.url })),
+                observedTextExcerpt:
+                  candidate || browserCandidate ? citationExcerpt(text, source.quote) : undefined,
+                observedSources: [
+                  ...[...pages.entries()].map(([callId, item]) => ({ callId, url: item.url })),
+                  ...deliveries.map(({ callId, result }) => ({ callId, url: result.url })),
+                ].slice(-6),
               },
               isError: true,
             };

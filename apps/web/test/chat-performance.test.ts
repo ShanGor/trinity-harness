@@ -3,13 +3,14 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { App as AntdApp } from 'antd';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ServerEvent } from '@trinity-harness/shared';
+import type { TimelinePage, ServerEvent } from '@trinity-harness/shared';
 
 import App from '../src/App';
 
 const fake = vi.hoisted(() => ({
   onEvent: undefined as ((event: ServerEvent) => void) | undefined,
   markdown: vi.fn(),
+  getTimeline: vi.fn<() => Promise<TimelinePage>>(),
   sendPrompt: vi.fn(async () => undefined),
   respondApproval: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ ok: true as const, alreadyStopped: false })),
@@ -27,6 +28,8 @@ vi.mock('@trinity-harness/client-acp', () => ({
     listSessions = async () =>
       Array.from({ length: 30 }, (_, index) => ({
         sessionId: `s${index}`,
+        kind: index === 0 ? 'work' : undefined,
+        sessionRole: index === 0 ? 'task' : undefined,
         title: `Conversation ${index}`,
         userId: 'user',
         createdAt: '2026-10-08T00:00:00Z',
@@ -35,6 +38,8 @@ vi.mock('@trinity-harness/client-acp', () => ({
       }));
     listTeams = async () => [];
     createSession = async () => 'new-session';
+    ensureMainChat = async () => 'main-session';
+    getTimeline = fake.getTimeline;
     sendPrompt = fake.sendPrompt;
     cancelTurn = fake.cancelTurn;
     respondApproval = fake.respondApproval;
@@ -73,6 +78,8 @@ async function emit(event: ServerEvent): Promise<void> {
 beforeEach(async () => {
   clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
   vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-08T06:00:00Z'));
+  // Plain HTTP LAN origins expose getRandomValues but not randomUUID.
+  vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) });
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('matchMedia', () => ({
     matches: false,
@@ -96,6 +103,7 @@ beforeEach(async () => {
   Element.prototype.scrollTo = vi.fn();
   sessionStorage.setItem('trinity.token', 'test-token');
   dateRender = vi.spyOn(Date.prototype, 'toLocaleString').mockReturnValue('Oct 8');
+  fake.getTimeline.mockReset().mockResolvedValue({ events: [], lastSeq: 0, nextBefore: null });
   fake.onEvent = undefined;
   fake.markdown.mockClear();
   fake.sendPrompt.mockClear();
@@ -104,6 +112,7 @@ beforeEach(async () => {
   document.body.append(container);
   root = createRoot(container);
   await act(async () => root.render(createElement(AntdApp, null, createElement(App))));
+  await click(container.querySelector('.new-chat-button'));
 });
 
 afterEach(async () => {
@@ -117,6 +126,89 @@ afterEach(async () => {
 });
 
 describe('chat typing and streaming performance', () => {
+  it('shows a saved turn failure inline without presenting it as a new loading error', async () => {
+    fake.getTimeline.mockResolvedValueOnce({
+      events: [
+        {
+          type: 'message/committed',
+          sessionId: 's0',
+          message: { role: 'user', content: 'Saved question' },
+        },
+        {
+          type: 'message/committed',
+          sessionId: 's0',
+          message: { role: 'assistant', content: 'Checking sources', phase: 'progress' },
+        },
+        { type: 'error', sessionId: 's0', message: 'Invalid URL' },
+      ],
+      lastSeq: 237,
+      nextBefore: null,
+    });
+    await click(container.querySelector('.history-title'));
+    expect(container.querySelector('.task-progress')?.textContent).toContain('Invalid URL');
+    expect(container.querySelector('.user-message-heading')?.parentElement?.textContent).toContain(
+      'Saved question',
+    );
+    expect(document.body.querySelector('.ant-message-notice')).toBeNull();
+    expect(container.querySelector('.response-streaming')).toBeNull();
+  });
+  it('switches Chat and Work only in New while preserving the composer and draft', async () => {
+    await click(
+      Array.from(container.querySelectorAll('.sidebar-navigation button')).find(
+        (button) => button.textContent === 'Main chat',
+      ) ?? null,
+    );
+    expect(container.querySelector('.mode-tabs')).toBeNull();
+    await click(container.querySelector('.new-chat-button'));
+    const textarea = container.querySelector('textarea')!;
+    await type(textarea, 'A question to keep');
+    expect(textarea.placeholder).toBe('Ask anything…');
+    await click(container.querySelector('.mode-tabs button:nth-child(2)'));
+    expect(
+      container.querySelector('.mode-tabs button:nth-child(2)')?.getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(container.textContent).toContain('What would you like to work on?');
+    expect(container.querySelector('textarea')).toBe(textarea);
+    expect(textarea.value).toBe('A question to keep');
+    expect(textarea.placeholder).toBe('Describe a task…');
+    expect(container.querySelector('.new-chat-button')?.textContent).toBe('＋ New');
+    await click(container.querySelector('.mode-tabs button:first-child'));
+    expect(textarea.value).toBe('A question to keep');
+    expect(container.textContent).toContain('Where should we begin?');
+  });
+
+  it('returns from Scheduled to the live conversation with its draft intact', async () => {
+    await click(container.querySelector('.history-item'));
+    const textarea = container.querySelector('textarea')!;
+    await type(textarea, 'Keep the next question');
+    await click(
+      Array.from(container.querySelectorAll('.sidebar-navigation button')).find((button) =>
+        button.textContent?.includes('Scheduled'),
+      ) ?? null,
+    );
+    expect(container.textContent).toContain('Scheduling isn’t available yet');
+    expect(container.querySelector('.chat-panel')?.hasAttribute('hidden')).toBe(true);
+    await emit({
+      type: 'session/update',
+      update: { kind: 'agent_message_chunk', text: 'Still running' },
+    });
+    await click(container.querySelector('.history-item'));
+    expect(container.querySelector('.chat-panel')?.hasAttribute('hidden')).toBe(false);
+    expect(container.textContent).toContain('Still running');
+    expect(container.querySelector('textarea')).toBe(textarea);
+    expect(textarea.value).toBe('Keep the next question');
+  });
+
+  it('puts Work setup in New and audit in the account menu', async () => {
+    expect(container.querySelector('[aria-label="Workspace for the next session"]')).toBeNull();
+    expect(container.querySelector('.workspace-controls .account-menu-trigger')).toBeNull();
+    expect(container.querySelector('.sidebar-account .account-menu-trigger')).not.toBeNull();
+    await click(container.querySelector('.new-chat-button'));
+    await click(container.querySelector('.mode-tabs button:nth-child(2)'));
+    expect(container.querySelector('[aria-label="Work workspace"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Work permissions"]')).not.toBeNull();
+  });
+
   it('keeps the latest update visible through tool execution without disturbing the draft', async () => {
     await click(container.querySelector('.history-item'));
     await emit({ type: 'message/committed', message: { role: 'user', content: 'Fix sign-in' } });
@@ -380,32 +472,26 @@ describe('chat typing and streaming performance', () => {
     expect(container.querySelector('.turn-activity')?.hasAttribute('open')).toBe(false);
     expect(container.querySelector('.response-streaming')).toBeNull();
   });
-  it('exposes named workspace controls and keyboard accessible history actions', async () => {
+  it('exposes session settings and keyboard accessible history actions', async () => {
     const title = container.querySelector<HTMLButtonElement>('.history-title')!;
     expect(title.tagName).toBe('BUTTON');
     expect(title.textContent).toBe('Conversation 0');
     expect(container.querySelector('[aria-label="Actions for Conversation 0"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="Workspace for the next session"]')).not.toBeNull();
-    expect(
-      container.querySelector('[aria-label="Tool permissions for the next session"]'),
-    ).not.toBeNull();
+    expect(container.querySelector('[aria-label="Session settings"]')).not.toBeNull();
     expect(
       container.querySelector('[aria-label="Account menu for user@example.com"]'),
     ).not.toBeNull();
-
     await act(async () => title.focus());
     expect(document.activeElement).toBe(title);
     await click(title);
     expect(title.getAttribute('aria-current')).toBe('true');
     expect(container.querySelectorAll('.history-title[aria-current="true"]')).toHaveLength(1);
-    expect(container.querySelector('[aria-label="Workspace for the next session"]')).toBeNull();
-    expect(
-      container.querySelector('[aria-label="Tool permissions for the next session"]'),
-    ).toBeNull();
     expect(fake.onEvent).toBeTypeOf('function');
-
-    await click(container.querySelector('.new-chat-button'));
-    expect(container.querySelector('[aria-label="Workspace for the next session"]')).not.toBeNull();
+    await click(container.querySelector('[aria-label="Session settings"]'));
+    expect(document.body.textContent).toContain('Chat gets its own workspace automatically.');
+    expect(
+      document.body.querySelector('[aria-label="Tool permissions for the next session"]'),
+    ).toBeNull();
   });
 
   it('starts with history collapsed on phones and lets the user restore it', async () => {
@@ -421,12 +507,12 @@ describe('chat typing and streaming performance', () => {
     expect(container.querySelector('textarea')).not.toBeNull();
     await click(container.querySelector('.history-toggle'));
     expect(container.querySelector('#conversation-history')?.hasAttribute('hidden')).toBe(false);
-    expect(container.querySelectorAll('.history-title')).toHaveLength(30);
+    expect(container.querySelectorAll('.history-title')).toHaveLength(12);
   });
 
   it('shows task guidance and composing shortcuts without submitting a prompt', () => {
     expect(container.querySelector('.empty-chat-description')?.textContent).toContain(
-      'work through a bug',
+      'explore an idea',
     );
     expect(container.querySelector('.composer-hint')?.textContent).toContain('Shift + Enter');
     expect(fake.sendPrompt).not.toHaveBeenCalled();
@@ -631,7 +717,12 @@ describe('chat typing and streaming performance', () => {
     expect(textarea.value).toBe('Next draft');
   });
 
-  it('clears the draft when starting or selecting a conversation', async () => {
+  it('preserves separate drafts when starting and selecting conversations', async () => {
+    await click(
+      Array.from(container.querySelectorAll('.sidebar-navigation button')).find(
+        (button) => button.textContent === 'Main chat',
+      ) ?? null,
+    );
     const textarea = container.querySelector('textarea')!;
     await type(textarea, 'Draft');
     await click(container.querySelector('.new-chat-button'));
@@ -639,6 +730,14 @@ describe('chat typing and streaming performance', () => {
     await type(textarea, 'Another draft');
     await click(container.querySelector('.history-item'));
     expect(textarea.value).toBe('');
+    await click(
+      Array.from(container.querySelectorAll('.sidebar-navigation button')).find(
+        (button) => button.textContent === 'Main chat',
+      ) ?? null,
+    );
+    expect(textarea.value).toBe('Draft');
+    await click(container.querySelector('.new-chat-button'));
+    expect(textarea.value).toBe('Another draft');
   });
 
   it('connects the sender cancel action to the active turn', async () => {
@@ -729,4 +828,83 @@ it('shows turn and session costs during usage updates while preserving focus, dr
   expect(document.body.textContent).toContain('Uncached input');
   expect(document.body.textContent).toContain('Cache write');
   expect(document.body.textContent).toContain('Of which reasoning');
+});
+
+it('opens history in the main view with the original prompt and independent drafts', async () => {
+  const mainButton =
+    Array.from(container.querySelectorAll('.sidebar-navigation button')).find(
+      (button) => button.textContent === 'Main chat',
+    ) ?? null;
+  await click(mainButton);
+  const input = container.querySelector('textarea')!;
+  await type(input, 'Main draft');
+  fake.getTimeline
+    .mockResolvedValueOnce({
+      events: [
+        {
+          type: 'message/committed',
+          sessionId: 's0',
+          message: { role: 'assistant', phase: 'final', content: 'Saved answer' },
+        },
+      ],
+      lastSeq: 500,
+      nextBefore: 301,
+    })
+    .mockResolvedValueOnce({
+      events: [
+        {
+          type: 'message/committed',
+          sessionId: 's0',
+          message: { role: 'user', content: 'Original input\nwith another line' },
+        },
+      ],
+      lastSeq: 500,
+      nextBefore: 101,
+    });
+  await click(container.querySelector('.history-title'));
+  expect(container.querySelector('.side-conversation')).toBeNull();
+  expect(container.querySelector('.workspace-heading')?.textContent).toContain('Work');
+  expect(container.querySelector('.user-message-heading')?.parentElement?.textContent).toContain(
+    'Original input\nwith another line',
+  );
+  expect(container.querySelector('.ant-typography-copy')).not.toBeNull();
+  expect(container.querySelector('.md')?.textContent).toBe('Saved answer');
+  expect(fake.getTimeline).toHaveBeenCalledWith('s0', 301);
+  expect(container.querySelector('textarea')).toBe(input);
+  expect(input.value).toBe('');
+  await type(input, 'History draft');
+  await click(mainButton);
+  expect(input.value).toBe('Main draft');
+  await click(container.querySelector('.history-title'));
+  expect(input.value).toBe('History draft');
+  const olderButton =
+    Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Load older messages',
+    ) ?? null;
+  fake.getTimeline.mockResolvedValueOnce({
+    events: [
+      {
+        type: 'message/committed',
+        sessionId: 's0',
+        message: { role: 'user', content: 'Earlier input' },
+      },
+      {
+        type: 'message/committed',
+        sessionId: 's0',
+        message: { role: 'assistant', phase: 'final', content: 'Earlier answer' },
+      },
+    ],
+    lastSeq: 500,
+    nextBefore: null,
+  });
+  await click(olderButton);
+  expect(fake.getTimeline).toHaveBeenCalledWith('s0', 101);
+  expect(
+    Array.from(
+      container.querySelectorAll('.user-message-heading'),
+      (node) => node.parentElement?.textContent,
+    ),
+  ).toEqual([expect.stringContaining('Earlier input'), expect.stringContaining('Original input')]);
+  expect(input.value).toBe('History draft');
+  expect(container.querySelector('textarea')).toBe(input);
 });

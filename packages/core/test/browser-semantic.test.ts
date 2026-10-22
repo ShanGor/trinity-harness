@@ -19,6 +19,39 @@ function extract(html: string, mode: 'article' | 'documentation' = 'article') {
 }
 afterEach(() => vi.restoreAllMocks());
 describe('visible semantic capture', () => {
+  it('reports an empty app shell as partial rather than ready', () => {
+    const result = extract('<body><div id="app"></div></body>');
+    expect(result.blocks).toEqual([]);
+    expect(result.readiness).toBe('partial');
+  });
+  it('captures rendered SPA containers and inline links without semantic paragraph tags', () => {
+    const result = extract(
+      '<body><div id="app"><main><div><span>Model </span><a href="https://example.com/model"><span>details</span></a></div><div>Downloads: <span>42</span></div></main></div></body>',
+    );
+    expect(result.blocks.map((block) => block.text)).toEqual(['Model details', 'Downloads: 42']);
+    expect(result.blocks[0]!.links).toEqual([
+      { title: 'details', url: 'https://example.com/model' },
+    ]);
+  });
+  it('keeps generic text in DOM order around semantic blocks without duplicating descendants', () => {
+    const result = extract(
+      '<body><main>Before <span>heading</span><h1>Title</h1><div>Intro <p>Paragraph</p>After <span>paragraph</span></div><div><div>Nested</div></div></main></body>',
+    );
+    expect(result.blocks.map((block) => block.text)).toEqual([
+      'Before heading',
+      'Title',
+      'Intro',
+      'Paragraph',
+      'After paragraph',
+      'Nested',
+    ]);
+  });
+  it('applies privacy and visibility exclusions to generic SPA text', () => {
+    const result = extract(
+      '<body><main><div>Public <span hidden>HIDDEN</span><span style="display:none">SECRET</span><span contenteditable="true">DRAFT</span><span role="textbox">PRIVATE</span><input value="PASSWORD"><textarea>FORM</textarea><nav>NAV</nav><span>text</span></div></main></body>',
+    );
+    expect(result.blocks.map((block) => block.text)).toEqual(['Public text']);
+  });
   it('keeps original Chinese punctuation, intervening UI text, duplicate block positions and null dates', () => {
     const result = extract(
       '<head><title>Nature</title></head><body><main><h1>论文</h1><p>论文标题：Late-life treatment <span>查看更多</span> 期刊：Nature “原文” 😀</p><p>Duplicate.</p><p>Duplicate.</p></main></body>',

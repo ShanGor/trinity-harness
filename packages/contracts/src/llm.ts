@@ -6,6 +6,7 @@
 
 import type { TokenUsage } from './usage.js';
 import type { ContentBlock } from './events.js';
+import type { ContextSectionKind } from './execution-context.js';
 
 export interface ModelToolCall {
   id: string;
@@ -25,6 +26,8 @@ export interface ReasoningBlock {
 
 /** One message in model-conversation form (user/assistant text + tool calls). */
 export interface ConversationMessage {
+  /** Harness-supplied data, separate from authenticated user wording. */
+  context?: ContextSectionKind;
   role: 'user' | 'assistant' | 'tool';
   content: string;
   /**

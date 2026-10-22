@@ -24,7 +24,9 @@
     "start:audit": "pnpm --filter @trinity-harness/audit-consumer run start",
     "start:gateway": "pnpm --filter @trinity-harness/acp-gateway run start",
     "dev:gateway": "pnpm --filter @trinity-harness/acp-gateway run dev",
-    "load:test": "node scripts/load-test.mjs"
+    "load:test": "node scripts/load-test.mjs",
+    "dev:browser-runtime": "pnpm --filter @trinity-harness/browser-runtime run dev",
+    "start:browser-runtime": "pnpm --filter @trinity-harness/browser-runtime run start"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

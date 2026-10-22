@@ -15,6 +15,7 @@ const STAT_MAX_BYTES = 2 * 1024 * 1024;
 export function createReadBlobTool(blobStore: BlobStore): ToolDefinition {
   return defineTool({
     name: 'read_blob',
+    effect: { kind: 'read', scope: 'reference', evidence: 'immutable-observation' },
     description:
       'Fetch the content of a blob:// URI (spilled tool output or an attachment extraction). Returns truncated UTF-8 text with a truncated flag.',
     parameters: z.object({
@@ -40,6 +41,11 @@ export function createReadBlobTool(blobStore: BlobStore): ToolDefinition {
       } catch {
         return { value: { message: 'Invalid blob URI' }, isError: true };
       }
+      if (key.split('/').includes('model-context'))
+        return {
+          value: { message: 'Model context snapshots are private runtime artifacts.' },
+          isError: true,
+        };
       if (key.split('/').includes('browser') || key.split('/').includes('..') || key.includes('\\'))
         return {
           value: { message: 'Browser evidence requires bounded browser read_observation' },

@@ -129,18 +129,6 @@ export function exposedBrowserRange(result: BrowserResult, range: BrowserRange):
   return cursor >= range.end;
 }
 
-/** Reserved allowance bounds failure feedback independently of source text. */
-export function browserDiagnosticBytes(events: readonly SessionEvent[], from: number): number {
-  const calls = new Set<string>();
-  let bytes = 0;
-  for (const event of events.slice(from)) {
-    if (event.type === 'tool/call' && event.name === 'browser') calls.add(event.callId);
-    if (event.type === 'tool/result' && event.isError && calls.has(event.callId))
-      bytes += Buffer.byteLength(JSON.stringify(event.value));
-  }
-  return bytes;
-}
-
 /** Resolve only a committed, current-turn image receipt, with byte/hash verification. */
 export async function resolveBrowserImage(
   blobs: BlobStore,

@@ -34,7 +34,14 @@ export const sessionMetaSchema = z.object({
   tenantId: z.uuid(),
   userId: z.uuid(),
   title: z.string().max(200),
-  workspaceUri: z.string().min(1),
+  workspaceUri: z.string().min(1).nullable(),
+  kind: z.enum(['chat', 'work']).optional(),
+  sessionRole: z.enum(['main', 'side', 'task']).optional(),
+  creationOperationId: z.uuid().optional(),
+  taskState: z
+    .enum(['draft', 'queued', 'running', 'needs_approval', 'completed', 'failed', 'cancelled'])
+    .optional(),
+  originSessionId: z.uuid().optional(),
   /**
    * Workspace scope: 'personal' → `$WORKSPACE_ROOT/<userId>`, 'team' →
    * `$WORKSPACE_ROOT/<scopeId>` (docs/design.md §15; sandboxed per session).
@@ -49,6 +56,23 @@ export const sessionMetaSchema = z.object({
   closedAt: z.iso.datetime().optional(),
 });
 export type SessionMeta = z.infer<typeof sessionMetaSchema>;
+
+export const sessionSummarySchema = sessionMetaSchema
+  .pick({
+    userId: true,
+    title: true,
+    createdAt: true,
+    workspaceUri: true,
+    scope: true,
+    scopeId: true,
+    kind: true,
+    sessionRole: true,
+    originSessionId: true,
+    taskState: true,
+  })
+  .extend({ sessionId: z.uuid(), scope: z.enum(['personal', 'team']).default('personal') });
+export type SessionSummary = z.infer<typeof sessionSummarySchema>;
+export const sessionSummaryListSchema = z.object({ sessions: z.array(sessionSummarySchema) });
 
 /** Password hashing is a port so stores stay dumb and hasher stays swappable. */
 export interface PasswordHasher {
@@ -82,7 +106,16 @@ export interface UserStore {
  */
 export interface SessionMetaStore {
   create(meta: Omit<SessionMeta, 'createdAt'>): Promise<void>;
+  /** Atomic main mapping / creation operation lookup. */
+  findByOperation?(
+    tenantId: string,
+    userId: string,
+    operationId: string,
+  ): Promise<SessionMeta | null>;
+  getMain?(tenantId: string, userId: string): Promise<SessionMeta | null>;
   get(sessionId: string): Promise<SessionMeta | null>;
+  /** Atomically bind a legacy null-workspace Chat and append its workspace receipt. */
+  bindChatWorkspace?(sessionId: string, workspaceUri: string): Promise<SessionMeta>;
   /** Own sessions for developer/viewer; whole tenant for admin. */
   listForIdentity(identity: Identity): Promise<SessionMeta[]>;
   /** Fill the title from the first prompt when a session began with an upload. */

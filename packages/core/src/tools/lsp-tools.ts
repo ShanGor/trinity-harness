@@ -12,6 +12,7 @@ export function createLspTools(lsp: LSPPort): ToolDefinition[] {
   return [
     defineTool({
       name: 'lsp_diagnostics',
+      effect: { kind: 'read', scope: 'workspace', evidence: 'observation' },
       description:
         'Get language-server diagnostics (errors/warnings) for a workspace file. File must be one of: Python, TS/JS, JSON, YAML.',
       parameters: z.object({
@@ -24,6 +25,7 @@ export function createLspTools(lsp: LSPPort): ToolDefinition[] {
     }),
     defineTool({
       name: 'lsp_symbols',
+      effect: { kind: 'read', scope: 'workspace', evidence: 'observation' },
       description:
         'Workspace-wide symbol search (classes, functions, variables) across all open language servers.',
       parameters: z.object({
@@ -36,6 +38,7 @@ export function createLspTools(lsp: LSPPort): ToolDefinition[] {
     }),
     defineTool({
       name: 'lsp_hover',
+      effect: { kind: 'read', scope: 'workspace', evidence: 'observation' },
       description: 'Hover documentation (type/signature info) at a position in a workspace file.',
       parameters: z.object({
         path: z.string().min(1),
@@ -52,6 +55,7 @@ export function createLspTools(lsp: LSPPort): ToolDefinition[] {
     }),
     defineTool({
       name: 'lsp_rename',
+      effect: { kind: 'mutation', scope: 'workspace', evidence: 'none' },
       description:
         'Rename the symbol at a position workspace-wide via the language server. Returns the list of edited files.',
       parameters: z.object({

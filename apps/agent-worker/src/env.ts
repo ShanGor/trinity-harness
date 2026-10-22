@@ -10,10 +10,15 @@ import path from 'node:path';
 import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
 
-import { loadModelPricingConfig } from '@trinity-harness/core';
+import {
+  browserDeploymentEnvShape,
+  validateBrowserDeployment,
+  loadModelPricingConfig,
+} from '@trinity-harness/core';
 import { DEFAULT_SYSTEM_PROMPT, loadEnv } from '@trinity-harness/shared';
 
 const workerEnvSchema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   /** Workspace the sandbox is rooted at for coding sessions. */
   WORKSPACE_ROOT: z.string().min(1).default(process.cwd()),
   /** Model in "provider/model-id" form (see AiSdkGateway routing). */
@@ -25,6 +30,7 @@ const workerEnvSchema = z.object({
       'MODEL must be in "provider/model-id" form, e.g. "anthropic/claude-sonnet-4-20250514"',
     )
     .default('anthropic/claude-sonnet-4-20250514'),
+  ...browserDeploymentEnvShape,
   BROWSER_CDP_ENDPOINT: browserCdpEndpointSchema.optional(),
   BROWSER_CDP_OWNER_ID: z.uuid().optional(),
   ADMIN_EMAIL: z.email().default('admin@trinity.local'),
@@ -84,6 +90,7 @@ export function loadWorkerEnv(): WorkerEnv & { DATABASE_URL: string; REDIS_URL: 
         .join('; ')}`,
     );
   }
+  validateBrowserDeployment(result.data);
   return {
     ...result.data,
     modelPricing: loadModelPricingConfig(new URL('../../../config/models.yaml', import.meta.url)),

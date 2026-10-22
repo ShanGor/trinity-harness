@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { EventSourceLike } from '../src/index.js';
 import { AcpClient } from '../src/index.js';
@@ -33,6 +33,38 @@ function fakeFetch(routes: Record<string, (init?: RequestInit) => Response>) {
 }
 
 describe('AcpClient', () => {
+  it('creates Main chat over LAN HTTP without crypto.randomUUID', async () => {
+    const requests: unknown[] = [];
+    const { impl } = fakeFetch({
+      'POST /api/sessions': (init) => {
+        requests.push(JSON.parse(String(init?.body)));
+        return Response.json({ sessionId: 'main-session' });
+      },
+    });
+    vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) });
+    vi.stubGlobal('fetch', impl);
+    vi.spyOn(Date, 'now').mockReturnValue(1792627200000);
+    try {
+      const client = new AcpClient();
+      await expect(client.ensureMainChat()).resolves.toBe('main-session');
+      await expect(client.ensureMainChat()).resolves.toBe('main-session');
+      expect(requests).toEqual([
+        expect.objectContaining({
+          kind: 'chat',
+          sessionRole: 'main',
+          creationOperationId: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+          ),
+        }),
+        expect.objectContaining({ creationOperationId: expect.any(String) }),
+      ]);
+      expect(requests[0]).not.toEqual(requests[1]);
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('delivers live deltas with inherited ids without advancing the replay cursor', () => {
     let fake!: FakeEventSource;
     const client = new AcpClient({
@@ -258,4 +290,40 @@ it('fetches screenshots through the authenticated session evidence route', async
   } finally {
     globalThis.fetch = original;
   }
+});
+
+it('delivers the same committed event independently to a pane and an activity subscription', () => {
+  const sources: FakeEventSource[] = [];
+  const client = new AcpClient({
+    eventSourceFactory: (url) => {
+      const source = new FakeEventSource(url);
+      sources.push(source);
+      return source;
+    },
+  });
+  const pane: unknown[] = [];
+  const activity: unknown[] = [];
+  const first = client.openEventStream(
+    'same',
+    { onEvent: (event) => pane.push(event) },
+    { afterSeq: 0 },
+  );
+  const second = client.openEventStream(
+    'same',
+    { onEvent: (event) => activity.push(event) },
+    { afterSeq: 0 },
+  );
+  const event = {
+    type: 'message/committed',
+    sessionId: 'same',
+    message: { role: 'assistant', content: 'Result' },
+  };
+  sources[0]!.emit(event, 4);
+  sources[1]!.emit(event, 4);
+  sources[0]!.emit(event, 4);
+  sources[1]!.emit(event, 4);
+  expect(pane).toEqual([event]);
+  expect(activity).toEqual([event]);
+  first.close();
+  second.close();
 });

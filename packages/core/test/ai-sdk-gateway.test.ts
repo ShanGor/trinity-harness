@@ -4,7 +4,14 @@ import type { LLMRequest } from '@trinity-harness/contracts';
 import type { LanguageModel } from 'ai';
 import { APICallError } from 'ai';
 
-import { AiSdkGateway, defaultProviders } from '../src/index.js';
+import {
+  AiSdkGateway,
+  CoreAgentLoop,
+  CoreToolRegistry,
+  MemorySessionStore,
+  defaultProviders,
+} from '../src/index.js';
+import { FakeSandbox } from '../src/testing/fake-sandbox.js';
 
 const baseRequest: LLMRequest = {
   model: 'unknown/model',
@@ -64,6 +71,17 @@ const MINIMAL_OUTPUT = [
 ];
 
 describe('AiSdkGateway configuration', () => {
+  it('explicitly disables provider tool selection when no tools are available', async () => {
+    const captured: CapturedCall = {};
+    const gateway = new AiSdkGateway({ fake: () => fakeModel(MINIMAL_OUTPUT, captured) });
+    for await (const chunk of await gateway.stream({
+      ...baseRequest,
+      model: 'fake/model',
+      messages: [{ role: 'user', content: 'Conclude' }],
+    }))
+      void chunk;
+    expect(captured.options?.toolChoice).toEqual({ type: 'none' });
+  });
   it('passes the fitted output limit to the provider', async () => {
     const captured: CapturedCall = {};
     const gateway = new AiSdkGateway({ fake: () => fakeModel(MINIMAL_OUTPUT, captured) });
@@ -102,6 +120,104 @@ describe('AiSdkGateway configuration', () => {
     }).rejects.toThrow();
     expect(attempts).toBe(1);
   });
+  it.each([401, 429, 529])(
+    'preserves the original HTTP %i failure without logging request bodies',
+    async (statusCode) => {
+      const failure = new APICallError({
+        message: 'provider rejected request',
+        url: 'https://provider.invalid',
+        requestBodyValues: { messages: ['private user input'] },
+        statusCode,
+        isRetryable: statusCode !== 401,
+      });
+      const model = fakeModel([], {});
+      if (typeof model === 'string') throw new Error('Expected an in-memory provider model');
+      model.doStream = async () => {
+        throw failure;
+      };
+      const logging = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const gateway = new AiSdkGateway({ fake: () => model });
+        await expect(async () => {
+          for await (const chunk of await gateway.stream({
+            ...baseRequest,
+            model: 'fake/model',
+            messages: [{ role: 'user', content: 'test' }],
+          }))
+            void chunk;
+        }).rejects.toBe(failure);
+        expect(logging).not.toHaveBeenCalled();
+      } finally {
+        logging.mockRestore();
+      }
+    },
+  );
+  it('preserves a provider error delivered inside the stream', async () => {
+    const failure = Object.assign(new Error('provider stream overloaded'), { isRetryable: true });
+    const gateway = new AiSdkGateway({
+      fake: () => fakeModel([{ type: 'error', error: failure }], {}),
+    });
+    await expect(async () => {
+      for await (const chunk of await gateway.stream({
+        ...baseRequest,
+        model: 'fake/model',
+        messages: [{ role: 'user', content: 'test' }],
+      }))
+        void chunk;
+    }).rejects.toBe(failure);
+  });
+  it.each([false, true])(
+    'lets the durable loop recover from HTTP 529 (persistent overload: %s)',
+    async (persistent) => {
+      let attempts = 0;
+      let now = Date.parse('2026-10-22T03:00:00Z');
+      const waits: number[] = [];
+      const model = fakeModel(MINIMAL_OUTPUT, {});
+      if (typeof model === 'string' || model.specificationVersion !== 'v4')
+        throw new Error('Expected an in-memory v4 provider model');
+      const succeed = model.doStream.bind(model);
+      model.doStream = async (options) => {
+        attempts++;
+        if (persistent || attempts === 1)
+          throw new APICallError({
+            message: 'service overloaded (529)',
+            url: 'https://provider.invalid',
+            requestBodyValues: {},
+            statusCode: 529,
+            responseHeaders: { 'Retry-After': '20' },
+            isRetryable: true,
+          });
+        return succeed(options);
+      };
+      const store = new MemorySessionStore();
+      const loop = new CoreAgentLoop({
+        llm: new AiSdkGateway({ fake: () => model }),
+        model: 'fake/model',
+        workspaceRoot: '/ws',
+        store,
+        tools: new CoreToolRegistry(new FakeSandbox()),
+        now: () => now,
+        wait: async (ms) => {
+          waits.push(ms);
+          now += ms;
+        },
+        maxRetries: 2,
+      });
+      const outcome = await loop.run('s', 'Reply', { emit: () => undefined });
+      expect(outcome.reason).toBe(persistent ? 'error' : 'completed');
+      expect(attempts).toBe(persistent ? 3 : 2);
+      expect(waits).toEqual(persistent ? [20_000, 20_000] : [20_000]);
+      const events = await store.load('s');
+      expect(events.filter((event) => event.type === 'task/recovery')).toHaveLength(
+        persistent ? 2 : 1,
+      );
+      expect(events.at(-1)).toMatchObject(
+        persistent
+          ? { type: 'turn/end', reason: 'error', detail: 'service overloaded (529)' }
+          : { type: 'turn/end', reason: 'completed' },
+      );
+    },
+  );
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -289,6 +405,93 @@ it('encodes persisted screenshot blocks as native tool image content, outside te
     type: 'content',
     value: [{ type: 'text' }, { type: 'file', mediaType: 'image/png', data: { type: 'data' } }],
   });
+});
+
+it('deduplicates identical user/tool image bytes within each request and retains the latest pixels', async () => {
+  const captured: CapturedCall = {};
+  const gateway = new AiSdkGateway({ fake: () => fakeModel(MINIMAL_OUTPUT, captured) });
+  const resolveBlob = vi.fn(async () => new Uint8Array([137, 80, 78, 71]));
+  const request: LLMRequest = {
+    ...baseRequest,
+    model: 'fake/image',
+    resolveBlob,
+    messages: [
+      {
+        role: 'user',
+        content: 'Original image',
+        blocks: [{ kind: 'image', uri: 'blob://original', mimeType: 'image/png' }],
+      },
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'shot', name: 'browser', args: { operation: 'screenshot' } }],
+      },
+      {
+        role: 'tool',
+        toolCallId: 'shot',
+        toolName: 'browser',
+        content: '{"image":{"uri":"blob://browser/s/shot.png"}}',
+        blocks: [{ kind: 'image', uri: 'blob://browser/s/shot.png', mimeType: 'image/png' }],
+      },
+      {
+        role: 'user',
+        content: 'Compare with this image',
+        blocks: [{ kind: 'image', uri: 'blob://latest', mimeType: 'image/png' }],
+      },
+    ],
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    for await (const chunk of await gateway.stream(request)) void chunk;
+    const prompt = captured.options?.prompt as {
+      role: string;
+      content: {
+        type: string;
+        text?: string;
+        output?: { type: string; value: { type: string; text?: string }[] };
+      }[];
+    }[];
+    expect(
+      prompt.flatMap((message) => message.content).filter((part) => part.type === 'file'),
+    ).toHaveLength(1);
+    expect(prompt.at(-1)?.content.some((part) => part.type === 'file')).toBe(true);
+    expect(prompt[0]?.content).toContainEqual({
+      type: 'text',
+      text: expect.stringContaining('Duplicate image'),
+    });
+    const tool = prompt.find((message) => message.role === 'tool')!.content[0]!.output!;
+    expect(tool.value.map((part) => part.type)).toEqual(['text', 'text']);
+    expect(tool.value[0]?.text).toContain('blob://browser/s/shot.png');
+    expect(tool.value[1]?.text).toContain('Duplicate image');
+  }
+  expect(resolveBlob).toHaveBeenCalledTimes(6);
+  expect(request.messages[0]?.blocks).toHaveLength(1);
+  expect(request.messages[2]?.blocks).toHaveLength(1);
+});
+
+it('keeps more than four distinct images available in one provider request', async () => {
+  const captured: CapturedCall = {};
+  const gateway = new AiSdkGateway({ fake: () => fakeModel(MINIMAL_OUTPUT, captured) });
+  for await (const chunk of await gateway.stream({
+    ...baseRequest,
+    model: 'fake/image',
+    messages: [
+      {
+        role: 'user',
+        content: 'Compare six diagrams',
+        blocks: Array.from({ length: 6 }, (_, index) => ({
+          kind: 'image' as const,
+          uri: `blob://image${index}`,
+          mimeType: 'image/png',
+        })),
+      },
+    ],
+    resolveBlob: async (uri) => new Uint8Array([137, 80, 78, 71, Number(uri.at(-1))]),
+  }))
+    void chunk;
+  const prompt = captured.options?.prompt as { content: { type: string }[] }[];
+  expect(
+    prompt.flatMap((message) => message.content).filter((part) => part.type === 'file'),
+  ).toHaveLength(6);
 });
 
 it('retains exact cache, output and reasoning counts from the SDK', async () => {

@@ -1,3 +1,7 @@
+import { createRecallTool } from '@trinity-harness/core';
+import { PgSessionRuns } from '@trinity-harness/db';
+import { PersonalContext } from '@trinity-harness/core';
+import { PgMemoryStore, PgConversationIndex, PgTeamStore } from '@trinity-harness/db';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +17,7 @@ import {
   createReadBlobTool,
   createResearchTool,
   createBrowserTool,
+  HttpBrowserRuntime,
   TrustedCdpBrowserAccess,
   isCdpSessionOwner,
   ScryptPasswordHasher,
@@ -56,7 +61,7 @@ import { startTelemetry } from '@trinity-harness/otel';
 import { metrics } from '@opentelemetry/api';
 
 import { loadWorkerEnv } from './env.js';
-import { createTurnHandler } from './worker.js';
+import { createTurnHandler, createTurnFailureHandler } from './worker.js';
 
 /**
  * Composition root for the agent worker (AGENTS.md §3.2): PG event log +
@@ -73,11 +78,16 @@ async function main(): Promise<void> {
     console.log('[agent-worker] OTel SDK started');
   }
   const env = loadWorkerEnv();
+  const browserRuntime =
+    env.BROWSER_DRIVER === 'zendriver'
+      ? new HttpBrowserRuntime(env.BROWSER_RUNTIME_ENDPOINT!, env.BROWSER_RUNTIME_TOKEN!)
+      : undefined;
   const skillCatalog = new FileSkillCatalog({
     bundledDirectories: [fileURLToPath(new URL('../../../skills/', import.meta.url))],
     configuredDirectories: env.SKILL_DIRS.map((directory) => path.resolve(directory)),
   });
   const pool = createPool(env.DATABASE_URL);
+  const runPool = createPool(env.DATABASE_URL);
   const db = createDb(pool);
 
   const redis = createRedis(env.REDIS_URL);
@@ -88,8 +98,12 @@ async function main(): Promise<void> {
   );
   const skills = new SkillRuntime(skillCatalog, store, {
     browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
+    managedBrowser: env.BROWSER_DRIVER === 'zendriver',
   });
   const metas = new PgSessionMetaStore(db);
+  const memory = new PgMemoryStore(db);
+  const conversationIndex = new PgConversationIndex(db);
+  const personalContext = new PersonalContext(memory, conversationIndex, store);
   const browserUsers = new PgUserStore(db, new ScryptPasswordHasher());
   // M5: token metering — the loop records usage and gates model calls on the
   // tenant quota before every request (docs/design.md §17).
@@ -131,11 +145,20 @@ async function main(): Promise<void> {
     if (assembly) return assembly;
     const sandbox = new LocalSandbox(root, { envMode: env.SANDBOX_ENV_MODE });
     const registry = new CoreToolRegistry(sandbox);
+    const authorizeBrowserSession = (sessionId: string, signal?: AbortSignal): Promise<boolean> =>
+      isCdpSessionOwner(
+        sessionId,
+        metas,
+        browserUsers,
+        { id: env.BROWSER_CDP_OWNER_ID, email: env.ADMIN_EMAIL },
+        signal,
+      );
     registry.register(createSkillTool(skills));
     registry.register(createTaskTool(store));
     registry.register(createResearchTool(store, blobStore));
     registry.register(
       createBrowserTool({
+        runtime: browserRuntime,
         store,
         blobs: blobStore,
         now: () => new Date(),
@@ -144,14 +167,7 @@ async function main(): Promise<void> {
               endpoint: env.BROWSER_CDP_ENDPOINT,
               sandbox,
               store,
-              authorizeSession: (sessionId, signal) =>
-                isCdpSessionOwner(
-                  sessionId,
-                  metas,
-                  browserUsers,
-                  { id: env.BROWSER_CDP_OWNER_ID, email: env.ADMIN_EMAIL },
-                  signal,
-                ),
+              authorizeSession: authorizeBrowserSession,
             })
           : undefined,
       }),
@@ -160,6 +176,7 @@ async function main(): Promise<void> {
       registry.register(tool);
     }
     registry.register(createReadBlobTool(blobStore));
+    registry.register(createRecallTool({ memory, index: conversationIndex, metas, store }));
     if (lsp) {
       for (const tool of createLspTools(lsp)) {
         registry.register(tool);
@@ -170,7 +187,8 @@ async function main(): Promise<void> {
     // sandboxed to the SAME root as the parent turn.
     registry.register(
       createSubagentTool({
-        createLoop: () => {
+        browserAccess: env.BROWSER_CDP_ENDPOINT ? 'live' : 'saved-only',
+        createLoop: ({ parentSessionId, childSessionId }) => {
           const childStore = new MemorySessionStore();
           const childSkills = new SkillRuntime(skillCatalog, childStore, {
             browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
@@ -184,7 +202,21 @@ async function main(): Promise<void> {
           childRegistry.register(createTaskTool(childStore));
           childRegistry.register(createResearchTool(childStore, blobStore));
           childRegistry.register(
-            createBrowserTool({ store: childStore, blobs: blobStore, now: () => new Date() }),
+            createBrowserTool({
+              store: childStore,
+              blobs: blobStore,
+              now: () => new Date(),
+              access: env.BROWSER_CDP_ENDPOINT
+                ? new TrustedCdpBrowserAccess({
+                    endpoint: env.BROWSER_CDP_ENDPOINT,
+                    sandbox,
+                    store: childStore,
+                    authorizeSession: async (sessionId, signal) =>
+                      sessionId === childSessionId &&
+                      (await authorizeBrowserSession(parentSessionId, signal)),
+                  })
+                : undefined,
+            }),
           );
           if (lsp) {
             for (const tool of createLspTools(lsp)) childRegistry.register(tool);
@@ -248,6 +280,9 @@ async function main(): Promise<void> {
   const handleTurn = createTurnHandler({
     store,
     metas,
+    teams: new PgTeamStore(db),
+    users: browserUsers,
+    sessionRuns: new PgSessionRuns(runPool),
     defaultWorkspaceRoot: env.WORKSPACE_ROOT,
     createLoop: (_sessionId, workspaceRoot) =>
       new CoreAgentLoop({
@@ -275,6 +310,8 @@ async function main(): Promise<void> {
         ),
         systemPrompt: env.SYSTEM_PROMPT,
         tools: assemblyFor(workspaceRoot).registry,
+        personalContext,
+        sessionMetas: metas,
         skills,
         store,
         workspaceRoot,
@@ -298,14 +335,27 @@ async function main(): Promise<void> {
   const cancelSub = cancels.subscribe((sessionId) => cancelActiveTurn?.(sessionId));
   await cancelSub.started;
 
-  const worker = createTurnWorker({ url: env.REDIS_URL }, (task, _job, signal) =>
-    handleTurn(task, signal),
+  const failureAbort = new AbortController();
+  const onTerminalFailure = createTurnFailureHandler({
+    store,
+    sessionRuns: new PgSessionRuns(runPool),
+    signal: failureAbort.signal,
+  });
+  const queueProbe = new RedisTurnQueue({ url: env.REDIS_URL });
+  const worker = createTurnWorker(
+    { url: env.REDIS_URL },
+    (task, _job, signal) => handleTurn(task, signal),
+    TURN_QUEUE_NAME,
+    { concurrency: 4, onTerminalFailure },
   );
   cancelActiveTurn = (sessionId) => worker.cancel(sessionId);
+  const reconciliation = queueProbe.reconcileFailed(onTerminalFailure).catch(() => {
+    if (!failureAbort.signal.aborted)
+      console.error('[agent-worker] failed-turn reconciliation unavailable');
+  });
 
   // M5: queue-depth metric (docs/design.md §17). The ObservableGauge callback
   // fires per metric collection — event-driven, no polling loop (AGENTS §4.2).
-  const queueProbe = new RedisTurnQueue({ url: env.REDIS_URL });
   metrics
     .getMeter('trinity-harness/worker')
     .createObservableGauge('trinity.queue.jobs', {
@@ -331,11 +381,14 @@ async function main(): Promise<void> {
     // M5 drain: BullMQ close() stops claiming NEW jobs and waits for the
     // in-flight turn to finish (docs/design.md §16 缩容前 drain).
     cancelSub.dispose();
-    await worker.close();
+    failureAbort.abort();
+    await worker.close({ abortActive: env.NODE_ENV === 'development' });
+    await reconciliation;
     await queueProbe.close();
     if (lsp) await lsp.dispose();
     await telemetry?.shutdown();
     redis.disconnect();
+    await runPool.end();
     await pool.end();
     process.exit(0);
   };

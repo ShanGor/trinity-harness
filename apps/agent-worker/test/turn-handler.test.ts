@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import type {
   AuditRecord,
+  SessionMetaStore,
   ContentBlock,
   LoopEvent,
   SessionMeta,
@@ -213,4 +217,52 @@ describe('createTurnHandler', () => {
     ).rejects.toThrow('session closed');
     expect(loopCreated).toBe(false);
   });
+});
+
+it('binds legacy Chat before assembling its worker loop and reuses the binding on retry', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'trinity-worker-chat-'));
+  try {
+    let meta: SessionMeta = {
+      id: crypto.randomUUID(),
+      tenantId: crypto.randomUUID(),
+      userId: crypto.randomUUID(),
+      title: '',
+      kind: 'chat',
+      sessionRole: 'side',
+      workspaceUri: null,
+      createdAt: '2026-10-21T00:00:00.000Z',
+    };
+    const bindChatWorkspace = vi.fn(async (_id: string, workspaceUri: string) => {
+      meta = { ...meta, workspaceUri };
+      return meta;
+    });
+    const run = vi.fn(async () => ({ reason: 'completed' as const, steps: 1 }));
+    const createLoop = vi.fn(() => ({ run }));
+    const handler = createTurnHandler({
+      store: new MemorySessionStore(),
+      defaultWorkspaceRoot: root,
+      metas: { get: async () => meta, bindChatWorkspace } as unknown as SessionMetaStore,
+      createLoop,
+      live: { publish: () => undefined },
+      audit: { emit: () => undefined },
+    });
+    const task: TurnTask = {
+      sessionId: meta.id,
+      actor: meta.userId,
+      tenantId: meta.tenantId,
+      prompt: 'Research',
+      promptSeq: 1,
+      policy: parsePermissionPolicy('workspace-write'),
+    };
+    await handler(task);
+    await handler(task);
+    expect(createLoop).toHaveBeenCalledWith(
+      meta.id,
+      path.join(root, 'sessions', meta.userId, meta.id),
+    );
+    expect(bindChatWorkspace).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -85,8 +85,10 @@ describe('CoreAgentLoop', () => {
     expect(outcome).toEqual({ reason: 'completed', steps: 1 });
     expect(eventTypes(await store.load('s1'))).toEqual([
       'message/user',
+      'model/context',
       'model/usage',
       'message/assistant',
+      'task/completion',
       'turn/end',
     ]);
     expect(sink.types()).toEqual([
@@ -121,11 +123,14 @@ describe('CoreAgentLoop', () => {
     // Event-sourcing: everything replayable from the log, in order (design.md §6.1).
     expect(eventTypes(await store.load('s1'))).toEqual([
       'message/user',
+      'model/context',
       'model/usage',
       'tool/call',
       'tool/result',
+      'model/context',
       'model/usage',
       'message/assistant',
+      'task/completion',
       'turn/end',
     ]);
 
@@ -265,12 +270,16 @@ describe('CoreAgentLoop', () => {
     const log = await store.load('s1');
     expect(eventTypes(log)).toEqual([
       'message/user',
+      'model/context',
       'model/usage',
       'message/assistant',
+      'task/completion',
       'turn/end',
       'message/user',
+      'model/context',
       'model/usage',
       'message/assistant',
+      'task/completion',
       'turn/end',
     ]);
     expect(llm.requests[1]!.messages).toEqual([

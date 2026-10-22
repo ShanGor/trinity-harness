@@ -1,3 +1,7 @@
+import { createRecallTool } from '@trinity-harness/core';
+import { PgSessionRuns, PgPromptDispatcher } from '@trinity-harness/db';
+import { PersonalContext } from '@trinity-harness/core';
+import { PgMemoryStore, PgConversationIndex } from '@trinity-harness/db';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -14,6 +18,7 @@ import {
   createReadBlobTool,
   createResearchTool,
   createBrowserTool,
+  HttpBrowserRuntime,
   TrustedCdpBrowserAccess,
   isCdpSessionOwner,
   createSkillTool,
@@ -79,6 +84,10 @@ async function main(): Promise<void> {
     console.log('[server] OTel SDK started');
   }
   const env = loadServerEnv();
+  const browserRuntime =
+    env.BROWSER_DRIVER === 'zendriver'
+      ? new HttpBrowserRuntime(env.BROWSER_RUNTIME_ENDPOINT!, env.BROWSER_RUNTIME_TOKEN!)
+      : undefined;
   const skillCatalog = new FileSkillCatalog({
     bundledDirectories: [fileURLToPath(new URL('../../../skills/', import.meta.url))],
     configuredDirectories: env.SKILL_DIRS.map((directory) => path.resolve(directory)),
@@ -103,12 +112,34 @@ async function main(): Promise<void> {
       const registry = new CoreToolRegistry(sandbox);
       const skills = new SkillRuntime(skillCatalog, store, {
         browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
+        managedBrowser: env.BROWSER_DRIVER === 'zendriver',
       });
+      const authorizeBrowserSession = async (
+        sessionId: string,
+        signal?: AbortSignal,
+      ): Promise<boolean> => {
+        if (databaseUrl)
+          return auth
+            ? isCdpSessionOwner(
+                sessionId,
+                auth.metas,
+                auth.users,
+                { id: env.BROWSER_CDP_OWNER_ID, email: env.ADMIN_EMAIL },
+                signal,
+              )
+            : false;
+        const events = await store.load(sessionId);
+        return (
+          events.some((event) => event.type === 'message/user') &&
+          !events.some((event) => event.type === 'session/closed')
+        );
+      };
       registry.register(createSkillTool(skills));
       registry.register(createTaskTool(store));
       registry.register(createResearchTool(store, blobStore));
       registry.register(
         createBrowserTool({
+          runtime: browserRuntime,
           store,
           blobs: blobStore,
           now: () => new Date(),
@@ -117,23 +148,7 @@ async function main(): Promise<void> {
                 endpoint: env.BROWSER_CDP_ENDPOINT,
                 sandbox,
                 store,
-                authorizeSession: async (sessionId, signal) => {
-                  if (databaseUrl)
-                    return auth
-                      ? isCdpSessionOwner(
-                          sessionId,
-                          auth.metas,
-                          auth.users,
-                          { id: env.BROWSER_CDP_OWNER_ID, email: env.ADMIN_EMAIL },
-                          signal,
-                        )
-                      : false;
-                  const events = await store.load(sessionId);
-                  return (
-                    events.some((event) => event.type === 'message/user') &&
-                    !events.some((event) => event.type === 'session/closed')
-                  );
-                },
+                authorizeSession: authorizeBrowserSession,
               })
             : undefined,
         }),
@@ -142,6 +157,10 @@ async function main(): Promise<void> {
         registry.register(tool);
       }
       registry.register(createReadBlobTool(blobStore));
+      if (memory && conversationIndex && auth)
+        registry.register(
+          createRecallTool({ memory, index: conversationIndex, metas: auth.metas, store }),
+        );
       if (lsp) {
         for (const tool of createLspTools(lsp)) {
           registry.register(tool);
@@ -149,7 +168,8 @@ async function main(): Promise<void> {
       }
       registry.register(
         createSubagentTool({
-          createLoop: () => {
+          browserAccess: env.BROWSER_CDP_ENDPOINT ? 'live' : 'saved-only',
+          createLoop: ({ parentSessionId, childSessionId }) => {
             const childStore = new MemorySessionStore();
             const childSkills = new SkillRuntime(skillCatalog, childStore, {
               browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
@@ -165,7 +185,21 @@ async function main(): Promise<void> {
               createSkillTool(childSkills),
               createTaskTool(childStore),
               createResearchTool(childStore, blobStore),
-              createBrowserTool({ store: childStore, blobs: blobStore, now: () => new Date() }),
+              createBrowserTool({
+                store: childStore,
+                blobs: blobStore,
+                now: () => new Date(),
+                access: env.BROWSER_CDP_ENDPOINT
+                  ? new TrustedCdpBrowserAccess({
+                      endpoint: env.BROWSER_CDP_ENDPOINT,
+                      sandbox,
+                      store: childStore,
+                      authorizeSession: async (sessionId, signal) =>
+                        sessionId === childSessionId &&
+                        (await authorizeBrowserSession(parentSessionId, signal)),
+                    })
+                  : undefined,
+              }),
             ])
               childTools.register(tool);
             if (lsp) for (const tool of createLspTools(lsp)) childTools.register(tool);
@@ -255,6 +289,8 @@ async function main(): Promise<void> {
     ),
     systemPrompt: env.SYSTEM_PROMPT,
     tools: assemblyFor(workspaceRoot).registry,
+    personalContext,
+    sessionMetas: auth?.metas,
     skills: assemblyFor(workspaceRoot).skills,
     store,
     workspaceRoot,
@@ -308,10 +344,18 @@ async function main(): Promise<void> {
   let defaultPolicy: ReturnType<typeof parsePermissionPolicy> | undefined;
   let usage: PgUsageStore | undefined;
   let teams: PgTeamStore | undefined;
+  let runPool: ReturnType<typeof createPool> | undefined;
+  let sessionRuns: PgSessionRuns | undefined;
+  let promptDispatcher: PgPromptDispatcher | undefined;
+  let memory: PgMemoryStore | undefined;
+  let conversationIndex: PgConversationIndex | undefined;
+  let personalContext: PersonalContext | undefined;
 
   if (databaseUrl) {
     const pool = createPool(databaseUrl);
     const db = createDb(pool);
+    runPool = createPool(databaseUrl);
+    sessionRuns = new PgSessionRuns(runPool);
     store = new PgSessionStore(db);
     // M5: token metering read side (docs/design.md §17).
     usage = new PgUsageStore(db);
@@ -343,6 +387,9 @@ async function main(): Promise<void> {
     const hasher = new ScryptPasswordHasher();
     const users = new PgUserStore(db, hasher);
     const metas = new PgSessionMetaStore(db);
+    memory = new PgMemoryStore(db);
+    conversationIndex = new PgConversationIndex(db);
+    personalContext = new PersonalContext(memory, conversationIndex, store);
     teams = new PgTeamStore(db);
 
     // First-boot bootstrap: provision the default tenant + admin exactly once.
@@ -366,6 +413,10 @@ async function main(): Promise<void> {
       }
     }
 
+    if (queue) {
+      promptDispatcher = new PgPromptDispatcher(pool, db, queue);
+      await promptDispatcher.start();
+    }
     auth = { tokens: new HmacTokenService(env.TOKEN_SECRET), users, metas, hasher };
   } else if (env.REDIS_URL) {
     throw new Error('REDIS_URL requires DATABASE_URL (distributed mode needs the PG event log)');
@@ -374,6 +425,9 @@ async function main(): Promise<void> {
   const app = await buildServer(
     {
       store,
+      memory,
+      sessionRuns,
+      conversationIndex,
       workspaceRoot: env.WORKSPACE_ROOT,
       createLoop,
       queue,
@@ -403,6 +457,8 @@ async function main(): Promise<void> {
   // M5 graceful drain (docs/design.md §16): stop accepting, drain in-flight.
   const shutdown = async (): Promise<void> => {
     await app.close();
+    await promptDispatcher?.dispose();
+    await runPool?.end();
     await telemetry?.shutdown();
     process.exit(0);
   };

@@ -260,8 +260,10 @@ describe('CoreAgentLoop M4: multimodal prompts', () => {
     expect(request!.messages[0]!.content).toBe('what is this?');
     expect(eventTypes(await store.load('s1'))).toEqual([
       'message/user',
+      'model/context',
       'model/usage',
       'message/assistant',
+      'task/completion',
       'turn/end',
     ]);
   });

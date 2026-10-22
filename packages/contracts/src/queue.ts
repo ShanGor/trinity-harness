@@ -20,6 +20,8 @@ export interface TurnTask {
   tenantId: string;
   /** M3: session seq of the user message that triggered this turn. */
   promptSeq: number;
+  /** Source queue watermark before promotion to message/user. */
+  cancellationSeq?: number;
   /** M3: session permission policy snapshot for this turn (fail-closed). */
   policy: PermissionPolicy;
 }
@@ -77,4 +79,10 @@ export interface LiveEventSubscriber {
 /** Await delivery of a cancellation wake-up; durable intent lives in SessionStore. */
 export interface TurnCancellationPort {
   cancel(sessionId: string): void | Promise<void>;
+}
+
+/** Shared PostgreSQL execution lock; releases only after the callback settles. */
+export interface SessionRunPort {
+  pending?(afterSessionId?: string): Promise<TurnTask[]>;
+  run<T>(sessionId: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
 }

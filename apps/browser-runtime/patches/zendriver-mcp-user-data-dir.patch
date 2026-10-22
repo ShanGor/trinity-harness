@@ -1,0 +1,53 @@
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -25,6 +25,10 @@
+     #[arg(long, value_enum, default_value_t = StealthProfileArg::Auto)]
+     stealth_profile: StealthProfileArg,
+ 
++    /// Use this Chrome user-data directory for the browser launched by this MCP process.
++    #[arg(long, value_name = "PATH")]
++    user_data_dir: Option<std::path::PathBuf>,
++
+     /// Tracing log filter (see tracing-subscriber EnvFilter syntax).
+     #[arg(long, default_value = "info")]
+     log: String,
+@@ -70,6 +70,7 @@
+ 
+     let state = Arc::new(Mutex::new(SessionState {
+         stealth_profile_choice: cli.stealth_profile.into(),
++        user_data_dir: cli.user_data_dir,
+         ..SessionState::new()
+     }));
+ 
+--- a/src/state.rs
++++ b/src/state.rs
+@@ -161,6 +161,8 @@
+     pub browser: Option<Browser>,
+     pub current_tab_id: Option<String>,
+     pub stealth_profile_choice: StealthProfileChoice,
++    /// Runtime-owned Chrome user-data directory; never supplied through MCP tools.
++    pub user_data_dir: Option<std::path::PathBuf>,
+     pub stealth_overrides: StealthOverrides,
+ 
+     #[cfg(feature = "expect")]
+@@ -412,6 +414,7 @@
+             browser: None,
+             current_tab_id: None,
+             stealth_profile_choice: StealthProfileChoice::default(),
++            user_data_dir: None,
+             stealth_overrides: StealthOverrides::default(),
+             #[cfg(feature = "expect")]
+             expectations: HashMap::new(),
+--- a/src/tools/lifecycle.rs
++++ b/src/tools/lifecycle.rs
+@@ -216,6 +216,9 @@
+         .headless(input.headless)
+         .gpu_backend(input.gpu_backend)
+         .stealth(stealth);
++    if let Some(user_data_dir) = s.user_data_dir.clone() {
++        builder = builder.user_data_dir(user_data_dir);
++    }
+     if let Some(choice) = input.input_profile {
+         builder = builder.input_profile(input_profile_for(choice));
+     }
+     if let Some(prefs) = &input.preferences {

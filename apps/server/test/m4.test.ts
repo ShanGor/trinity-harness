@@ -209,10 +209,13 @@ describe('buildServer M4', () => {
   });
 });
 
-it('refuses generic HTTP access to browser evidence artifacts', async () => {
+it('refuses generic HTTP access to browser evidence and private model input artifacts', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'trinity-browser-api-'));
   const blobs = new LocalBlobStore(root);
   await blobs.put('browser/s/observation.json', new TextEncoder().encode('private evidence'), {
+    mimeType: 'application/json',
+  });
+  await blobs.put('model-context/s/request.json', new TextEncoder().encode('private model input'), {
     mimeType: 'application/json',
   });
   const app = await buildServer({
@@ -229,10 +232,16 @@ it('refuses generic HTTP access to browser evidence artifacts', async () => {
       }),
   });
   try {
-    for (const path of ['browser/s/observation.json', '%62rowser/s/observation.json']) {
+    for (const path of [
+      'browser/s/observation.json',
+      '%62rowser/s/observation.json',
+      'model-context/s/request.json',
+      '%6dodel-context/s/request.json',
+    ]) {
       const result = await app.inject({ method: 'GET', url: `/api/blobs/${path}` });
       expect(result.statusCode).toBe(403);
       expect(result.body).not.toContain('private evidence');
+      expect(result.body).not.toContain('private model input');
     }
   } finally {
     await app.close();

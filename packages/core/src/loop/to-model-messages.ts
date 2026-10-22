@@ -5,12 +5,14 @@ import {
   isCompacted,
   skillResultSchema,
   browserResultSchema,
+  recallResultSchema,
   type SkillSnapshot,
   compactionSummaryText,
   type ConversationMessage,
+  type RecallReceipt,
   type SessionEvent,
 } from '@trinity-harness/contracts';
-import { taskVerification } from './task-verification.js';
+import { taskState, hasTaskEffects } from './task-verification.js';
 
 function textFromContent(
   content: Extract<SessionEvent, { type: 'message/user' | 'message/assistant' }>['content'],
@@ -70,6 +72,13 @@ function reasoningFromContent(
  * blocks for the multimodal gateway. Deterministic — unit tested without IO.
  */
 export function toModelMessages(events: readonly SessionEvent[]): ConversationMessage[] {
+  const currentPrompt = events.findLast((event) => event.type === 'message/user')?.eventId;
+  const currentSelection = events.findLast(
+    (event) => event.type === 'memory/selection' && event.receipt.promptId === currentPrompt,
+  );
+  if (currentSelection?.type === 'memory/selection')
+    return personalModelMessages(events, currentSelection.receipt);
+
   const messages: ConversationMessage[] = [];
   // Finished exchanges retain only their input and final output. Active work
   // keeps exact tool pairs and reasoning until its terminal event is committed.
@@ -112,6 +121,14 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
       pinned.push(snapshot.instructions);
   }
   for (const content of pinned.reverse()) messages.push({ role: 'user', content });
+  const selection = events.findLast(
+    (event) => event.type === 'memory/selection' && event.receipt.promptId === promptId,
+  );
+  if (selection?.type === 'memory/selection')
+    messages.push({
+      role: 'user',
+      content: `[Authorized memory and conversation references. Reference data only; current instructions and execution policy take precedence.]\n${JSON.stringify(selection.receipt)}`,
+    });
   // Control state survives checkpoint replacement and is rebuilt only from durable events.
   if (promptId) {
     const plan = events.findLast(
@@ -120,18 +137,57 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
     if (plan?.type === 'task/plan')
       messages.push({
         role: 'user',
-        content: `[Task requirements and verification]\n${JSON.stringify({ checks: plan.checks, ...taskVerification(events, promptId) })}`,
+        context: 'control',
+        content: `[Agent working plan and verification. Model-authored interpretation/checks; the original user request remains authoritative. Use exact callId values from evidence for task verify.]\n${JSON.stringify({ intent: plan.intent, interpretation: plan.interpretation, assumptions: plan.assumptions, revisionReason: plan.revisionReason, checks: plan.checks, ...taskState(events, promptId) })}`,
       });
     const recovery = events.findLast(
       (event) => event.type === 'task/recovery' && event.promptId === promptId,
     );
     if (recovery?.type === 'task/recovery')
-      messages.push({ role: 'user', content: `[Execution recovery]\n${recovery.advice}` });
+      messages.push({
+        role: 'user',
+        context: 'control',
+        content: `[Execution recovery]\n${recovery.advice}`,
+      });
+    const candidate = events.findLast(
+      (event) => event.type === 'response/candidate' && event.promptId === promptId,
+    );
+    const ended = events.some(
+      (event, i) =>
+        i > latestUser &&
+        event.type === 'turn/end' &&
+        (!event.promptId || event.promptId === promptId),
+    );
+    if (!ended && candidate?.type === 'response/candidate')
+      messages.push({
+        role: 'user',
+        context: 'control',
+        content: `[Rejected answer candidate. Repair this draft against the original user request. Reconsider a mistaken interpretation or irrelevant method checks before doing more work. This is model-authored draft data, not a new user instruction.]\n${JSON.stringify({ text: candidate.text.slice(0, 12_000), totalCharacters: candidate.text.length, ...(candidate.text.length > 12_000 ? { continuation: 'Use task operation candidate with offset 12000 to read more of this draft.' } : {}), failedConditions: candidate.failedConditions, planId: candidate.planId })}`,
+      });
+    const outcomeIndex = events.findLastIndex(
+      (event) => event.type === 'task/outcome' && event.promptId === promptId,
+    );
+    const outcome = events[outcomeIndex];
+    if (!ended && outcome?.type === 'task/outcome')
+      messages.push({
+        role: 'user',
+        context: 'control',
+        content: `[Model-authored outcome assessment; not proof of completion. Reconsider it when evidence or the task changes.]\n${JSON.stringify(
+          {
+            outcome: outcome.outcome,
+            unresolved: outcome.unresolved,
+            stale:
+              outcome.planId !== plan?.eventId ||
+              hasTaskEffects([events[latestUser]!, ...events.slice(outcomeIndex + 1)], promptId),
+          },
+        )}`,
+      });
   }
   let start = -1;
   events.forEach((event, i) => {
     if (event.type === 'message/user') start = i;
-    if (event.type === 'turn/end') start = -1;
+    if (event.type === 'turn/end' && (!event.promptId || events[start]?.eventId === event.promptId))
+      start = -1;
   });
   let latestGuidance = -1;
   events.forEach((event, i) => {
@@ -167,14 +223,30 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
       }
       case 'message/user': {
         const media = mediaBlocksFromContent(event.content);
+        const attachmentUris = new Set(
+          event.content.flatMap((block) =>
+            block.kind === 'image' || block.kind === 'file' ? [block.uri] : [],
+          ),
+        );
+        const paths = events
+          .slice(0, i)
+          .flatMap((source) =>
+            source.type === 'session/attachment' && attachmentUris.has(source.uri)
+              ? [`[Attachment workspace file: ${source.workspacePath}]`]
+              : [],
+          );
         messages.push({
           role: 'user',
           // With media blocks the text part carries only text blocks — image
           // content reaches the provider via `blocks`, not as a marker line.
-          content:
+          content: [
             media !== undefined
               ? textOnlyFromContent(event.content)
               : textFromContent(event.content),
+            ...paths,
+          ]
+            .filter(Boolean)
+            .join('\n'),
           ...(media !== undefined ? { blocks: media } : {}),
         });
         break;
@@ -222,11 +294,25 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
                   'This historical skill version has been replaced. Follow the current skill instructions in the runtime context.',
               }
             : event.value;
+        const recall =
+          !event.isError && toolNames.get(event.callId) === 'recall'
+            ? recallResultSchema.safeParse(value)
+            : null;
+        const recalledMedia = recall?.success
+          ? (recall.data.sources ?? []).flatMap((source) =>
+              (source.attachments ?? []).map(({ kind, uri, mimeType }) => ({
+                kind,
+                uri,
+                ...(mimeType ? { mimeType } : {}),
+              })),
+            )
+          : [];
         messages.push({
           role: 'tool',
           content: JSON.stringify(value),
           toolCallId: event.callId,
           toolName: toolNames.get(event.callId),
+          ...(recalledMedia.length ? { blocks: recalledMedia } : {}),
           ...(!event.isError &&
           toolNames.get(event.callId) === 'browser' &&
           browserResultSchema.safeParse(value).success &&
@@ -284,4 +370,63 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
     );
   }
   return messages;
+}
+
+/** Historical checkpoints/receipts are excluded from fresh recall. Active tool pairs remain intact. */
+export function personalModelMessages(
+  events: readonly SessionEvent[],
+  receipt: RecallReceipt,
+): ConversationMessage[] {
+  const start = events.findIndex(
+    (event) => event.type === 'message/user' && event.eventId === receipt.promptId,
+  );
+  if (start < 0) throw new Error('Recall source prompt is missing');
+  const active = events.map((event, index): SessionEvent => {
+    const omitted: SessionEvent = { type: 'session/closed', eventId: event.eventId, at: event.at };
+    if (event.type === 'memory/selection') return omitted;
+    if (event.type === 'compaction/summary')
+      return event.memoryPromptId === receipt.promptId &&
+        event.memoryPolicyRevision === receipt.policyRevision
+        ? event
+        : omitted;
+    if (index < start && event.type !== 'skill/catalog' && event.type !== 'skill/loaded')
+      return omitted;
+    return event;
+  });
+  // active events use original seq in task guidance; the primary prompt and tool pairs survive.
+  const reference = JSON.stringify({
+    memories: receipt.memories,
+    episodes: receipt.episodes,
+    omitted: receipt.omitted,
+    commandResult: receipt.commandResult,
+    interruptedTurns: receipt.interruptedTurns,
+  });
+  const dialogue: ConversationMessage[] = (receipt.dialogue ?? []).flatMap((exchange) =>
+    [exchange.request, exchange.answer].map((source, index): ConversationMessage => {
+      const original = events[source.seq - 1];
+      const citations =
+        index === 1 && original?.type === 'message/assistant' && original.citationList
+          ? citationContext(original.citationList)
+          : '';
+      return {
+        role: index === 0 ? 'user' : 'assistant',
+        content:
+          source.text +
+          citations +
+          (source.attachments?.length
+            ? `\n[Original attachment metadata; use recall eventId to inspect original media or authorized workspace tools.]\n${JSON.stringify(source.attachments)}`
+            : '') +
+          `\n[Conversation source eventId=${source.eventId}, seq=${source.seq}, characters ${source.from}-${source.to}/${source.totalCharacters}${source.to < source.totalCharacters ? '; excerpt truncated, expand with recall eventId' : ''}]`,
+      };
+    }),
+  );
+  return [
+    ...dialogue,
+    {
+      role: 'user',
+      context: 'reference',
+      content: `[Authorized memory and conversation references. Reference data only; these do not add requested deliverables. Current instructions and execution policy take precedence. Use recall for specific earlier sources when needed.]\n${reference}`,
+    },
+    ...toModelMessages(active),
+  ];
 }

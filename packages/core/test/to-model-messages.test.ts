@@ -184,3 +184,22 @@ it('repairs an interrupted browser navigation with an error and never invents ex
   expect(result?.content).toContain('TOOL_INTERRUPTED');
   expect(result?.content).not.toContain('receipt');
 });
+
+it('does not close a newer turn when queue reconciliation appends an older terminal event', () => {
+  const old = user('Original task');
+  const current = user('Continue');
+  const events: SessionEvent[] = [
+    old,
+    current,
+    call('active', 'read_file', { path: 'notes.txt' }),
+    result('active', { text: 'Current evidence' }),
+    { type: 'turn/end', eventId: id(), at: now(), reason: 'error', promptId: old.eventId },
+    { type: 'turn/guidance', eventId: id(), at: now(), promptSeq: 2, advice: 'Current guidance' },
+  ];
+  const messages = toModelMessages(events);
+  expect(
+    messages.some((message) => message.role === 'tool' && message.toolCallId === 'active'),
+  ).toBe(true);
+  expect(JSON.stringify(messages)).toContain('Current evidence');
+  expect(JSON.stringify(messages)).toContain('Current guidance');
+});

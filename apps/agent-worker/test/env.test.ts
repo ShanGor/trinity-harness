@@ -45,3 +45,23 @@ it.each(budgetKeys)('rejects invalid configured worker ceiling %s', (key) => {
   vi.stubEnv(key, 'invalid');
   expect(() => loadWorkerEnv()).toThrow(key);
 });
+
+it('requires an explicit authenticated runtime for Zendriver and rejects simultaneous CDP attachment', () => {
+  vi.stubEnv('BROWSER_DRIVER', 'zendriver');
+  vi.stubEnv('BROWSER_CDP_ENDPOINT', undefined);
+  vi.stubEnv('BROWSER_RUNTIME_ENDPOINT', undefined);
+  vi.stubEnv('BROWSER_RUNTIME_TOKEN', undefined);
+  expect(() => loadWorkerEnv()).toThrow('BROWSER_RUNTIME');
+  vi.stubEnv('BROWSER_RUNTIME_ENDPOINT', 'http://127.0.0.1:3010');
+  vi.stubEnv('BROWSER_RUNTIME_TOKEN', 't'.repeat(32));
+  expect(loadWorkerEnv().BROWSER_DRIVER).toBe('zendriver');
+  vi.stubEnv('BROWSER_CDP_ENDPOINT', '9222');
+  expect(() => loadWorkerEnv()).toThrow('BROWSER_CDP_ENDPOINT');
+});
+
+it('keeps development interruption separate from production draining', () => {
+  vi.stubEnv('NODE_ENV', 'development');
+  expect(loadWorkerEnv().NODE_ENV).toBe('development');
+  vi.stubEnv('NODE_ENV', 'production');
+  expect(loadWorkerEnv().NODE_ENV).toBe('production');
+});

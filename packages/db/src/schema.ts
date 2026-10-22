@@ -1,5 +1,7 @@
+import { sql } from 'drizzle-orm';
 import {
   bigint,
+  check,
   index,
   jsonb,
   pgTable,
@@ -39,6 +41,25 @@ export const sessionEvents = pgTable(
 export type SessionEventRow = typeof sessionEvents.$inferSelect;
 export type NewSessionEventRow = typeof sessionEvents.$inferInsert;
 
+/** Managed browser authority and at-most-once dispatch journal; evidence stays in blobs/logs. */
+export const browserRuntimes = pgTable('browser_runtimes', {
+  sessionId: uuid('session_id').primaryKey(),
+  generation: uuid('generation').notNull(),
+  owner: uuid('owner').notNull(),
+  status: text('status').notNull(),
+});
+export const browserCommands = pgTable(
+  'browser_commands',
+  {
+    sessionId: uuid('session_id').notNull(),
+    callId: text('call_id').notNull(),
+    requestHash: text('request_hash').notNull(),
+    generation: uuid('generation').notNull(),
+    result: jsonb('result'),
+  },
+  (t) => [primaryKey({ columns: [t.sessionId, t.callId] })],
+);
+
 /** Tenant isolation root (docs/design.md §12.4, §15). */
 export const tenants = pgTable('tenants', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -72,7 +93,11 @@ export const sessions = pgTable(
     tenantId: uuid('tenant_id').notNull(),
     userId: uuid('user_id').notNull(),
     title: text('title').notNull().default(''),
-    workspaceUri: text('workspace_uri').notNull(),
+    workspaceUri: text('workspace_uri'),
+    kind: text('kind'),
+    sessionRole: text('session_role'),
+    creationOperationId: uuid('creation_operation_id'),
+    originSessionId: uuid('origin_session_id'),
     /**
      * Workspace scope (docs/design.md §15): 'personal' → the creator's
      * directory, 'team' → a team directory the creator is a member of.
@@ -88,7 +113,17 @@ export const sessions = pgTable(
       .defaultNow(),
     closedAt: timestamp('closed_at', { withTimezone: true, mode: 'string' }),
   },
-  (t) => [index('sessions_scope_idx').on(t.scope, t.scopeId)],
+  (t) => [
+    check(
+      'sessions_kind_workspace_check',
+      sql`((kind is null and session_role is null and workspace_uri is not null) or (kind = 'chat' and session_role in ('main', 'side') and scope = 'personal' and scope_id is null) or (kind = 'work' and session_role = 'task' and workspace_uri is not null)) is true`,
+    ),
+    index('sessions_scope_idx').on(t.scope, t.scopeId),
+    uniqueIndex('sessions_operation_key').on(t.tenantId, t.userId, t.creationOperationId),
+    uniqueIndex('sessions_main_key')
+      .on(t.tenantId, t.userId)
+      .where(sql`session_role = 'main'`),
+  ],
 );
 
 /**
@@ -203,3 +238,48 @@ export const modelUsage = pgTable(
     index('model_usage_session_idx').on(t.sessionId),
   ],
 );
+
+/** Scope stream; revisions are serialized per tenant/owner. */
+export const memoryEvents = pgTable(
+  'memory_events',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    operationId: uuid('operation_id').notNull(),
+    memoryId: uuid('memory_id').notNull(),
+    payload: jsonb('payload').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.userId, t.revision] }),
+    uniqueIndex('memory_operation_key').on(t.tenantId, t.userId, t.operationId),
+  ],
+);
+
+/** Rebuildable source projection. A terminal turn and its index commit in one transaction. */
+export const conversationEpisodes = pgTable(
+  'conversation_episodes',
+  {
+    id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    sessionId: uuid('session_id').notNull(),
+    promptId: uuid('prompt_id').notNull(),
+    payload: jsonb('payload').notNull(),
+  },
+  (t) => [
+    uniqueIndex('episode_prompt_key').on(t.sessionId, t.promptId),
+    index('episode_owner_page').on(t.tenantId, t.userId, t.id),
+  ],
+);
+
+export const episodeChanges = pgTable('episode_changes', {
+  id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  userId: uuid('user_id').notNull(),
+  episodeId: text('episode_id').notNull(),
+  payload: jsonb('payload').notNull(),
+});

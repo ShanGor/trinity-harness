@@ -240,7 +240,9 @@ it('resets browser failure ordering between model steps and avoids browser spill
     model: 'fake/model',
     spill: {
       store: {
-        put: async () => {
+        put: async (key, data, options) => {
+          if (key?.startsWith('model-context/'))
+            return { key, uri: `blob://${key}`, mimeType: options.mimeType, size: data.byteLength };
           throw new Error('browser must not spill');
         },
         get: async () => null,
@@ -262,39 +264,82 @@ it('resets browser failure ordering between model steps and avoids browser spill
   ).toEqual([{ count: 1 }, { count: 2 }]);
 });
 
-it('uses the conclusion path after the browser hard delivery ceiling', async () => {
-  const store = new MemorySessionStore();
-  const registry = new CoreToolRegistry(new FakeSandbox());
-  registry.register({
-    name: 'browser',
-    description: 'browser',
-    parameters: z.object({}),
-    execute: async () => ({
-      isError: true,
-      value: {
-        kind: 'browser-error-v1',
-        code: 'LIMIT_REACHED',
-        operation: 'read_observation',
-        effect: 'none',
-        message: 'limit',
-        recovery: 'conclude',
+it.each([1, 150])(
+  'continues research after replaying %i legacy browser diagnostics',
+  async (count) => {
+    const store = new MemorySessionStore();
+    const registry = new CoreToolRegistry(new FakeSandbox());
+    registry.register({
+      name: 'browser',
+      description: 'browser',
+      parameters: z.object({}),
+      execute: async () => ({
+        isError: true,
+        value: {
+          kind: 'browser-error-v1',
+          code: 'LIMIT_REACHED',
+          operation: 'read_observation',
+          effect: 'none',
+          message: 'limit',
+          recovery: 'conclude',
+        },
+      }),
+    });
+    const llm = new FakeLLM(() => [
+      { kind: 'text-delta', text: 'Continue with focused reads.' },
+      finish,
+    ]);
+    await store.append('s', [
+      {
+        eventId: crypto.randomUUID(),
+        at: '2026-01-01T00:00:00.000Z',
+        type: 'message/user',
+        surfaceOp: 'append',
+        content: [{ kind: 'text', text: 'research' }],
       },
-    }),
-  });
-  const llm = new FakeLLM(
-    () => [toolCallChunk('b', 'browser', {}), finish],
-    () => [{ kind: 'text-delta', text: 'Collected evidence is limited.' }, finish],
-  );
-  const loop = new CoreAgentLoop({
-    store,
-    tools: registry,
-    workspaceRoot: '/ws',
-    model: 'fake/model',
-    llm,
-  });
-  expect((await loop.run('s', 'go', { emit: () => {} })).reason).toBe('completed');
-  expect(llm.requests[1]!.tools).toEqual([]);
-});
+    ]);
+    for (let index = 0; index < count; index += 1) {
+      const callId = `legacy${index}`;
+      await store.append('s', [
+        {
+          eventId: crypto.randomUUID(),
+          at: '2026-01-01T00:00:00.000Z',
+          type: 'tool/call',
+          callId,
+          name: 'browser',
+          args: {},
+        },
+        {
+          eventId: crypto.randomUUID(),
+          at: '2026-01-01T00:00:00.000Z',
+          type: 'tool/result',
+          callId,
+          isError: true,
+          value: {
+            kind: 'browser-error-v1',
+            code: 'LIMIT_REACHED',
+            operation: 'read_observation',
+            effect: 'none',
+            message: 'limit'.repeat(100),
+            ...(count === 1 ? { recovery: 'conclude' } : {}),
+          },
+        },
+      ]);
+    }
+    const loop = new CoreAgentLoop({
+      store,
+      tools: registry,
+      workspaceRoot: '/ws',
+      model: 'fake/model',
+      llm,
+    });
+    expect((await loop.run('s', 'research', { emit: () => {} }, { promptSeq: 1 })).reason).toBe(
+      'completed',
+    );
+    expect(llm.requests[0]!.tools.map((tool) => tool.name)).toContain('browser');
+    expect(llm.requests[0]!.system).not.toContain('final answer now');
+  },
+);
 
 it.each(['missing', 'allowed', 'rejected'] as const)(
   'gates typed browser actions with a %s approval channel before exposing execution authority',
