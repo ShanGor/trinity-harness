@@ -126,13 +126,31 @@ export class HttpBrowserRuntime implements BrowserRuntimePort {
   async execute(input: BrowserRuntimeRequest, signal?: AbortSignal): Promise<BrowserRuntimeResult> {
     const request = browserRuntimeRequestSchema.parse(input);
     const deadline = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(115_000)]);
-    const response = await this.fetcher(new URL('/execute', this.endpoint), {
-      method: 'POST',
-      redirect: 'error',
-      headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify(request),
-      signal: deadline,
-    });
+    let response: Response;
+    try {
+      response = await this.fetcher(new URL('/execute', this.endpoint), {
+        method: 'POST',
+        redirect: 'error',
+        headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify(request),
+        signal: deadline,
+      });
+    } catch {
+      // Transport failures (runtime not running, connection refused) name the
+      // deployment gap so the caller reports it instead of retrying blindly.
+      if (deadline.aborted) return browserRuntimeFailure(request, 'CANCELLED', 'unknown');
+      return {
+        isError: true,
+        value: {
+          kind: 'browser-error-v1',
+          operation: request.args.operation,
+          code: 'DRIVER_FAILED',
+          effect: 'unknown',
+          message: `The managed browser runtime at ${this.endpoint} is unreachable (connection refused or not running). Report that the browser runtime must be started before browser tasks can run; do not retry or launch a replacement browser.`,
+          recovery: 'conclude',
+        },
+      };
+    }
     if (!response.ok || !response.body) {
       await response.body?.cancel();
       return browserRuntimeFailure(request, 'DRIVER_FAILED', 'unknown');

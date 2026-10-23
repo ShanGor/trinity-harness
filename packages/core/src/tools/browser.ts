@@ -257,6 +257,26 @@ export function createBrowserTool(options: BrowserToolOptions): ToolDefinition {
         ctx.signal?.throwIfAborted();
         return { value: result, isError: false };
       } catch (err) {
+        // An unexpected exception (unparseable CLI output, an adapter schema
+        // mismatch, or an internal adapter bug) is a channel/adapter
+        // malfunction, never bad model arguments. Report it as a driver
+        // failure with 'conclude' recovery so the caller reports the
+        // limitation instead of burning steps on retries that cannot succeed.
+        if (
+          !ctx.signal?.aborted &&
+          !(err instanceof BrowserFailure) &&
+          !(err instanceof BrowserPersistenceFailure)
+        ) {
+          // Name only: raw adapter output must not leak into the persisted log.
+          const kind = err instanceof Error ? err.name.slice(0, 40) : 'unknown';
+          return error(
+            args.operation,
+            'DRIVER_FAILED',
+            state.effect,
+            `The browser adapter failed unexpectedly (${kind}). The live browser channel is unavailable for this call. Report the limitation and work from supported evidence instead of retrying, changing queries, or relaunching the browser.`,
+            'conclude',
+          );
+        }
         return error(
           args.operation,
           ctx.signal?.aborted

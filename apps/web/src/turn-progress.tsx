@@ -28,6 +28,7 @@ export function TurnProgress({ item }: { item: ChatItem }): ReactElement | null 
     : item.tools.filter((tool) => tool.status === 'pending' || tool.status === 'in_progress');
   const active = !terminal && (item.streaming || item.awaitingApproval || activeTools.length > 0);
   const latest = item.activity?.at(-1)?.content;
+  const completed = item.tools.filter((tool) => tool.status === 'completed').length;
   const failed = item.tools.filter((tool) => tool.status === 'failed').length;
   if (!active && !terminal && !latest && item.tools.length === 0) return null;
   if (item.final && !latest && item.tools.length === 0) return null;
@@ -62,8 +63,9 @@ export function TurnProgress({ item }: { item: ChatItem }): ReactElement | null 
         <p className="task-progress-warning">{item.errorDetail}</p>
       )}
       {active && failed > 0 && (
-        <p className="task-progress-warning">
-          {failed} tool {failed === 1 ? 'call failed' : 'calls failed'} · Agent is continuing
+        <p className="task-progress-note">
+          {completed} of {item.tools.length} tool {item.tools.length === 1 ? 'call' : 'calls'}{' '}
+          succeeded · {failed} failed — Agent is continuing
         </p>
       )}
       {!terminal && (

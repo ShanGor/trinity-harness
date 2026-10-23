@@ -254,6 +254,11 @@
   margin: 8px 0 0;
 }
 
+.task-progress-note {
+  margin: 8px 0 0;
+  color: var(--text-secondary, #66736b);
+}
+
 .task-progress-more > summary {
   cursor: pointer;
   padding: 10px 0;

@@ -6,12 +6,18 @@ import { AcpClient } from '../src/index.js';
 class FakeEventSource implements EventSourceLike {
   onmessage: ((msg: { data: unknown; lastEventId?: string }) => void) | null = null;
   onerror: ((err: unknown) => void) | null = null;
+  readyState?: number;
   closed = false;
   private lastEventId = '';
   constructor(readonly url: string) {}
   emit(data: unknown, seq?: number): void {
     if (seq !== undefined) this.lastEventId = String(seq);
     this.onmessage?.({ data: JSON.stringify(data), lastEventId: this.lastEventId });
+  }
+  /** Simulate a terminal HTTP failure: native EventSource stops retrying. */
+  failTerminally(): void {
+    this.readyState = 2;
+    this.onerror?.(new Error('terminal HTTP error'));
   }
   close(): void {
     this.closed = true;
@@ -114,6 +120,125 @@ describe('AcpClient', () => {
     client.openEventStream('abc', { onEvent: () => undefined }).close();
     expect(fake.url).toContain('afterSeq=5');
   });
+
+  it('re-establishes the stream from the last committed seq after a terminal HTTP failure', async () => {
+    vi.useFakeTimers();
+    try {
+      const sources: FakeEventSource[] = [];
+      const client = new AcpClient({
+        baseUrl: 'http://x',
+        eventSourceFactory: (url) => {
+          const source = new FakeEventSource(url);
+          sources.push(source);
+          return source;
+        },
+      });
+      const received: unknown[] = [];
+      const handle = client.openEventStream('abc', {
+        onEvent: (event) => received.push(event),
+        onError: () => undefined,
+      });
+      const first = {
+        type: 'message/committed',
+        sessionId: 'abc',
+        message: { role: 'assistant', content: 'one' },
+      };
+      const second = {
+        type: 'message/committed',
+        sessionId: 'abc',
+        message: { role: 'assistant', content: 'two' },
+      };
+      sources[0]!.emit(first, 7);
+      // Server restarted behind a proxy: the reconnect attempt got an HTTP
+      // error page, so the native EventSource is CLOSED and never retries.
+      sources[0]!.failTerminally();
+      expect(sources).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sources).toHaveLength(2);
+      expect(sources[1]!.url).toBe('http://x/api/sessions/abc/events?afterSeq=7');
+      // The gap is replayed by the server and rendered without a refresh.
+      sources[1]!.emit(first, 7); // replay overlap: dropped by seq
+      sources[1]!.emit(second, 8);
+      expect(received).toEqual([first, second]);
+      // A failure right after healthy delivery restarts the backoff; a
+      // connection that never delivers backs off exponentially instead of
+      // hot-looping.
+      sources[1]!.failTerminally();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sources).toHaveLength(3);
+      expect(sources[2]!.url).toBe('http://x/api/sessions/abc/events?afterSeq=8');
+      sources[2]!.failTerminally();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sources).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sources).toHaveLength(4);
+      sources[3]!.failTerminally();
+      handle.close();
+      sources[3]!.failTerminally();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sources).toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves transient reconnection to EventSource and ignores callbacks after close', async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeEventSource('');
+      const factory = vi.fn(() => source);
+      const onEvent = vi.fn();
+      const onError = vi.fn();
+      const client = new AcpClient({ eventSourceFactory: factory });
+      const handle = client.openEventStream('abc', { onEvent, onError });
+      source.readyState = 0;
+      source.onerror?.(new Error('network interruption'));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledTimes(1);
+      handle.close();
+      source.failTerminally();
+      source.emit({ type: 'session/turn_status', sessionId: 'abc', status: 'completed' }, 9);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onEvent).not.toHaveBeenCalled();
+      expect(factory).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reconnects each subscriber from its own delivered cursor', async () => {
+    vi.useFakeTimers();
+    try {
+      const sources: FakeEventSource[] = [];
+      const client = new AcpClient({
+        eventSourceFactory: (url) => {
+          const source = new FakeEventSource(url);
+          sources.push(source);
+          return source;
+        },
+      });
+      const received = vi.fn();
+      const first = client.openEventStream('abc', { onEvent: received });
+      const second = client.openEventStream('abc', { onEvent: () => undefined });
+      const event = { type: 'session/turn_status', sessionId: 'abc', status: 'completed' };
+      sources[0]!.emit(event, 7);
+      sources[0]!.failTerminally();
+      sources[1]!.emit(event, 10);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sources[2]!.url).toContain('afterSeq=7');
+      sources[0]!.emit(event, 10); // queued callback from the abandoned source
+      expect(received).toHaveBeenCalledTimes(1);
+      sources[2]!.emit(event, 8);
+      expect(received).toHaveBeenCalledTimes(2);
+      first.close();
+      second.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('sends a selected personal folder and browses its children', async () => {
     const { impl } = fakeFetch({
       'POST http://x/api/sessions': (init) => {

@@ -327,6 +327,29 @@ describe('runtime HTTP client and configuration', () => {
     );
     await expect(huge.execute(r)).rejects.toThrow('overflow');
   });
+  it('names the unreachable runtime instead of surfacing a raw transport error', async () => {
+    const r = request();
+    const fetcher = vi.fn(async () => {
+      throw new TypeError('fetch failed: connect ECONNREFUSED 127.0.0.1:3010');
+    }) as unknown as typeof fetch;
+    const client = new HttpBrowserRuntime('http://127.0.0.1:3010', 'x'.repeat(32), fetcher);
+    const result = await client.execute(r);
+    expect(result).toMatchObject({
+      isError: true,
+      value: {
+        kind: 'browser-error-v1',
+        code: 'DRIVER_FAILED',
+        effect: 'unknown',
+        recovery: 'conclude',
+      },
+    });
+    if (result.value.kind === 'browser-error-v1') {
+      expect(result.value.message).toContain('http://127.0.0.1:3010');
+      expect(result.value.message).toContain('unreachable');
+      expect(result.value.message).not.toContain('ECONNREFUSED');
+      expect(result.value.message.length).toBeLessThanOrEqual(500);
+    }
+  });
   it('requires explicit, nonconflicting configuration and protected remote origins', () => {
     expect(() => validateBrowserDeployment({ BROWSER_DRIVER: 'zendriver' })).toThrow(
       /Zendriver is selected.*BROWSER_RUNTIME_ENDPOINT and BROWSER_RUNTIME_TOKEN are missing.*pnpm dev:browser-runtime/,

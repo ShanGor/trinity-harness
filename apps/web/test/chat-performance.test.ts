@@ -301,7 +301,7 @@ describe('chat typing and streaming performance', () => {
         status: 'failed',
       },
     });
-    expect(card.textContent).toContain('1 tool call failed · Agent is continuing');
+    expect(card.textContent).toContain('0 of 6 tool calls succeeded · 1 failed — Agent is continuing');
     expect(card.querySelector('details')).toBe(more);
     expect(more.hasAttribute('open')).toBe(true);
     await emit({ type: 'session/turn_status', status: 'aborted' });

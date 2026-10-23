@@ -1,6 +1,7 @@
 import { BrowserDriverError } from './browser-driver-error.js';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import {
   BROWSER_LIMITS,
@@ -23,20 +24,40 @@ import {
   browserPaintScript,
 } from './browser-driver-scripts.js';
 
+/** Mutating operations may partially apply; retry them only on sandbox timeouts. */
+const mutatingCommands = new Set(['click', 'fill', 'focus', 'press', 'mouse', 'scroll']);
+/** Bounded backoff for transient adapter failures (busy tab, settling websocket). */
+const transientBackoffMs = [250, 500];
+
 async function cli(ctx: ToolContext, binding: BrowserBinding, args: string[]): Promise<unknown> {
   if (!ctx.sandbox.execArgv || !/^[A-Za-z0-9_-]{1,200}$/.test(binding.cliSession))
     throw new Error('Invalid CLI binding');
   const flags = ['--session', binding.cliSession, '--json', '--pin-tab'];
   if (binding.cdpEndpoint) flags.push('--cdp', binding.cdpEndpoint);
-  const result = await ctx.sandbox.execArgv('agent-browser', [...flags, ...args], {
-    signal: ctx.signal,
-    timeoutMs: 30_000,
-    maxOutputBytes: BROWSER_LIMITS.transport,
-  });
-  ctx.signal?.throwIfAborted();
-  if (result.outputOverflow) throw new BrowserDriverError('TRANSPORT_OVERFLOW');
-  if (result.exitCode !== 0) throw new BrowserDriverError('DRIVER_FAILED');
-  return unwrapBrowserCliOutput(result.stdout);
+  const mutating = mutatingCommands.has(args[0] ?? '');
+  for (let attempt = 0; ; attempt++) {
+    const result = await ctx.sandbox.execArgv('agent-browser', [...flags, ...args], {
+      signal: ctx.signal,
+      timeoutMs: 30_000,
+      maxOutputBytes: BROWSER_LIMITS.transport,
+    });
+    ctx.signal?.throwIfAborted();
+    if (result.outputOverflow) throw new BrowserDriverError('TRANSPORT_OVERFLOW');
+    if (result.exitCode === 0) return unwrapBrowserCliOutput(result.stdout);
+    // Missing CLI binary is a permanent configuration failure; bounded
+    // retries cannot recover it. Read-only commands may retry any transient
+    // non-zero exit; mutating commands retry only sandbox timeouts (124),
+    // where the operation was killed before it could partially apply.
+    // Recovery is exhausted: the caller should report the channel failure,
+    // not retry at the model level.
+    if (
+      /ENOENT|not found/i.test(result.stderr) ||
+      (mutating && result.exitCode !== 124) ||
+      attempt >= transientBackoffMs.length
+    )
+      throw new BrowserDriverError('DRIVER_FAILED', undefined, 'conclude');
+    await delay(transientBackoffMs[attempt]!, undefined, { signal: ctx.signal });
+  }
 }
 
 export const agentBrowserDriver: BrowserDriverPort = {

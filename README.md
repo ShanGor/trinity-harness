@@ -47,16 +47,36 @@ cp .env.example .env
 # 3. Apply database migrations (Drizzle Kit)
 pnpm db:migrate
 
-# 4. Run the topology (three processes)
+# 4. Run the topology (three processes; four with BROWSER_DRIVER=zendriver)
 pnpm dev:server    # API + SSE relay + /acp  (http://127.0.0.1:3000)
 pnpm dev:worker    # agent loop consumer
 pnpm dev:audit     # audit consumer
+pnpm dev:browser-runtime   # managed Chrome supervisor; only for BROWSER_DRIVER=zendriver
+#                            (see "Browser (live web access)" below)
 
 # 5. In another terminal, run the web UI (http://localhost:5173)
 pnpm dev:web
 ```
 
 Open http://localhost:5173, sign in with the bootstrap admin (`ADMIN_EMAIL` / `ADMIN_PASSWORD`), and describe a coding task. The agent can read/write/edit files and run shell commands inside `WORKSPACE_ROOT` (defaults to the repo root). Sign in as `admin` to see the **Audit** tab.
+
+## Browser (live web access)
+
+The `browser` tool always provides saved reads (`read_observation` / `search_observation`, available offline). Live operations require one of two modes, selected by `BROWSER_DRIVER`:
+
+**Trusted CDP (default; no extra service).** Attach to an operator-started Chrome: set `BROWSER_CDP_ENDPOINT=9222` (or a full URL) and optionally `BROWSER_CDP_OWNER_ID` to restrict browser use to one user. The worker talks to that Chrome directly through the pinned `agent-browser` CLI (0.38.x), so no browser process runs inside Trinity and no extra service is needed. Chrome must be started with remote debugging by the operator; Trinity never launches or replaces it.
+
+**Managed Zendriver (separate supervisor process).** Set `BROWSER_DRIVER=zendriver`, `BROWSER_RUNTIME_ENDPOINT=http://127.0.0.1:3010`, a shared `BROWSER_RUNTIME_TOKEN` (min 32 chars, same value in server, worker and runtime), and `BROWSER_PROFILE_DIR` (a persistent, encrypted volume mounted only into the runtime). Then run the supervisor as a fourth process next to `dev:server` / `dev:worker`:
+
+```bash
+pnpm dev:browser-runtime   # or `pnpm start:browser-runtime` (no watch)
+```
+
+It launches a private Chrome per session under `<BROWSER_PROFILE_DIR>/<tenant-id>/<user-id>`, with exclusive per-profile leases, bounded idle shutdown and per-call PostgreSQL command journaling.
+
+**Managed Chrome connects directly.** The sandbox environment is scrubbed (no inherited proxy variables), so if this host needs a proxy for outbound traffic, set it explicitly on the runtime process: `BROWSER_PROXY_URL=http://127.0.0.1:7890` (optional `BROWSER_NO_PROXY` override). Without it, destinations unreachable directly (e.g. Google from a network that requires a proxy) hang until the per-command deadline and surface as `DRIVER_FAILED`.
+
+**Profile locks.** A graceful stop (`CTRL+C`, SIGINT/SIGTERM) terminates managed Chrome via SIGTERM so Chrome removes its own `Singleton*` locks; the runtime then exits deterministically. After a crash or SIGKILL, the next session start reclaims provably stale locks automatically: the lease's recorded pid is dead on this host, the Chrome `SingletonLock` owner pid is dead, and no live process references the profile directory. Ambiguous cases (live pid, foreign host, unverifiable ownership) fail closed and still need operator recovery: confirm every Chrome using the profile has stopped, then remove `.locks/<tenant-id>-<user-id>.lock` and the profile's `Singleton*` symlinks.
 
 ## Configuration (`.env`)
 

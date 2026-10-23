@@ -297,15 +297,33 @@ export class LocalSandbox implements SandboxPort {
     });
     child.once('exit', (code) => exitResolve(code));
     child.once('error', () => exitResolve(null));
+    // Graceful termination first: SIGTERM lets Chrome (and language servers)
+    // clean up their own state — Chrome removes its Singleton* profile locks
+    // on a graceful exit — while the bounded SIGKILL escalation guarantees a
+    // hung child cannot outlive disposal. kill() is idempotent so an abort
+    // signal and an explicit dispose cannot double-terminate the group.
+    let terminated = false;
+    let escalation: AbortSignal | undefined;
     const kill = (): void => {
-      if (opts?.processGroup && child.pid) {
+      if (terminated) return;
+      terminated = true;
+      const signal = (kind: NodeJS.Signals): void => {
         try {
-          process.kill(-child.pid, 'SIGKILL');
+          if (opts?.processGroup && child.pid) process.kill(-child.pid, kind);
+          else child.kill(kind);
         } catch (err) {
           if (!(err instanceof Error && 'code' in err && err.code === 'ESRCH')) throw err;
         }
-      } else child.kill('SIGTERM');
+      };
+      signal('SIGTERM');
+      if (opts?.processGroup) {
+        escalation = AbortSignal.timeout(2000);
+        escalation.addEventListener('abort', () => signal('SIGKILL'), { once: true });
+      }
     };
+    child.once('exit', () => {
+      terminated = true;
+    });
     opts?.signal?.addEventListener('abort', kill, { once: true });
     child.once('close', () => opts?.signal?.removeEventListener('abort', kill));
     if (opts?.signal?.aborted) kill();

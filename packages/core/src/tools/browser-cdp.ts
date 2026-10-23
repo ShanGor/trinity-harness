@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import {
   browserCdpEndpointSchema,
@@ -180,16 +181,22 @@ export class TrustedCdpBrowserAccess implements BrowserAccessPort {
     const sandbox = this.options.sandbox;
     if (!sandbox.execArgv) throw new CdpAccessError('CDP_BOUNDED_EXEC_REQUIRED');
     const run = async (args: string[], maxOutputBytes: number): Promise<string> => {
-      signal?.throwIfAborted();
-      const result = await sandbox.execArgv!('agent-browser', args, {
-        maxOutputBytes,
-        signal,
-        timeoutMs: 10_000,
-      });
-      signal?.throwIfAborted();
-      if (result.outputOverflow || result.exitCode !== 0)
-        throw new CdpAccessError('CDP_PROBE_FAILED');
-      return result.stdout;
+      // Chrome may still be starting or briefly busy; probe attempts use
+      // bounded backoff before failing closed. A missing CLI binary is a
+      // permanent configuration failure that retries cannot recover.
+      for (let attempt = 0; ; attempt++) {
+        signal?.throwIfAborted();
+        const result = await sandbox.execArgv!('agent-browser', args, {
+          maxOutputBytes,
+          signal,
+          timeoutMs: 10_000,
+        });
+        signal?.throwIfAborted();
+        if (result.exitCode === 0 && !result.outputOverflow) return result.stdout;
+        if (/ENOENT|not found/i.test(result.stderr) || attempt >= 2)
+          throw new CdpAccessError('CDP_PROBE_FAILED');
+        await delay(250 * (attempt + 1), undefined, { signal });
+      }
     };
     const version = (await run(['--version'], 1024)).trim();
     // The attached CLI protocol was validated against 0.38.x; upgrades require adapter tests.

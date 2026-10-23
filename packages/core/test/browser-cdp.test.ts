@@ -109,6 +109,45 @@ describe('explicit trusted CDP attachment', () => {
     });
     expect(calls).toHaveLength(0);
   });
+  it('recovers a transiently busy browser with bounded probe retries', async () => {
+    const { access, sandbox } = assembly();
+    const original = sandbox.argvHandler!;
+    let failures = 1;
+    let probes = 0;
+    sandbox.argvHandler = async (c, args, o) => {
+      if (args[0] === '--session' && args.includes('cdp-url')) {
+        probes++;
+        if (failures > 0) {
+          failures--;
+          return {
+            stdout: '',
+            stderr: 'command cancelled or timed out',
+            exitCode: 124,
+            outputOverflow: false,
+          };
+        }
+      }
+      return original(c, args, o);
+    };
+    await expect(access.authorize('s', 'get_page_text', undefined)).resolves.toMatchObject({
+      securityMode: 'trusted-cdp',
+    });
+    expect(probes).toBe(2);
+  });
+  it('fails closed immediately when the browser CLI binary is missing', async () => {
+    const { access, sandbox } = assembly();
+    let probes = 0;
+    sandbox.argvHandler = async (c, args) => {
+      if (args[0] === '--version')
+        return { stdout: 'agent-browser 0.38.2', stderr: '', exitCode: 0, outputOverflow: false };
+      if (args.includes('cdp-url')) probes++;
+      return { stdout: '', stderr: 'spawn agent-browser ENOENT', exitCode: 1, outputOverflow: false };
+    };
+    await expect(access.authorize('s', 'get_page_text', undefined)).rejects.toMatchObject({
+      code: 'CDP_PROBE_FAILED',
+    });
+    expect(probes).toBe(1);
+  });
   it.each(['connection', 'launch', 'version', 'overflow', 'invalid'])(
     'fails closed on %s without managed fallback',
     async (kind) => {

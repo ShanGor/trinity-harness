@@ -29,6 +29,8 @@ import { BrowserDriverError } from './browser-driver-error.js';
 import { ZENDRIVER_VERSION, zendriverStructured, type ZendriverClient } from './zendriver-mcp.js';
 
 const ack = z.object({ ok: z.literal(true) });
+/** Chrome's internal network-error document (failed navigation, dead proxy…). */
+const CHROME_ERROR_PAGE_URL = 'chrome-error://chromewebdata/';
 /** One instance is bound to one supervisor-owned MCP connection and generation. */
 export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessPort {
   constructor(
@@ -98,14 +100,37 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
         current_tab: z.object({ id: z.string().min(1), url: z.string() }),
       })
       .parse(zendriverStructured(await this.client.call('browser_status', {}, signal)));
-    const state = browserDriverStateSchema.parse({
-      ...z
+    let page = z
+      .object({ url: z.string(), documentRevision: z.string(), browserVersion: z.string() })
+      .parse(await this.evaluate(browserStateScript, signal));
+    // A failed navigation leaves the owned tab on Chrome's internal error
+    // page: the tab keeps the failed destination while the document reports
+    // the internal error URL. That is an unreachable destination, never a
+    // stale binding or an adapter malfunction.
+    const errorPage =
+      page.url === CHROME_ERROR_PAGE_URL || status.current_tab.url === CHROME_ERROR_PAGE_URL;
+    if (!errorPage && status.current_tab.url !== page.url) {
+      // The tab-status and document probes race same-tab URL updates (e.g. a
+      // post-load history.replaceState). Re-read the document once and accept
+      // it when stable; a still-moving document is a stale observation.
+      const again = z
         .object({ url: z.string(), documentRevision: z.string(), browserVersion: z.string() })
-        .parse(await this.evaluate(browserStateScript, signal)),
-      tabId: status.current_tab.id,
-    });
-    if (status.current_tab.url !== state.url) throw new BrowserDriverError('STALE_TARGET');
-    if (state.url !== 'about:blank') browserUrlSchema.parse(state.url);
+        .parse(await this.evaluate(browserStateScript, signal));
+      if (again.url !== page.url || again.documentRevision !== page.documentRevision)
+        throw new BrowserDriverError('STALE_TARGET');
+      page = again;
+    }
+    const state = browserDriverStateSchema.parse({ ...page, tabId: status.current_tab.id });
+    if (
+      state.url !== 'about:blank' &&
+      state.url !== CHROME_ERROR_PAGE_URL &&
+      !browserUrlSchema.safeParse(state.url).success
+    )
+      throw new BrowserDriverError(
+        'NOT_AUTHORIZED',
+        'The owned tab contains an unsupported document scheme. Only HTTP(S) evidence is allowed; report the document access limitation.',
+        'conclude',
+      );
     return state;
   }
   async authorize(
@@ -118,6 +143,14 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
       throw new BrowserDriverError('NOT_AUTHORIZED');
     if (url !== undefined) browserUrlSchema.parse(url);
     const state = await this.inspect(signal);
+    if (state.url === CHROME_ERROR_PAGE_URL && (operation !== 'navigate' || url === undefined))
+      // Only an explicit validated HTTP(S) navigation may move the owned tab
+      // away from Chrome's error page; reading it cannot produce evidence.
+      throw new BrowserDriverError(
+        'PAGE_UNAVAILABLE',
+        'The owned tab is on a Chrome network error page. Navigate to a valid HTTP(S) source to recover; reading or screenshotting this error page cannot produce evidence.',
+        'navigate',
+      );
     if (url && operation !== 'navigate' && url !== state.url)
       throw new BrowserDriverError('STALE_TARGET');
     return {

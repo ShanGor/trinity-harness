@@ -23,6 +23,17 @@ it('requires storage/credentials and defaults to a bounded loopback-only supervi
     { BROWSER_RUNTIME_MAX_SESSIONS: 0 },
     { BROWSER_RUNTIME_IDLE_MS: 0 },
     { ZENDRIVER_CHROME_VERSION: 'latest' },
+    { BROWSER_PROXY_URL: 'socks5://127.0.0.1:1080' },
+    { BROWSER_PROXY_URL: 'not a url' },
   ])
     expect(browserRuntimeEnvSchema.safeParse({ ...minimal, ...extra }).success).toBe(false);
+});
+
+it('accepts an explicit operator-configured proxy for managed Chrome', () => {
+  const parsed = browserRuntimeEnvSchema.parse({
+    ...minimal,
+    BROWSER_PROXY_URL: 'http://127.0.0.1:7890',
+  });
+  expect(parsed.BROWSER_PROXY_URL).toBe('http://127.0.0.1:7890');
+  expect(parsed.BROWSER_NO_PROXY).toContain('localhost');
 });

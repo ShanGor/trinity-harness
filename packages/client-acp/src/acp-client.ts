@@ -70,8 +70,6 @@ export class AcpClient {
   private readonly token?: string | (() => string | null | undefined);
   /** sessionId → last seen SSE id (seq), for resume after page reloads. */
   private readonly lastSeq = new Map<string, number>();
-  /** sessionId → pending reconnect timer, for gap-detect forced reconnects. */
-  private readonly reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(opts?: AcpClientOptions) {
     this.baseUrl = opts?.baseUrl ?? '';
@@ -347,44 +345,66 @@ export class AcpClient {
     },
   ): EventStreamHandle {
     if (opts?.afterSeq !== undefined) this.lastSeq.set(sessionId, opts.afterSeq);
-    const afterSeq = opts?.afterSeq ?? this.lastSeq.get(sessionId) ?? 0;
-    const url = `${this.baseUrl}/api/sessions/${sessionId}/events?afterSeq=${afterSeq}${this.tokenQuery()}`;
-    const source = this.eventSourceFactory(url);
-    let deliveredSeq = afterSeq;
+    const startSeq = opts?.afterSeq ?? this.lastSeq.get(sessionId) ?? 0;
+    let deliveredSeq = startSeq;
+    let source: EventSourceLike | null = null;
+    let closed = false;
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-    source.onmessage = (msg: { data: unknown; lastEventId?: string }) => {
-      try {
-        const parsed = serverEventSchema.parse(JSON.parse(String(msg.data)));
-        // Native Last-Event-ID handling: seq ids arrive out-of-band.
-        const seq = Number(msg.lastEventId);
-        // EventSource inherits the previous id on Pub/Sub frames without id:.
-        // Text/thought deltas are ephemeral and must never advance or dedupe
-        // against the persisted log cursor.
-        const liveDelta =
-          parsed.type === 'session/update' &&
-          (parsed.update.kind === 'agent_message_chunk' ||
-            parsed.update.kind === 'agent_thought_chunk');
-        if (!liveDelta && Number.isInteger(seq) && seq > 0) {
-          if (seq <= deliveredSeq) return;
-          deliveredSeq = seq;
-          this.noteSeq(sessionId, seq);
-          handlers.onSeq?.(seq);
+    const connect = (fromSeq: number): void => {
+      const url = `${this.baseUrl}/api/sessions/${sessionId}/events?afterSeq=${fromSeq}${this.tokenQuery()}`;
+      const next = this.eventSourceFactory(url);
+      source = next;
+      next.onmessage = (msg: { data: unknown; lastEventId?: string }) => {
+        if (closed || source !== next) return;
+        try {
+          const parsed = serverEventSchema.parse(JSON.parse(String(msg.data)));
+          attempts = 0; // healthy delivery resets the reconnect backoff
+          // Native Last-Event-ID handling: seq ids arrive out-of-band.
+          const seq = Number(msg.lastEventId);
+          // EventSource inherits the previous id on Pub/Sub frames without id:.
+          // Text/thought deltas are ephemeral and must never advance or dedupe
+          // against the persisted log cursor.
+          const liveDelta =
+            parsed.type === 'session/update' &&
+            (parsed.update.kind === 'agent_message_chunk' ||
+              parsed.update.kind === 'agent_thought_chunk');
+          if (!liveDelta && Number.isInteger(seq) && seq > 0) {
+            if (seq <= deliveredSeq) return;
+            deliveredSeq = seq;
+            this.noteSeq(sessionId, seq);
+            handlers.onSeq?.(seq);
+          }
+          handlers.onEvent(parsed);
+        } catch (err) {
+          handlers.onError?.(err);
         }
-        handlers.onEvent(parsed);
-      } catch (err) {
+      };
+      next.onerror = (err: unknown) => {
+        if (closed || source !== next) return;
         handlers.onError?.(err);
-      }
+        // Native EventSource retries transient network failures itself, but
+        // permanently CLOSES after an HTTP error response (e.g. a proxy 500
+        // while the server restarts). Detect that state and re-establish the
+        // stream from the last committed seq with bounded backoff — otherwise
+        // the pane goes silently stale until a manual refresh.
+        if (closed || timer || next.readyState !== 2 /* CLOSED */) return;
+        next.close();
+        attempts += 1;
+        const delayMs = Math.min(1000 * 2 ** (attempts - 1), 15_000);
+        timer = setTimeout(() => {
+          timer = null;
+          if (!closed) connect(deliveredSeq);
+        }, delayMs);
+      };
     };
-    source.onerror = (err: unknown) => {
-      handlers.onError?.(err);
-      // EventSource auto-reconnects natively (sending Last-Event-ID); the
-      // server replays any gap. No manual intervention needed here.
-    };
+    connect(startSeq);
     return {
       close: () => {
-        const timer = this.reconnectTimers.get(sessionId);
+        closed = true;
         if (timer) clearTimeout(timer);
-        source.close();
+        source?.close();
       },
     };
   }
@@ -460,5 +480,7 @@ export class AcpClient {
 export interface EventSourceLike {
   onmessage: ((msg: { data: unknown; lastEventId?: string }) => void) | null;
   onerror: ((err: unknown) => void) | null;
+  /** EventSource readyState; 2 (CLOSED) means the native retry loop stopped. */
+  readyState?: number;
   close(): void;
 }

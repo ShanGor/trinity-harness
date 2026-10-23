@@ -268,6 +268,86 @@ describe('browser web discovery', () => {
       expect(calls).toEqual([]);
     },
   );
+  it('reports an unavailable channel, not invalid output, when the adapter malfunctions', async () => {
+    const { run, sandbox } = await assembly();
+    const old = sandbox.argvHandler!;
+    sandbox.argvHandler = async (cmd, args, opts) =>
+      args.includes('eval')
+        ? {
+            stdout: JSON.stringify({ success: true, data: { garbage: true } }),
+            stderr: '',
+            exitCode: 0,
+            outputOverflow: false,
+          }
+        : old(cmd, args, opts);
+    const result = await run('broken-channel', { operation: 'web_search', query: 'query' });
+    expect(result.isError).toBe(true);
+    expect(result.value).toMatchObject({
+      kind: 'browser-error-v1',
+      code: 'DRIVER_FAILED',
+      recovery: 'conclude',
+    });
+    const parsed = browserErrorSchema.parse(result.value);
+    expect(parsed.message).toContain('browser adapter failed unexpectedly');
+    expect(parsed.message).toContain('unavailable');
+    expect(parsed.message).not.toContain('garbage');
+    expect(parsed.message.length).toBeLessThanOrEqual(500);
+  });
+  it('recovers transient adapter timeouts without model-level retries', async () => {
+    const { run, sandbox } = await assembly();
+    const old = sandbox.argvHandler!;
+    let failures = 2;
+    sandbox.argvHandler = async (cmd, args, opts) =>
+      args[0] === '--version' || failures === 0
+        ? old(cmd, args, opts)
+        : (failures--,
+          {
+            stdout: '',
+            stderr: 'command cancelled or timed out',
+            exitCode: 124,
+            outputOverflow: false,
+          });
+    const result = await run('flaky-channel', { operation: 'web_search', query: 'query' });
+    expect(result.isError).toBe(false);
+  });
+  it('fails closed after bounded transient recovery is exhausted', async () => {
+    const { run, sandbox } = await assembly();
+    let opens = 0;
+    sandbox.argvHandler = async (cmd, args) => {
+      if (args[0] !== '--version' && args.includes('open')) opens++;
+      return args[0] === '--version'
+        ? { stdout: 'agent-browser 1.0.0', stderr: '', exitCode: 0, outputOverflow: false }
+        : {
+            stdout: '',
+            stderr: 'command cancelled or timed out',
+            exitCode: 124,
+            outputOverflow: false,
+          };
+    };
+    const result = await run('down-channel', { operation: 'web_search', query: 'query' });
+    expect(result).toMatchObject({
+      isError: true,
+      value: { kind: 'browser-error-v1', code: 'DRIVER_FAILED', recovery: 'conclude' },
+    });
+    expect(opens).toBe(3);
+  });
+  it('does not retry a missing browser CLI binary', async () => {
+    const { run, sandbox } = await assembly();
+    const old = sandbox.argvHandler!;
+    let opens = 0;
+    sandbox.argvHandler = async (cmd, args, opts) => {
+      if (args[0] !== '--version' && args.includes('open')) opens++;
+      return args[0] === '--version'
+        ? old(cmd, args, opts)
+        : { stdout: '', stderr: 'spawn agent-browser ENOENT', exitCode: 1, outputOverflow: false };
+    };
+    const result = await run('missing-cli', { operation: 'web_search', query: 'query' });
+    expect(result).toMatchObject({
+      isError: true,
+      value: { kind: 'browser-error-v1', code: 'DRIVER_FAILED', recovery: 'conclude' },
+    });
+    expect(opens).toBe(1);
+  });
   it('checks destination authorization before searching', async () => {
     const { run, calls } = await assembly({
       authorize: async () => {

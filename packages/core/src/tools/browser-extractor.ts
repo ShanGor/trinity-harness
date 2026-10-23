@@ -23,7 +23,7 @@ export function browserExtractor(mode: 'article' | 'documentation', scopePath?: 
       for (const child of live.childNodes) { const copied = clean(child); if (copied) clone.appendChild(copied); if (truncated) break; }
       return clone;
     };
-    const http = (href) => { try { const u = new URL(href, location.href); return ['http:','https:'].includes(u.protocol) && !u.username && !u.password ? u.href : null; } catch { return null; } };
+    const http = (href) => { try { const u = new URL(href, location.href); return ['http:','https:'].includes(u.protocol) && !u.username && !u.password && u.href.length <= 2000 ? u.href : null; } catch { return null; } };
     const selected = mode === 'article' ? document.querySelector('article, [role="main"], main') : document.querySelector('main, [role="main"], article');
     let root = selected || document.body;
     const scopePath = ${JSON.stringify(scopePath ?? null)};

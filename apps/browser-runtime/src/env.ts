@@ -19,6 +19,26 @@ export const browserRuntimeEnvSchema = z.object({
     .string()
     .regex(/^\d+\.\d+\.\d+\.\d+$/)
     .default('155.0.8059.84'),
+  /**
+   * Operator-configured HTTP(S) proxy for the managed Chrome. The sandbox
+   * environment is scrubbed by default, so without this Chrome connects
+   * directly; destinations unreachable from the host then hang until the
+   * per-command deadline. Never logged or exposed to the model.
+   */
+  BROWSER_PROXY_URL: z
+    .url()
+    .refine((value) => {
+      try {
+        return ['http:', 'https:'].includes(new URL(value).protocol);
+      } catch {
+        return false;
+      }
+    }, 'must be an HTTP(S) proxy URL')
+    .optional(),
+  BROWSER_NO_PROXY: z
+    .string()
+    .max(2000)
+    .default('localhost,127.0.0.0/8,192.168.0.0/16,172.0.0.0/8,::1'),
 });
 export type BrowserRuntimeEnv = z.infer<typeof browserRuntimeEnvSchema>;
 export function loadBrowserRuntimeEnv(): BrowserRuntimeEnv {

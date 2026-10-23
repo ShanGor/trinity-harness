@@ -19,6 +19,15 @@ function extract(html: string, mode: 'article' | 'documentation' = 'article') {
 }
 afterEach(() => vi.restoreAllMocks());
 describe('visible semantic capture', () => {
+  it('omits oversized link URLs while preserving their visible text and valid links', () => {
+    const result = extract(
+      `<body><main><p><a href="https://example.com/?q=${'x'.repeat(2000)}">Long redirect</a> and <a href="https://example.com/source">Source</a></p></main></body>`,
+    );
+    expect(result.blocks[0]!.text).toBe('Long redirect and Source');
+    expect(result.blocks[0]!.links).toEqual([
+      { title: 'Source', url: 'https://example.com/source' },
+    ]);
+  });
   it('reports an empty app shell as partial rather than ready', () => {
     const result = extract('<body><div id="app"></div></body>');
     expect(result.blocks).toEqual([]);

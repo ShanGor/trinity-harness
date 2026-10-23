@@ -24,7 +24,11 @@ import {
 } from '@trinity-harness/db';
 import { buildBrowserRuntimeServer } from './server.js';
 import { loadBrowserRuntimeEnv } from './env.js';
-import { acquireBrowserProfileLease, prepareBrowserProfile } from './profile.js';
+import {
+  acquireBrowserProfileLease,
+  prepareBrowserProfile,
+  reclaimStaleBrowserProfileLocks,
+} from './profile.js';
 
 async function main(): Promise<void> {
   const env = loadBrowserRuntimeEnv();
@@ -81,6 +85,12 @@ async function main(): Promise<void> {
         meta.tenantId,
         meta.userId,
       );
+      // Chrome's own Singleton* entries survive a SIGKILL/crash; reclaim them
+      // only when the previous owner is provably gone (dead pid, no live
+      // process referencing the profile). Anything ambiguous fails closed here.
+      const locks = await reclaimStaleBrowserProfileLocks(profile.userDataDir);
+      if (locks.state === 'held')
+        throw new Error(`Browser profile is in use or requires operator recovery (${locks.reason})`);
       const releaseProfile = await acquireBrowserProfileLease(profile.lockPath, request.sessionId);
       let connection: ZendriverMcpConnection | undefined;
       let driver: ZendriverBrowserDriver | undefined;
@@ -100,7 +110,20 @@ async function main(): Promise<void> {
         const process = sandbox.openProcess(
           env.ZENDRIVER_BINARY,
           ['--log', 'off', '--user-data-dir', profile.userDataDir],
-          { processGroup: true },
+          {
+            processGroup: true,
+            // Explicit operator-configured egress only; the sandbox env is
+            // scrubbed, so managed Chrome sees no proxy unless configured.
+            ...(env.BROWSER_PROXY_URL
+              ? {
+                  env: {
+                    http_proxy: env.BROWSER_PROXY_URL,
+                    https_proxy: env.BROWSER_PROXY_URL,
+                    no_proxy: env.BROWSER_NO_PROXY,
+                  },
+                }
+              : {}),
+          },
         );
         connection = new ZendriverMcpConnection(process);
         const opener = new ZendriverBrowserDriver(
@@ -156,29 +179,36 @@ async function main(): Promise<void> {
   });
   const app = buildBrowserRuntimeServer(supervisor, env.BROWSER_RUNTIME_TOKEN);
   const notifications = await pool.connect();
-  let shuttingDown = false;
   notifications.on('notification', (message) => {
     if (message.channel === 'trinity_session_closed' && z.uuid().safeParse(message.payload).success)
       void supervisor.close(message.payload!).catch(() => supervisor.dispose());
   });
   notifications.on('error', () => {
-    void shutdown();
+    void shutdown(1);
   });
   await notifications.query('LISTEN trinity_session_closed');
-  async function shutdown(): Promise<void> {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    await supervisor.dispose();
-    await app.close();
-    notifications.release(true);
-    await pool.end();
-    await lockPool.end();
+  let shutdownPromise: Promise<void> | undefined;
+  function shutdown(exitCode: number): Promise<void> {
+    // Dispose once; a second signal falls through to Node's default handler
+    // and force-quits. Exiting deterministically guarantees the graceful
+    // Chrome shutdown (which removes profile locks) always runs to completion.
+    shutdownPromise ??= (async () => {
+      await supervisor.dispose();
+      await app.close();
+      notifications.release(true);
+      await pool.end();
+      await lockPool.end();
+    })();
+    return shutdownPromise.then(
+      () => process.exit(exitCode),
+      () => process.exit(1),
+    );
   }
-  process.on('SIGINT', () => {
-    void shutdown();
+  process.once('SIGINT', () => {
+    void shutdown(130);
   });
-  process.on('SIGTERM', () => {
-    void shutdown();
+  process.once('SIGTERM', () => {
+    void shutdown(143);
   });
   await app.listen({ host: env.BROWSER_RUNTIME_HOST, port: env.BROWSER_RUNTIME_PORT });
 }
