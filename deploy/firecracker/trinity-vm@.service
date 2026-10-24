@@ -1,0 +1,17 @@
+[Unit]
+Description=Trinity personal microVM %i
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/trinity-start-vm %i
+Restart=no
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0077
+LimitNOFILE=4096
+MemoryMax=2304M
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

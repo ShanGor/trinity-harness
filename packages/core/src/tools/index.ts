@@ -13,3 +13,5 @@ export { resolveBrowserImage, browserHash } from './browser-artifacts.js';
 export * from './browser-zendriver.js';
 export * from './browser-runtime.js';
 export * from './zendriver-mcp.js';
+export * from './browser-preview.js';
+export { agentBrowserDriver } from './browser-agent-browser.js';

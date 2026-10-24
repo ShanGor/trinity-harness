@@ -783,3 +783,28 @@
     background: white;
   }
 }
+.browser-activity {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  margin: 8px 0;
+  border: 1px solid var(--color-border, #d9e0dc);
+  border-radius: 10px;
+}
+.browser-activity > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.browser-preview-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+.browser-preview-meta {
+  color: #626d66;
+  font-size: 12px;
+}

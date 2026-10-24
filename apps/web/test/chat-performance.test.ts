@@ -14,6 +14,7 @@ const fake = vi.hoisted(() => ({
   sendPrompt: vi.fn(async () => undefined),
   respondApproval: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ ok: true as const, alreadyStopped: false })),
+  getBrowserPreview: vi.fn(async () => ({ state: 'unavailable' as const })),
 }));
 
 vi.mock('react-markdown', () => ({
@@ -37,6 +38,9 @@ vi.mock('@trinity-harness/client-acp', () => ({
         scope: 'personal',
       }));
     listTeams = async () => [];
+    getSchedules = async () => ({ available: false, schedules: [] });
+    getInbox = async () => ({ available: false, items: [] });
+    getBrowserPreview = fake.getBrowserPreview;
     createSession = async () => 'new-session';
     ensureMainChat = async () => 'main-session';
     getTimeline = fake.getTimeline;
@@ -108,6 +112,7 @@ beforeEach(async () => {
   fake.markdown.mockClear();
   fake.sendPrompt.mockClear();
   fake.cancelTurn.mockClear();
+  fake.getBrowserPreview.mockClear();
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -126,6 +131,34 @@ afterEach(async () => {
 });
 
 describe('chat typing and streaming performance', () => {
+  it('shows Browser activity and opens the viewer without replacing the composer or draft', async () => {
+    await click(container.querySelector('.history-item'));
+    const textarea = container.querySelector('textarea')!;
+    await type(textarea, 'Keep this browser follow-up');
+    await emit({
+      type: 'session/update',
+      sessionId: 's0',
+      update: {
+        kind: 'tool_call',
+        toolCallId: 'browser-1',
+        title: 'browser({"operation":"navigate"})',
+        status: 'in_progress',
+      },
+    });
+    expect(container.querySelector('[aria-label="Browser activity"]')?.textContent).toContain(
+      'Agent is browsing',
+    );
+    await click(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Open browser',
+      ) ?? null,
+    );
+    expect(document.body.textContent).toContain('No active browser available');
+    expect(fake.getBrowserPreview).toHaveBeenCalledOnce();
+    await click(document.querySelector('.ant-modal-close'));
+    expect(container.querySelector('textarea')).toBe(textarea);
+    expect(textarea.value).toBe('Keep this browser follow-up');
+  });
   it('shows a saved turn failure inline without presenting it as a new loading error', async () => {
     fake.getTimeline.mockResolvedValueOnce({
       events: [
@@ -301,7 +334,9 @@ describe('chat typing and streaming performance', () => {
         status: 'failed',
       },
     });
-    expect(card.textContent).toContain('0 of 6 tool calls succeeded · 1 failed — Agent is continuing');
+    expect(card.textContent).toContain(
+      '0 of 6 tool calls succeeded · 1 failed — Agent is continuing',
+    );
     expect(card.querySelector('details')).toBe(more);
     expect(more.hasAttribute('open')).toBe(true);
     await emit({ type: 'session/turn_status', status: 'aborted' });

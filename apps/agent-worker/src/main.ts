@@ -1,3 +1,12 @@
+import type { SandboxPort } from '@trinity-harness/contracts';
+import {
+  RemoteSandbox,
+  RemoteSkillCatalog,
+  FirecrackerGuestRouter,
+  EnvironmentController,
+  HttpNodeRuntime,
+} from '@trinity-harness/core';
+import { PgEnvironmentStore } from '@trinity-harness/db';
 import { createRecallTool } from '@trinity-harness/core';
 import { PgSessionRuns } from '@trinity-harness/db';
 import { PersonalContext } from '@trinity-harness/core';
@@ -43,6 +52,7 @@ import {
   PgUserStore,
   PgSessionStore,
   PgUsageStore,
+  PgScheduleStore,
 } from '@trinity-harness/db';
 import {
   BusAuditEmitter,
@@ -108,6 +118,28 @@ async function main(): Promise<void> {
   // M5: token metering — the loop records usage and gates model calls on the
   // tenant quota before every request (docs/design.md §17).
   const usage = new PgUsageStore(db);
+  const environmentStore = new PgEnvironmentStore(db, runPool);
+  const guestRouter =
+    env.EXECUTION_DRIVER === 'firecracker'
+      ? new FirecrackerGuestRouter(
+          new EnvironmentController(
+            environmentStore,
+            env.FIRECRACKER_NODES,
+            new Map(
+              env.FIRECRACKER_NODES.map((node) => [
+                node.id,
+                new HttpNodeRuntime(node.endpoint, env.NODE_RUNTIME_TOKEN!),
+              ]),
+            ),
+          ),
+          environmentStore,
+          metas,
+          browserUsers,
+          env.FIRECRACKER_NODES,
+          env.NODE_RUNTIME_TOKEN!,
+          env.WORKSPACE_ROOT,
+        )
+      : undefined;
   // M5: sandbox env scrubbing — worker secrets never reach tool children.
   //
   // Per-session workspaces (docs/design.md §15): every session is sandboxed
@@ -120,14 +152,15 @@ async function main(): Promise<void> {
   const globalSandbox = new LocalSandbox(env.WORKSPACE_ROOT, {
     envMode: env.SANDBOX_ENV_MODE,
   });
-  const lsp = env.LSP_ENABLED
-    ? new LspService({
-        sandbox: globalSandbox,
-        readText: async (abs) =>
-          (await globalSandbox.readFile(path.relative(env.WORKSPACE_ROOT, abs))).content,
-        maxServers: env.LSP_MAX_SERVERS,
-      })
-    : null;
+  const lsp =
+    env.LSP_ENABLED && !guestRouter
+      ? new LspService({
+          sandbox: globalSandbox,
+          readText: async (abs) =>
+            (await globalSandbox.readFile(path.relative(env.WORKSPACE_ROOT, abs))).content,
+          maxServers: env.LSP_MAX_SERVERS,
+        })
+      : null;
 
   const resolveBlob = async (uri: string): Promise<Uint8Array> => {
     const bytes = await blobStore.get(uri);
@@ -136,14 +169,31 @@ async function main(): Promise<void> {
   };
 
   interface RootAssembly {
-    sandbox: LocalSandbox;
+    sandbox: SandboxPort;
+    skills: SkillRuntime;
+    lsp: LspService | null;
     registry: CoreToolRegistry;
   }
   const assemblies = new Map<string, RootAssembly>();
-  const assemblyFor = (root: string): RootAssembly => {
-    let assembly = assemblies.get(root);
+  const assemblyFor = (root: string, sessionId: string): RootAssembly => {
+    const key = guestRouter ? sessionId : root;
+    let assembly = assemblies.get(key);
     if (assembly) return assembly;
-    const sandbox = new LocalSandbox(root, { envMode: env.SANDBOX_ENV_MODE });
+    const sandbox: SandboxPort = guestRouter
+      ? new RemoteSandbox(guestRouter, sessionId)
+      : new LocalSandbox(root, { envMode: env.SANDBOX_ENV_MODE });
+    const catalog = guestRouter ? new RemoteSkillCatalog(guestRouter, sessionId) : skillCatalog;
+    const sessionSkills = guestRouter
+      ? new SkillRuntime(catalog, store, { managedBrowser: true })
+      : skills;
+    const sessionLsp =
+      guestRouter && env.LSP_ENABLED
+        ? new LspService({
+            sandbox,
+            readText: async (file) => (await sandbox.readFile(file)).content,
+            maxServers: env.LSP_MAX_SERVERS,
+          })
+        : lsp;
     const registry = new CoreToolRegistry(sandbox);
     const authorizeBrowserSession = (sessionId: string, signal?: AbortSignal): Promise<boolean> =>
       isCdpSessionOwner(
@@ -153,7 +203,7 @@ async function main(): Promise<void> {
         { id: env.BROWSER_CDP_OWNER_ID, email: env.ADMIN_EMAIL },
         signal,
       );
-    registry.register(createSkillTool(skills));
+    registry.register(createSkillTool(sessionSkills));
     registry.register(createTaskTool(store));
     registry.register(createResearchTool(store, blobStore));
     registry.register(
@@ -177,8 +227,8 @@ async function main(): Promise<void> {
     }
     registry.register(createReadBlobTool(blobStore));
     registry.register(createRecallTool({ memory, index: conversationIndex, metas, store }));
-    if (lsp) {
-      for (const tool of createLspTools(lsp)) {
+    if (sessionLsp) {
+      for (const tool of createLspTools(sessionLsp)) {
         registry.register(tool);
       }
     }
@@ -190,7 +240,7 @@ async function main(): Promise<void> {
         browserAccess: env.BROWSER_CDP_ENDPOINT ? 'live' : 'saved-only',
         createLoop: ({ parentSessionId, childSessionId }) => {
           const childStore = new MemorySessionStore();
-          const childSkills = new SkillRuntime(skillCatalog, childStore, {
+          const childSkills = new SkillRuntime(catalog, childStore, {
             browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
           });
           const childRegistry = new CoreToolRegistry(sandbox);
@@ -218,8 +268,8 @@ async function main(): Promise<void> {
                 : undefined,
             }),
           );
-          if (lsp) {
-            for (const tool of createLspTools(lsp)) childRegistry.register(tool);
+          if (sessionLsp) {
+            for (const tool of createLspTools(sessionLsp)) childRegistry.register(tool);
           }
           return new CoreAgentLoop({
             llm,
@@ -251,8 +301,8 @@ async function main(): Promise<void> {
         },
       }),
     );
-    assembly = { sandbox, registry };
-    assemblies.set(root, assembly);
+    assembly = { sandbox, registry, skills: sessionSkills, lsp: sessionLsp };
+    assemblies.set(key, assembly);
     return assembly;
   };
 
@@ -275,16 +325,16 @@ async function main(): Promise<void> {
 
   // M4: LSP diagnostics context injection (design.md §9) — shared helper,
   // failures degrade to no augmentation (never break a turn).
-  const augmentSystem = lsp ? makeDiagnosticsAugment(lsp, () => store) : undefined;
 
   const handleTurn = createTurnHandler({
     store,
     metas,
     teams: new PgTeamStore(db),
     users: browserUsers,
+    schedules: env.SCHEDULING_ENABLED ? new PgScheduleStore(db) : undefined,
     sessionRuns: new PgSessionRuns(runPool),
     defaultWorkspaceRoot: env.WORKSPACE_ROOT,
-    createLoop: (_sessionId, workspaceRoot) =>
+    createLoop: (sessionId, workspaceRoot) =>
       new CoreAgentLoop({
         llm,
         model: env.MODEL,
@@ -309,10 +359,10 @@ async function main(): Promise<void> {
           env.modelPricing,
         ),
         systemPrompt: env.SYSTEM_PROMPT,
-        tools: assemblyFor(workspaceRoot).registry,
+        tools: assemblyFor(workspaceRoot, sessionId).registry,
         personalContext,
         sessionMetas: metas,
-        skills,
+        skills: assemblyFor(workspaceRoot, sessionId).skills,
         store,
         workspaceRoot,
         // M3: fail-closed human approval channel + durable approval trail.
@@ -322,7 +372,9 @@ async function main(): Promise<void> {
         context,
         spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
         resolveBlob,
-        augmentSystem,
+        augmentSystem: assemblyFor(workspaceRoot, sessionId).lsp
+          ? makeDiagnosticsAugment(assemblyFor(workspaceRoot, sessionId).lsp!, () => store)
+          : undefined,
         // M5: usage recording + tenant quota gate (docs/design.md §17).
         usage,
       }),
@@ -385,7 +437,11 @@ async function main(): Promise<void> {
     await worker.close({ abortActive: env.NODE_ENV === 'development' });
     await reconciliation;
     await queueProbe.close();
-    if (lsp) await lsp.dispose();
+    await Promise.all(
+      [...new Set([lsp, ...[...assemblies.values()].map((assembly) => assembly.lsp)])].map(
+        (service) => service?.dispose(),
+      ),
+    );
     await telemetry?.shutdown();
     redis.disconnect();
     await runPool.end();

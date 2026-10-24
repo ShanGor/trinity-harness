@@ -1,4 +1,15 @@
+import type { SandboxPort } from '@trinity-harness/contracts';
 import { turnMessageProjection } from '@trinity-harness/contracts';
+import {
+  scheduleCreateSchema,
+  scheduleListSchema,
+  inboxListSchema,
+} from '@trinity-harness/contracts';
+import {
+  environmentResponseSchema,
+  browserPreviewSchema,
+  type EnvironmentPort,
+} from '@trinity-harness/contracts';
 import {
   chatWorkspaceDir,
   runOrderedPrompts,
@@ -22,6 +33,8 @@ import type {
   AuditEmitter,
   AuditStore,
   BlobStore,
+  BrowserPreviewPort,
+  ScheduleStore,
   ContentBlock,
   EventSink,
   Identity,
@@ -521,11 +534,15 @@ export interface ServerAuthDeps {
 }
 
 export interface ServerDeps {
+  browserPreview?: BrowserPreviewPort;
+  schedules?: ScheduleStore;
+  environments?: EnvironmentPort;
   sessionRuns?: SessionRunPort | undefined;
   memory?: MemoryStorePort | undefined;
   conversationIndex?: ConversationIndexPort | undefined;
   store: SessionStore;
   workspaceRoot: string;
+  workspaceSandbox?: (sessionId: string, root: string) => SandboxPort;
   /** Inline mode (M1/tests): runs the Loop in this process, sandboxed to the session workspace. */
   createLoop?: (sessionId: string, workspaceRoot: string) => AgentLoop;
   /** Distributed mode (M2): enqueue turns for agent-worker. */
@@ -623,6 +640,107 @@ export async function buildServer(
       req.identity = identity;
     });
   }
+
+  app.get('/api/me/environment', async (req) =>
+    environmentResponseSchema.parse({
+      available: !!deps.environments && !!req.identity,
+      environment:
+        deps.environments && req.identity ? await deps.environments.get(req.identity) : null,
+    }),
+  );
+  for (const action of ['wake', 'suspend'] as const)
+    app.post(`/api/me/environment/${action}`, async (req, reply) => {
+      if (!deps.environments || !req.identity)
+        return reply.code(503).send({ error: 'personal environments unavailable' });
+      if (req.identity.role === 'viewer') return reply.code(403).send({ error: 'read-only role' });
+      if (
+        !z
+          .object({})
+          .strict()
+          .safeParse(req.body ?? {}).success
+      )
+        return reply.code(400).send({ error: 'environment identity is server-owned' });
+      const currentUser = await auth?.users.findById(req.identity.userId);
+      if (
+        !currentUser ||
+        currentUser.tenantId !== req.identity.tenantId ||
+        currentUser.role === 'viewer'
+      )
+        return reply.code(403).send({ error: 'execution access revoked' });
+      const cancelled = new AbortController();
+      const abort = (): void => {
+        if (!reply.raw.writableFinished) cancelled.abort();
+      };
+      req.raw.once('aborted', abort);
+      reply.raw.once('close', abort);
+      try {
+        const result = await deps.environments[action](req.identity, cancelled.signal);
+        return reply
+          .code(202)
+          .send(environmentResponseSchema.parse({ available: true, environment: result }));
+      } catch {
+        return reply.code(409).send({ error: 'environment capacity or host recovery required' });
+      } finally {
+        req.raw.removeListener('aborted', abort);
+        reply.raw.removeListener('close', abort);
+      }
+    });
+  app.get('/api/schedules', async (req) =>
+    scheduleListSchema.parse({
+      available: !!deps.schedules && !!req.identity,
+      schedules: deps.schedules && req.identity ? await deps.schedules.list(req.identity) : [],
+    }),
+  );
+  app.post('/api/schedules', async (req, reply) => {
+    if (!deps.schedules || !req.identity)
+      return reply.code(503).send({ error: 'scheduling unavailable' });
+    if (req.identity.role === 'viewer') return reply.code(403).send({ error: 'read-only role' });
+    const input = scheduleCreateSchema.safeParse(req.body);
+    if (!input.success) return reply.code(400).send({ error: 'invalid schedule' });
+    try {
+      return await deps.schedules.create(req.identity, input.data, new Date());
+    } catch {
+      return reply.code(409).send({ error: 'schedule conflicts or owned personal Work required' });
+    }
+  });
+  app.patch('/api/schedules/:id', async (req, reply) => {
+    if (!deps.schedules || !req.identity)
+      return reply.code(503).send({ error: 'scheduling unavailable' });
+    if (req.identity.role === 'viewer') return reply.code(403).send({ error: 'read-only role' });
+    const params = z.object({ id: z.uuid() }).safeParse(req.params);
+    const input = z
+      .object({ revision: z.number().int().positive(), enabled: z.boolean() })
+      .strict()
+      .safeParse(req.body);
+    if (!params.success || !input.success)
+      return reply.code(400).send({ error: 'invalid schedule change' });
+    try {
+      const result = await deps.schedules.setEnabled(
+        req.identity,
+        params.data.id,
+        input.data.revision,
+        input.data.enabled,
+        new Date(),
+      );
+      return result ?? reply.code(409).send({ error: 'schedule missing or revision changed' });
+    } catch {
+      return reply.code(409).send({ error: 'schedule has no future occurrence' });
+    }
+  });
+  app.get('/api/inbox', async (req) =>
+    inboxListSchema.parse({
+      available: !!deps.schedules && !!req.identity,
+      items: deps.schedules && req.identity ? await deps.schedules.inbox(req.identity) : [],
+    }),
+  );
+  app.post('/api/inbox/:id/ack', async (req, reply) => {
+    if (!deps.schedules || !req.identity)
+      return reply.code(503).send({ error: 'inbox unavailable' });
+    const params = z.object({ id: z.uuid() }).safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: 'invalid notification' });
+    await deps.schedules.acknowledge(req.identity, params.data.id, new Date());
+    return { ok: true };
+  });
 
   if (deps.liveEvents) {
     // Live deltas (Pub/Sub) are independent of auth — sessions are already
@@ -833,6 +951,7 @@ export async function buildServer(
             throw new Error('Team access revoked');
           if (meta.scope !== 'team' && meta.userId !== actor && user.role !== 'admin')
             throw new Error('Session access revoked');
+          await deps.schedules?.assertRunAuthorized(sessionId, actor);
         };
 
   /** Path-param validation for :sessionId routes (400 on malformed uuid). */
@@ -1745,6 +1864,39 @@ export async function buildServer(
     return reply.code(202).send({ accepted: true });
   });
 
+  app.get('/api/sessions/:sessionId/browser-preview', async (req, reply) => {
+    const sessionId = await sessionIdOf(req, reply);
+    if (!sessionId) return;
+    const granted = await authorizeSession(sessionId, req.identity, reply);
+    if (!granted) return;
+    // Live private pixels require the actual personal owner, not tenant admin or team access.
+    if (
+      auth &&
+      (!granted.meta ||
+        granted.meta.scope === 'team' ||
+        granted.meta.userId !== req.identity?.userId)
+    )
+      return reply.code(404).send({ error: 'browser unavailable' });
+    reply.header('cache-control', 'private, no-store').header('x-content-type-options', 'nosniff');
+    if (!deps.browserPreview) return { state: 'unavailable' };
+    const cancelled = new AbortController();
+    const abort = (): void => {
+      if (!reply.raw.writableFinished) cancelled.abort();
+    };
+    req.raw.once('aborted', abort);
+    reply.raw.once('close', abort);
+    try {
+      const result = await deps.browserPreview.preview(sessionId, cancelled.signal);
+      if (!(await authorizeSession(sessionId, req.identity, reply))) return;
+      return browserPreviewSchema.parse(result);
+    } catch {
+      return reply.code(503).send({ error: 'browser preview unavailable' });
+    } finally {
+      req.raw.removeListener('aborted', abort);
+      reply.raw.removeListener('close', abort);
+    }
+  });
+
   // ---- M4: attachments & blob storage (docs/design.md §10) ------------------
 
   if (deps.blobs) {
@@ -1816,6 +1968,7 @@ export async function buildServer(
           await workspaceRootFor(granted.meta, sessionId),
           new Uint8Array(data),
           query.data.filename,
+          deps.workspaceSandbox?.(sessionId, await workspaceRootFor(granted.meta, sessionId)),
         );
         await deps.store.append(
           sessionId,

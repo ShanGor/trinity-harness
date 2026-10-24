@@ -8,6 +8,9 @@ import {
   historyPageSchema,
   memorySelectionsResponseSchema,
   timelinePageSchema,
+  browserPreviewSchema,
+  scheduleListSchema,
+  inboxListSchema,
 } from '@trinity-harness/shared';
 import type {
   ServerEvent,
@@ -21,6 +24,9 @@ import type {
   TimelinePage,
   SessionSummary,
   HistoryQuery,
+  BrowserPreview,
+  ScheduleCreate,
+  ScheduleRecord,
 } from '@trinity-harness/shared';
 
 export type { WorkspaceSelection } from '@trinity-harness/shared';
@@ -98,6 +104,40 @@ export class AcpClient {
     return this.lastSeq.get(sessionId) ?? 0;
   }
 
+  /** One bounded user-view capture; never requests or grants browser input. */
+  async getBrowserPreview(sessionId: string, signal?: AbortSignal): Promise<BrowserPreview> {
+    const response = await fetch(
+      `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/browser-preview`,
+      {
+        headers: this.authHeaders(),
+        cache: 'no-store',
+        signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(10_000)]),
+      },
+    );
+    if (!response.ok) throw new Error(`Browser preview unavailable (${response.status})`);
+    return browserPreviewSchema.parse(await response.json());
+  }
+  async getSchedules(): Promise<ReturnType<typeof scheduleListSchema.parse>> {
+    return scheduleListSchema.parse(await this.assistantRequest('/api/schedules'));
+  }
+  async createSchedule(input: ScheduleCreate): Promise<void> {
+    await this.assistantRequest('/api/schedules', 'POST', input);
+  }
+  async setScheduleEnabled(schedule: ScheduleRecord, enabled: boolean): Promise<void> {
+    await this.assistantRequest(`/api/schedules/${schedule.id}`, 'PATCH', {
+      revision: schedule.revision,
+      enabled,
+    });
+  }
+  async getInbox(signal?: AbortSignal): Promise<ReturnType<typeof inboxListSchema.parse>> {
+    return inboxListSchema.parse(
+      await this.assistantRequest('/api/inbox', 'GET', undefined, signal),
+    );
+  }
+  async acknowledgeNotification(id: string): Promise<void> {
+    await this.assistantRequest(`/api/inbox/${id}/ack`, 'POST', {});
+  }
+
   async createSession(
     title?: string,
     policy?: string,
@@ -134,11 +174,17 @@ export class AcpClient {
     });
   }
 
-  private async assistantRequest(path: string, method = 'GET', body?: unknown): Promise<unknown> {
+  private async assistantRequest(
+    path: string,
+    method = 'GET',
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...this.authHeaders() },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(signal ? { signal } : {}),
     });
     if (!res.ok) throw new Error(`Request failed (${res.status})`);
     return res.json();

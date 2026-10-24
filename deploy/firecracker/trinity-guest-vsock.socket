@@ -1,0 +1,11 @@
+[Unit]
+Description=Trinity guest private vsock endpoint
+After=trinity-guest.service
+Requires=trinity-guest.service
+
+[Socket]
+ListenStream=vsock::4050
+Accept=no
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Trinity vsock to private guest socket bridge
+Requires=trinity-guest.service
+After=trinity-guest.service
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd /run/trinity-guest/rpc.sock
+User=trinity
+Group=trinity
+NoNewPrivileges=yes
+PrivateNetwork=yes

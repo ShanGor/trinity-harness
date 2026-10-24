@@ -37,3 +37,15 @@ it('accepts an explicit operator-configured proxy for managed Chrome', () => {
   expect(parsed.BROWSER_PROXY_URL).toBe('http://127.0.0.1:7890');
   expect(parsed.BROWSER_NO_PROXY).toContain('localhost');
 });
+
+it('requires local profiles only for local execution, leaving guest profile storage inside the VM', () => {
+  const base = {
+    DATABASE_URL: minimal.DATABASE_URL,
+    WORKSPACE_ROOT: minimal.WORKSPACE_ROOT,
+    BROWSER_RUNTIME_TOKEN: minimal.BROWSER_RUNTIME_TOKEN,
+  };
+  expect(browserRuntimeEnvSchema.safeParse(base).success).toBe(false);
+  expect(
+    browserRuntimeEnvSchema.safeParse({ ...base, EXECUTION_DRIVER: 'firecracker' }).success,
+  ).toBe(true);
+});

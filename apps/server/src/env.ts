@@ -12,12 +12,19 @@ import { z } from 'zod';
 
 import {
   browserDeploymentEnvShape,
+  guestDeploymentEnvShape,
+  validateGuestDeployment,
   validateBrowserDeployment,
   loadModelPricingConfig,
 } from '@trinity-harness/core';
 import { DEFAULT_SYSTEM_PROMPT, loadEnv } from '@trinity-harness/shared';
 
 const serverEnvSchema = z.object({
+  ...guestDeploymentEnvShape,
+  SCHEDULING_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().min(1).default('127.0.0.1'),
   /** Workspace the sandbox is rooted at for coding sessions. */
@@ -108,6 +115,7 @@ export function loadServerEnv(): ServerEnv {
     );
   }
   validateBrowserDeployment(result.data);
+  validateGuestDeployment(result.data, !!process.env['DATABASE_URL']);
   return {
     ...result.data,
     modelPricing: loadModelPricingConfig(new URL('../../../config/models.yaml', import.meta.url)),

@@ -12,12 +12,19 @@ import { z } from 'zod';
 
 import {
   browserDeploymentEnvShape,
+  guestDeploymentEnvShape,
+  validateGuestDeployment,
   validateBrowserDeployment,
   loadModelPricingConfig,
 } from '@trinity-harness/core';
 import { DEFAULT_SYSTEM_PROMPT, loadEnv } from '@trinity-harness/shared';
 
 const workerEnvSchema = z.object({
+  ...guestDeploymentEnvShape,
+  SCHEDULING_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   /** Workspace the sandbox is rooted at for coding sessions. */
   WORKSPACE_ROOT: z.string().min(1).default(process.cwd()),
@@ -91,6 +98,7 @@ export function loadWorkerEnv(): WorkerEnv & { DATABASE_URL: string; REDIS_URL: 
     );
   }
   validateBrowserDeployment(result.data);
+  validateGuestDeployment(result.data, !!process.env['DATABASE_URL']);
   return {
     ...result.data,
     modelPricing: loadModelPricingConfig(new URL('../../../config/models.yaml', import.meta.url)),

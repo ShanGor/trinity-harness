@@ -10,6 +10,7 @@ import type {
   UserStore,
   SessionStore,
   TurnTask,
+  ScheduleStore,
 } from '@trinity-harness/contracts';
 import { newId } from '@trinity-harness/shared';
 
@@ -25,6 +26,7 @@ export interface TurnHandlerDeps {
   teams?: TeamStore;
   users?: UserStore;
   sessionRuns?: SessionRunPort;
+  schedules?: ScheduleStore;
   /**
    * Builds the Loop for a turn, sandboxed to the session's workspace root
    * (`meta.workspaceUri`; legacy Chat is bound durably before execution).
@@ -121,6 +123,7 @@ export function createTurnHandler(
 
     const execute = async (ordered: TurnTask): Promise<void> => {
       const contextGuard = async (): Promise<void> => {
+        await deps.schedules?.assertRunAuthorized(ordered.sessionId, ordered.actor);
         const current = await deps.metas.get(ordered.sessionId);
         if (current?.closedAt || (deps.users && !current))
           throw new Error('Session access revoked');

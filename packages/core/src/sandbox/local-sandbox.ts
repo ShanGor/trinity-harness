@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { glob as fsGlob } from 'node:fs/promises';
-import { mkdir, readFile, writeFile, open, unlink } from 'node:fs/promises';
+import { mkdir, lstat, readFile, writeFile, open, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 
@@ -242,6 +242,33 @@ export class LocalSandbox implements SandboxPort {
       await unlink(this.resolve(relativePath));
     } catch (err) {
       if (!(err instanceof Error && 'code' in err && err.code === 'ENOENT')) throw err;
+    }
+  }
+
+  async writeBytes(relativePath: string, content: Uint8Array): Promise<void> {
+    const abs = this.resolve(relativePath);
+    let directory = this.workspaceRoot;
+    for (const segment of path
+      .relative(this.workspaceRoot, path.dirname(abs))
+      .split(path.sep)
+      .filter(Boolean)) {
+      directory = path.join(directory, segment);
+      await mkdir(directory, { mode: 0o700 }).catch((error: unknown) => {
+        if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+      });
+      const stat = await lstat(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink())
+        throw new Error('Unsafe binary file directory');
+    }
+    const handle = await open(
+      abs,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      await handle.writeFile(content);
+    } finally {
+      await handle.close();
     }
   }
 

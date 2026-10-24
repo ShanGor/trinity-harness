@@ -1,0 +1,43 @@
+{{- if .Values.controlWorker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trinity-harness.fullname" . }}-control-worker
+  labels:
+    {{- include "trinity-harness.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.controlWorker.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: control-worker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: control-worker
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: control-worker
+          image: {{ include "trinity-harness.image" (dict "image" .Values.controlWorker.image "global" .Values.global) | quote }}
+          imagePullPolicy: IfNotPresent
+          {{- include "trinity-harness.envFrom" . | nindent 10 }}
+          ports:
+            - { name: health, containerPort: 3000 }
+          readinessProbe:
+            httpGet: { path: /health, port: health }
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.controlWorker.resources | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          {{- include "trinity-harness.securityContext" . | nindent 10 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

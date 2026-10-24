@@ -240,6 +240,11 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
           // With media blocks the text part carries only text blocks — image
           // content reaches the provider via `blocks`, not as a marker line.
           content: [
+            ...(event.trigger
+              ? [
+                  `[Runtime trigger: this is the user's saved scheduled delegation, not a new live user message. ${JSON.stringify(event.trigger)}]`,
+                ]
+              : []),
             media !== undefined
               ? textOnlyFromContent(event.content)
               : textFromContent(event.content),

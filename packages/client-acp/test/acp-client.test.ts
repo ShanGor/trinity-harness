@@ -39,6 +39,26 @@ function fakeFetch(routes: Record<string, (init?: RequestInit) => Response>) {
 }
 
 describe('AcpClient', () => {
+  it('fetches user-only preview pixels with auth, cancellation and schema validation', async () => {
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.cache).toBe('no-store');
+      expect(init?.headers).toEqual({ authorization: 'Bearer private-token' });
+      return Response.json({ state: 'busy' });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      const abort = new AbortController();
+      const client = new AcpClient({ baseUrl: 'https://trinity.test', token: 'private-token' });
+      expect(await client.getBrowserPreview('session', abort.signal)).toEqual({ state: 'busy' });
+      expect(fetcher.mock.calls[0]![0]).toBe(
+        'https://trinity.test/api/sessions/session/browser-preview',
+      );
+      abort.abort();
+      expect(fetcher.mock.calls[0]![1]!.signal?.aborted).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it('creates Main chat over LAN HTTP without crypto.randomUUID', async () => {
     const requests: unknown[] = [];
     const { impl } = fakeFetch({

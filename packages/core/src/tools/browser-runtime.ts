@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
+  browserPreviewSchema,
+  type BrowserPreview,
+  type BrowserPreviewPort,
   BROWSER_LIMITS,
   browserArgumentsSchema,
   browserRuntimeRequestSchema,
@@ -113,7 +116,7 @@ export function validateBrowserDeployment(env: {
     throw new Error('BROWSER_RUNTIME settings require BROWSER_DRIVER=zendriver');
 }
 
-export class HttpBrowserRuntime implements BrowserRuntimePort {
+export class HttpBrowserRuntime implements BrowserRuntimePort, BrowserPreviewPort {
   private readonly endpoint: string;
   constructor(
     endpoint: string,
@@ -182,19 +185,57 @@ export class HttpBrowserRuntime implements BrowserRuntimePort {
       reader.releaseLock();
     }
   }
+
+  async preview(sessionId: string, signal?: AbortSignal): Promise<BrowserPreview> {
+    z.uuid().parse(sessionId);
+    let response: Response;
+    try {
+      response = await this.fetcher(new URL('/preview', this.endpoint), {
+        method: 'POST',
+        redirect: 'error',
+        headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+        signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(8000)]),
+      });
+    } catch {
+      signal?.throwIfAborted();
+      return { state: 'runtime_unavailable' };
+    }
+    if (!response.ok || !response.body) {
+      await response.body?.cancel();
+      return { state: 'runtime_unavailable' };
+    }
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > 2_800_000) throw new Error('Browser preview response overflow');
+        chunks.push(next.value);
+      }
+      return browserPreviewSchema.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    } finally {
+      await reader.cancel();
+      reader.releaseLock();
+    }
+  }
 }
 
 export interface ManagedBrowserSupervisorOptions {
   store: BrowserRuntimeStore;
   owner: string;
   authorize: (request: BrowserRuntimeRequest, signal: AbortSignal) => Promise<boolean>;
+  authorizePreview?: (sessionId: string, signal: AbortSignal) => Promise<boolean>;
   create: (request: BrowserRuntimeRequest, signal: AbortSignal) => Promise<ManagedBrowserSession>;
   maxSessions: number;
   idleMs: number;
 }
 
 /** Stateful sandbox supervisor. Workers only hold HTTP clients. */
-export class ManagedBrowserSupervisor implements BrowserRuntimePort {
+export class ManagedBrowserSupervisor implements BrowserRuntimePort, BrowserPreviewPort {
   private readonly sessions = new Map<string, ManagedBrowserSession>();
   private readonly idle = new Map<string, AbortController>();
   private readonly shutdown = new AbortController();
@@ -345,6 +386,47 @@ export class ManagedBrowserSupervisor implements BrowserRuntimePort {
         this.options.store.run(id, async () => this.destroy(id)),
       ),
     );
+  }
+  async preview(sessionId: string, signal?: AbortSignal): Promise<BrowserPreview> {
+    z.uuid().parse(sessionId);
+    const active = AbortSignal.any([
+      this.shutdown.signal,
+      AbortSignal.timeout(5000),
+      ...(signal ? [signal] : []),
+    ]);
+    try {
+      if (!(await this.options.authorizePreview?.(sessionId, active)))
+        return { state: 'unavailable' };
+      // A spectator must not queue behind a long action or keep the idle lease alive.
+      if (this.activeOperations.has(sessionId)) return { state: 'busy' };
+      return await this.options.store.run(
+        sessionId,
+        async (lockSignal) => {
+          const captureSignal = AbortSignal.any([active, lockSignal]);
+          const session = this.sessions.get(sessionId);
+          const record = await this.options.store.binding(sessionId);
+          if (
+            !session?.preview ||
+            this.stopping.has(session) ||
+            record?.status !== 'active' ||
+            record.owner !== this.options.owner ||
+            record.generation !== session.generation
+          )
+            return { state: 'unavailable' };
+          const result = browserPreviewSchema.parse(await session.preview(captureSignal));
+          captureSignal.throwIfAborted();
+          if (
+            !(await this.options.authorizePreview?.(sessionId, captureSignal)) ||
+            (result.state === 'frame' && result.generation !== session.generation)
+          )
+            return { state: 'unavailable' };
+          return result;
+        },
+        active,
+      );
+    } catch {
+      return { state: signal?.aborted || this.shutdown.signal.aborted ? 'unavailable' : 'busy' };
+    }
   }
   async close(sessionId: string): Promise<void> {
     this.activeOperations.get(sessionId)?.abort();

@@ -5,7 +5,17 @@ import {
   AssistantTasks,
   MemoryContextDisclosure,
 } from './personal-assistant';
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import {
+  createContext,
+  useContext,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+} from 'react';
 
 import type { ServerEvent, ModelUsage } from '@trinity-harness/shared';
 import {
@@ -45,6 +55,9 @@ import { MessageTimestamp } from './message-timestamp';
 import { AnswerCitationList } from './answer-citations';
 import { UsagePanel } from './usage-panel';
 import { TurnProgress } from './turn-progress';
+import { BrowserActivity } from './browser-activity';
+import { ScheduledTasks } from './scheduled-tasks';
+import { InboxIndicator } from './inbox-indicator';
 import { loadTimelineWithPrompt } from './conversation-history';
 
 import {
@@ -916,7 +929,7 @@ export default function App() {
           Load older messages
         </Button>
       )}
-      {items.length > 0 && <ChatTranscript items={items} />}
+      {items.length > 0 && <ChatTranscript items={items} sessionId={sessionId} />}
       {isMain && activities.length > 0 && (
         <div className="linked-work-cards" aria-label="Shared answers">
           {activities.slice(-8).map((entry) => (
@@ -1172,6 +1185,7 @@ export default function App() {
           >
             <span aria-hidden="true">◷</span> Scheduled
           </Button>
+          <InboxIndicator client={client} onOpen={() => setPage('scheduled')} />
         </nav>
         <span className="sider-section-label">Recent</span>
         <div className="history-scroll">
@@ -1431,33 +1445,7 @@ export default function App() {
           {page === 'memory' && <AssistantMemory client={client} sessionId={sessionId} />}
 
           {page === 'scheduled' && (
-            <section className="scheduled-page" aria-labelledby="scheduled-title">
-              <span className="eyebrow">YOUR ROUTINE, SIMPLIFIED</span>
-              <Typography.Title id="scheduled-title" level={2}>
-                Scheduled tasks
-              </Typography.Title>
-              <Typography.Paragraph type="secondary">
-                A place for the work you want to repeat.
-              </Typography.Paragraph>
-              <div className="scheduled-empty">
-                <span className="scheduled-icon" aria-hidden="true">
-                  ◷
-                </span>
-                <Typography.Title level={4}>Scheduling isn’t available yet</Typography.Title>
-                <Typography.Paragraph type="secondary">
-                  Trinity currently runs tasks when you send a message. Recurring and future runs
-                  are not supported yet.
-                </Typography.Paragraph>
-                <Button
-                  onClick={() => {
-                    setMode('work');
-                    newChat();
-                  }}
-                >
-                  Start work now
-                </Button>
-              </div>
-            </section>
+            <ScheduledTasks client={client} sessions={sessions} onOpen={switchSession} />
           )}
           {page === 'audit' && auditPanel && (
             <section className="audit-page">
@@ -1572,10 +1560,14 @@ function renderChatMessage(item: ChatItem): ReactElement {
   return <ChatMessageContent item={item} />;
 }
 
+const BrowserSessionContext = createContext<string | null>(null);
+
 const ChatTranscript = memo(function ChatTranscript({
   items,
+  sessionId = null,
 }: {
   items: ChatItem[];
+  sessionId?: string | null;
 }): ReactElement {
   const bubbleItems = useMemo(
     () =>
@@ -1587,7 +1579,11 @@ const ChatTranscript = memo(function ChatTranscript({
       })),
     [items],
   );
-  return <Bubble.List className="chat-messages" items={bubbleItems} roles={bubbleRoles} />;
+  return (
+    <BrowserSessionContext.Provider value={sessionId}>
+      <Bubble.List className="chat-messages" items={bubbleItems} roles={bubbleRoles} />
+    </BrowserSessionContext.Provider>
+  );
 });
 
 const ChatMessageContent = memo(function ChatMessageContent({
@@ -1635,6 +1631,8 @@ function normalizeMarkdownTableHeadings(markdown: string): string {
 }
 
 function AssistantContent({ item, content }: { item: ChatItem; content: string }): ReactElement {
+  const browserSessionId = useContext(BrowserSessionContext);
+  const browserTools = item.tools.filter((tool) => /^browser\(/.test(tool.title));
   return (
     <article className="assistant-response" aria-label="Trinity response">
       <div className="response-heading">
@@ -1642,6 +1640,18 @@ function AssistantContent({ item, content }: { item: ChatItem; content: string }
         <MessageTimestamp at={item.at} />
       </div>
       <TurnProgress item={item} />
+      {browserSessionId && browserTools.length > 0 && (
+        <BrowserActivity
+          client={client}
+          sessionId={browserSessionId}
+          running={
+            !item.final &&
+            !item.stopped &&
+            !item.error &&
+            browserTools.some((tool) => tool.status === 'in_progress')
+          }
+        />
+      )}
       {content.length > 0 && (
         <div className="md" style={{ marginBottom: 8 }}>
           <ReactMarkdown

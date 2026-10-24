@@ -11,6 +11,17 @@ global:
   imageRegistry: ''
   imagePullSecrets: []
 
+# Enable only after applying migrations and deploying matching server/worker images.
+controlWorker:
+  enabled: false
+  replicas: 2
+  image:
+    repository: trinity-harness/control-worker
+    tag: '0.5.0'
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: '1', memory: 512Mi }
+
 secrets:
   # Required: external datastores + auth material (mounted via envFrom secret).
   databaseUrl: '' # postgresql://user:pass@postgres.example.com:5432/trinity
@@ -20,6 +31,8 @@ secrets:
   adminPassword: '' # first-boot bootstrap admin (rotate after first login)
   anthropicApiKey: ''
   openaiApiKey: ''
+  browserRuntimeToken: '' # private Zendriver supervisor credential, min 32 characters
+  nodeRuntimeToken: '' # optional, dedicated host-management credential
 
 server:
   image:
@@ -100,6 +113,11 @@ workspace:
     size: 10Gi
 
 config:
+  executionDriver: local # firecracker requires matching server/worker/browser-runtime + provisioned guests
+  browserDriver: agent-browser # set zendriver for managed browsing; no external 9222 endpoint
+  browserRuntimeEndpoint: '' # protected HTTPS origin of the private Zendriver supervisor
+  # Experimental lifecycle endpoints only; guest tool routing remains disabled.
+  firecrackerNodes: []
   model: 'anthropic/claude-sonnet-4-20250514'
   systemPrompt: '' # Empty uses the built-in general-purpose prompt.
   defaultPermissionPolicy: 'workspace-write'

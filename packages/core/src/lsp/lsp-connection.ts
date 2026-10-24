@@ -30,12 +30,13 @@ export class LspConnection {
   constructor(private readonly proc: LongRunningProcess) {
     this.readerDone = this.readLoop();
     void this.readerDone.catch(() => {});
-    void proc.exited.then(() => {
-      const err = new Error('language server process exited');
+    const failed = (): void => {
+      const err = new Error('language server process exited or termination could not be confirmed');
       this.failed = err;
       for (const { reject } of this.pending.values()) reject(err);
       this.pending.clear();
-    });
+    };
+    void proc.exited.then(failed, failed);
   }
 
   onNotification(method: string, handler: (params: unknown) => void): void {

@@ -124,6 +124,51 @@ function fixture(
   return { runtime, store, dispose, perform, create, authorize, options };
 }
 describe('managed browser supervisor', () => {
+  it('does not allocate or renew a runtime for spectators and refuses missing preview authorization', async () => {
+    const f = fixture();
+    const id = randomUUID();
+    expect(await f.runtime.preview(id)).toEqual({ state: 'unavailable' });
+    expect(f.create).not.toHaveBeenCalled();
+    expect(f.store.records.size).toBe(0);
+    await f.runtime.dispose();
+  });
+  it('rechecks the active generation and preview owner without adding tool journal entries', async () => {
+    const store = new Journal();
+    const generation = randomUUID();
+    const authorizePreview = vi.fn(async () => true);
+    const preview = vi.fn(async () => ({ state: 'privacy_blocked' as const }));
+    const runtime = new ManagedBrowserSupervisor({
+      store,
+      owner: randomUUID(),
+      maxSessions: 1,
+      idleMs: 300_000,
+      authorize: async () => true,
+      authorizePreview,
+      create: async () => ({
+        generation,
+        execute: async (r) => success(r),
+        preview,
+        dispose: async () => {},
+      }),
+    });
+    const r = request();
+    try {
+      await runtime.execute(r);
+      expect(await runtime.preview(r.sessionId)).toEqual({ state: 'privacy_blocked' });
+      expect(store.commands.size).toBe(1);
+      authorizePreview.mockResolvedValue(false);
+      expect(await runtime.preview(r.sessionId)).toEqual({ state: 'unavailable' });
+      expect(preview).toHaveBeenCalledOnce();
+      authorizePreview.mockResolvedValue(true);
+      store.records.set(r.sessionId, {
+        ...store.records.get(r.sessionId)!,
+        generation: randomUUID(),
+      });
+      expect(await runtime.preview(r.sessionId)).toEqual({ state: 'unavailable' });
+    } finally {
+      await runtime.dispose();
+    }
+  });
   it.each(['navigate', 'web_search'] as const)(
     'requires owner access and matching active durable %s arguments; cancellation revokes dispatch',
     async (operation) => {
@@ -302,6 +347,21 @@ describe('managed browser supervisor', () => {
   });
 });
 describe('runtime HTTP client and configuration', () => {
+  it('distinguishes an unreachable supervisor from an idle browser and preserves cancellation', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const client = new HttpBrowserRuntime('http://127.0.0.1:3010', 'x'.repeat(32), fetcher);
+    const sessionId = randomUUID();
+    fetcher.mockRejectedValueOnce(new TypeError('connection refused'));
+    expect(await client.preview(sessionId)).toEqual({ state: 'runtime_unavailable' });
+    fetcher.mockResolvedValueOnce(new Response('unauthorized', { status: 401 }));
+    expect(await client.preview(sessionId)).toEqual({ state: 'runtime_unavailable' });
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ state: 'unavailable' })));
+    expect(await client.preview(sessionId)).toEqual({ state: 'unavailable' });
+    const cancelled = new AbortController();
+    cancelled.abort();
+    fetcher.mockRejectedValueOnce(cancelled.signal.reason);
+    await expect(client.preview(sessionId, cancelled.signal)).rejects.toBe(cancelled.signal.reason);
+  });
   it('validates result identity and caps streamed response bytes before parsing', async () => {
     const r = request();
     const fetcher = vi.fn(

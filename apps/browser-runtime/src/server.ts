@@ -1,9 +1,15 @@
 import { timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { browserRuntimeRequestSchema, type BrowserRuntimePort } from '@trinity-harness/contracts';
+import {
+  browserRuntimeRequestSchema,
+  browserPreviewRequestSchema,
+  browserPreviewSchema,
+  type BrowserRuntimePort,
+  type BrowserPreviewPort,
+} from '@trinity-harness/contracts';
 
 export function buildBrowserRuntimeServer(
-  runtime: BrowserRuntimePort,
+  runtime: BrowserRuntimePort & Partial<BrowserPreviewPort>,
   token: string,
 ): FastifyInstance {
   if (token.length < 32) throw new Error('BROWSER_RUNTIME_TOKEN must have at least 32 characters');
@@ -38,6 +44,28 @@ export function buildBrowserRuntimeServer(
         ? error.statusCode
         : 500;
     return reply.code(status).send({ error: 'browser runtime unavailable' });
+  });
+  app.post('/preview', async (request, reply) => {
+    const parsed = browserPreviewRequestSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid preview request' });
+    const cancelled = new AbortController();
+    const abort = (): void => {
+      if (!reply.raw.writableFinished) cancelled.abort();
+    };
+    request.raw.once('aborted', abort);
+    reply.raw.once('close', abort);
+    try {
+      return reply.header('cache-control', 'private, no-store').send(
+        browserPreviewSchema.parse(
+          (await runtime.preview?.(parsed.data.sessionId, cancelled.signal)) ?? {
+            state: 'unavailable',
+          },
+        ),
+      );
+    } finally {
+      request.raw.removeListener('aborted', abort);
+      reply.raw.removeListener('close', abort);
+    }
   });
   return app;
 }

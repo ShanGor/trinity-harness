@@ -2,7 +2,7 @@ import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
-import type { SessionMeta, SessionMetaStore } from '@trinity-harness/contracts';
+import type { SessionMeta, SessionMetaStore, SandboxPort } from '@trinity-harness/contracts';
 
 /** Allocate only server-generated session paths beneath the shared deployment disk. */
 export async function chatWorkspaceDir(
@@ -48,7 +48,15 @@ export async function saveWorkspaceAttachment(
   workspaceRoot: string,
   data: Uint8Array,
   filename = 'attachment',
+  sandbox?: SandboxPort,
 ): Promise<string> {
+  if (sandbox) {
+    if (!sandbox.writeBytes) throw new Error('Guest binary upload unavailable');
+    const name = filename.replace(/[^\p{L}\p{N}._-]/gu, '_').slice(0, 120);
+    const relative = `uploads/${randomUUID()}-${name}`;
+    await sandbox.writeBytes(relative, data);
+    return relative;
+  }
   const directory = path.join(workspaceRoot, 'uploads');
   await mkdir(directory, { recursive: true });
   const stat = await lstat(directory);

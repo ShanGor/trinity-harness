@@ -26,7 +26,11 @@
     "dev:gateway": "pnpm --filter @trinity-harness/acp-gateway run dev",
     "load:test": "node scripts/load-test.mjs",
     "dev:browser-runtime": "pnpm --filter @trinity-harness/browser-runtime run dev",
-    "start:browser-runtime": "pnpm --filter @trinity-harness/browser-runtime run start"
+    "start:browser-runtime": "pnpm --filter @trinity-harness/browser-runtime run start",
+    "dev:control": "pnpm --filter @trinity-harness/control-worker run dev",
+    "start:control": "pnpm --filter @trinity-harness/control-worker run start",
+    "start:node-agent": "pnpm --filter @trinity-harness/node-agent run start",
+    "start:guest-runtime": "pnpm --filter @trinity-harness/guest-runtime run start"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

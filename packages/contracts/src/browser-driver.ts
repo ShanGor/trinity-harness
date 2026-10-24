@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { browserArgumentsSchema, browserResultSchema, browserErrorSchema } from './browser.js';
 import type { BrowserBinding, BrowserCapture, BrowserSurface } from './browser.js';
 import type { ToolContext, ToolResult } from './tools.js';
+import type { BrowserPreview } from './browser-preview.js';
 
 const path = z.array(z.number().int().nonnegative()).max(80);
 export const browserDriverActionSchema = z.discriminatedUnion('operation', [
@@ -134,5 +135,6 @@ export interface BrowserRuntimeStore {
 export interface ManagedBrowserSession {
   generation: string;
   execute(request: BrowserRuntimeRequest, signal: AbortSignal): Promise<ToolResult>;
+  preview?(signal: AbortSignal): Promise<BrowserPreview>;
   dispose(): Promise<void>;
 }

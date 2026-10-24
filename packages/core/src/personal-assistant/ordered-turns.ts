@@ -70,6 +70,7 @@ export async function runOrderedPrompts(
                       at: event.at,
                       surfaceOp: 'append',
                       content: event.content,
+                      ...(event.trigger ? { trigger: event.trigger } : {}),
                     },
                   ],
                   { actor: event.actor },

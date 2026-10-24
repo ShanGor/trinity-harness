@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Operator-installed root-owned launcher; no model or guest supplies these paths.
+instance=${1:?instance required}
+uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+[[ "$instance" =~ ^${uuid}-${uuid}$ ]] || exit 64
+environment=${instance:0:36}
+generation=${instance:37:36}
+base=/srv/trinity-node
+manifest="$base/instances/$instance.json"
+volume="$base/volumes/$environment"
+jail="$base/jailer/firecracker/$generation/root"
+
+# Provisioning deliberately fails closed: no blank replacement for an absent user disk.
+for file in "$manifest" "$volume/data.ext4" "$volume/runtime.json" "$base/images/vmlinux" "$base/images/rootfs.ext4"; do
+  [[ -f "$file" && ! -L "$file" ]] || exit 66
+done
+[[ -c /dev/kvm && -e "/run/netns/trinity-$environment" ]] || exit 69
+[[ $(jq -r '.id' "$manifest") == "$environment" && $(jq -r '.generation' "$manifest") == "$generation" ]] || exit 65
+uid=$(jq -er '.uid | select(type == "number" and . >= 100000 and . <= 2147483647 and floor == .)' "$volume/runtime.json")
+gid=$(jq -er '.gid | select(type == "number" and . >= 100000 and . <= 2147483647 and floor == .)' "$volume/runtime.json")
+vcpus=$(jq -er '.vcpus | select(. >= 1 and . <= 32 and floor == .)' "$manifest")
+tenant=$(jq -er '.tenantId' "$manifest")
+user=$(jq -er '.userId' "$manifest")
+[[ "$tenant" =~ ^${uuid}$ && "$user" =~ ^${uuid}$ ]] || exit 65
+memory=$(jq -er '.memoryMiB | select(. >= 256 and . <= 65536 and floor == .)' "$manifest")
+mkdir -p "$jail"
+# All backing files must live on the encrypted operator-managed filesystem.
+# Hard links fail if that condition cannot be met; never copy a live user disk.
+for entry in vmlinux rootfs.ext4; do
+  [[ -e "$jail/$entry" ]] || ln "$base/images/$entry" "$jail/$entry"
+done
+[[ -e "$jail/data.ext4" ]] || ln "$volume/data.ext4" "$jail/data.ext4"
+chown "$uid:$gid" "$volume/data.ext4"
+jq -n --argjson cpu "$vcpus" --argjson memory "$memory" --arg environment "$environment" --arg generation "$generation" --arg tenant "$tenant" --arg user "$user" '{
+  "boot-source": {"kernel_image_path":"/vmlinux","boot_args":("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda ro trinity.environment="+$environment+" trinity.generation="+$generation+" trinity.tenant="+$tenant+" trinity.user="+$user)},
+  "drives": [
+    {"drive_id":"rootfs","path_on_host":"/rootfs.ext4","is_root_device":true,"is_read_only":true},
+    {"drive_id":"data","path_on_host":"/data.ext4","is_root_device":false,"is_read_only":false}
+  ],
+  "machine-config":{"vcpu_count":$cpu,"mem_size_mib":$memory,"smt":false},
+  "network-interfaces":[{"iface_id":"eth0","host_dev_name":"tap0","guest_mac":"06:00:ac:10:00:02"}],
+  "vsock":{"guest_cid":3,"uds_path":"/vsock.sock"}
+}' > "$jail/config.json"
+chown "$uid:$gid" "$jail/config.json"
+exec /usr/local/bin/jailer --id "$generation" --exec-file /usr/local/bin/firecracker \
+  --uid "$uid" --gid "$gid" --chroot-base-dir "$base/jailer" --cgroup-version 2 \
+  --netns "/run/netns/trinity-$environment" -- --config-file /config.json --api-sock /api.sock

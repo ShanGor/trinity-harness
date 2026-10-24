@@ -13,6 +13,12 @@ import {
   ScryptPasswordHasher,
   ZENDRIVER_VERSION,
   authorizeManagedBrowserCommand,
+  captureBrowserPreview,
+  RemoteSandbox,
+  FirecrackerGuestRouter,
+  EnvironmentController,
+  HttpNodeRuntime,
+  validateGuestDeployment,
 } from '@trinity-harness/core';
 import {
   createPool,
@@ -21,6 +27,7 @@ import {
   PgSessionStore,
   PgSessionMetaStore,
   PgUserStore,
+  PgEnvironmentStore,
 } from '@trinity-harness/db';
 import { buildBrowserRuntimeServer } from './server.js';
 import { loadBrowserRuntimeEnv } from './env.js';
@@ -32,6 +39,7 @@ import {
 
 async function main(): Promise<void> {
   const env = loadBrowserRuntimeEnv();
+  validateGuestDeployment({ ...env, BROWSER_DRIVER: 'zendriver' }, true);
   const pool = createPool(env.DATABASE_URL, {
     connectionTimeoutMillis: 5000,
     query_timeout: 10_000,
@@ -43,17 +51,41 @@ async function main(): Promise<void> {
   const metas = new PgSessionMetaStore(db);
   const users = new PgUserStore(db, new ScryptPasswordHasher());
   const blobs = new LocalBlobStore(path.join(env.WORKSPACE_ROOT, '.trinity', 'blobs'));
-  const probe = await new LocalSandbox(env.WORKSPACE_ROOT, { envMode: 'minimal' }).execArgv(
-    env.ZENDRIVER_BINARY,
-    ['--version'],
-    { maxOutputBytes: 1024, timeoutMs: 5000 },
-  );
-  if (
-    probe.exitCode !== 0 ||
-    probe.outputOverflow ||
-    probe.stdout.trim() !== `zendriver-mcp ${ZENDRIVER_VERSION}`
-  )
-    throw new Error('Unsupported Zendriver executable');
+  if (env.EXECUTION_DRIVER !== 'firecracker') {
+    const probe = await new LocalSandbox(env.WORKSPACE_ROOT, { envMode: 'minimal' }).execArgv(
+      env.ZENDRIVER_BINARY,
+      ['--version'],
+      { maxOutputBytes: 1024, timeoutMs: 5000 },
+    );
+    if (
+      probe.exitCode !== 0 ||
+      probe.outputOverflow ||
+      probe.stdout.trim() !== `zendriver-mcp ${ZENDRIVER_VERSION}`
+    )
+      throw new Error('Unsupported Zendriver executable');
+  }
+  const environmentStore = new PgEnvironmentStore(db, lockPool);
+  const guestRouter =
+    env.EXECUTION_DRIVER === 'firecracker'
+      ? new FirecrackerGuestRouter(
+          new EnvironmentController(
+            environmentStore,
+            env.FIRECRACKER_NODES,
+            new Map(
+              env.FIRECRACKER_NODES.map((node) => [
+                node.id,
+                new HttpNodeRuntime(node.endpoint, env.NODE_RUNTIME_TOKEN!),
+              ]),
+            ),
+          ),
+          environmentStore,
+          metas,
+          users,
+          env.FIRECRACKER_NODES,
+          env.NODE_RUNTIME_TOKEN!,
+          env.WORKSPACE_ROOT,
+        )
+      : undefined;
   const authorized = (sessionId: string, signal?: AbortSignal): Promise<boolean> =>
     isCdpSessionOwner(
       sessionId,
@@ -69,6 +101,7 @@ async function main(): Promise<void> {
     idleMs: env.BROWSER_RUNTIME_IDLE_MS,
     authorize: (request, signal) =>
       authorizeManagedBrowserCommand(request, store, authorized, signal),
+    authorizePreview: authorized,
     create: async (
       request: BrowserRuntimeRequest,
       signal: AbortSignal,
@@ -79,19 +112,23 @@ async function main(): Promise<void> {
       const relative = path.relative(path.resolve(env.WORKSPACE_ROOT), root);
       if (relative.startsWith('..') || path.isAbsolute(relative))
         throw new Error('Browser workspace outside deployment root');
-      const sandbox = new LocalSandbox(root, { envMode: 'minimal' });
-      const profile = await prepareBrowserProfile(
-        env.BROWSER_PROFILE_DIR,
-        meta.tenantId,
-        meta.userId,
-      );
-      // Chrome's own Singleton* entries survive a SIGKILL/crash; reclaim them
-      // only when the previous owner is provably gone (dead pid, no live
-      // process referencing the profile). Anything ambiguous fails closed here.
-      const locks = await reclaimStaleBrowserProfileLocks(profile.userDataDir);
-      if (locks.state === 'held')
-        throw new Error(`Browser profile is in use or requires operator recovery (${locks.reason})`);
-      const releaseProfile = await acquireBrowserProfileLease(profile.lockPath, request.sessionId);
+      const sandbox = guestRouter
+        ? new RemoteSandbox(guestRouter, request.sessionId)
+        : new LocalSandbox(root, { envMode: 'minimal' });
+      let releaseProfile: () => Promise<void> = async () => {};
+      let profile: Awaited<ReturnType<typeof prepareBrowserProfile>> | undefined;
+      if (!guestRouter) {
+        profile = await prepareBrowserProfile(env.BROWSER_PROFILE_DIR!, meta.tenantId, meta.userId);
+        // Chrome's own Singleton* entries survive a SIGKILL/crash; reclaim them
+        // only when the previous owner is provably gone (dead pid, no live
+        // process referencing the profile). Anything ambiguous fails closed here.
+        const locks = await reclaimStaleBrowserProfileLocks(profile.userDataDir);
+        if (locks.state === 'held')
+          throw new Error(
+            `Browser profile is in use or requires operator recovery (${locks.reason})`,
+          );
+        releaseProfile = await acquireBrowserProfileLease(profile.lockPath, request.sessionId);
+      }
       let connection: ZendriverMcpConnection | undefined;
       let driver: ZendriverBrowserDriver | undefined;
       let disposing: Promise<void> | undefined;
@@ -107,24 +144,27 @@ async function main(): Promise<void> {
       };
       const generation = randomUUID();
       try {
-        const process = sandbox.openProcess(
-          env.ZENDRIVER_BINARY,
-          ['--log', 'off', '--user-data-dir', profile.userDataDir],
-          {
-            processGroup: true,
-            // Explicit operator-configured egress only; the sandbox env is
-            // scrubbed, so managed Chrome sees no proxy unless configured.
-            ...(env.BROWSER_PROXY_URL
-              ? {
-                  env: {
-                    http_proxy: env.BROWSER_PROXY_URL,
-                    https_proxy: env.BROWSER_PROXY_URL,
-                    no_proxy: env.BROWSER_NO_PROXY,
-                  },
-                }
-              : {}),
-          },
-        );
+        const process =
+          sandbox instanceof RemoteSandbox
+            ? sandbox.openBrowser(signal)
+            : sandbox.openProcess(
+                env.ZENDRIVER_BINARY,
+                ['--log', 'off', '--user-data-dir', profile!.userDataDir],
+                {
+                  processGroup: true,
+                  // Explicit operator-configured egress only; the sandbox env is
+                  // scrubbed, so managed Chrome sees no proxy unless configured.
+                  ...(env.BROWSER_PROXY_URL
+                    ? {
+                        env: {
+                          http_proxy: env.BROWSER_PROXY_URL,
+                          https_proxy: env.BROWSER_PROXY_URL,
+                          no_proxy: env.BROWSER_NO_PROXY,
+                        },
+                      }
+                    : {}),
+                },
+              );
         connection = new ZendriverMcpConnection(process);
         const opener = new ZendriverBrowserDriver(
           connection,
@@ -164,6 +204,20 @@ async function main(): Promise<void> {
       });
       return {
         generation,
+        preview: (active) =>
+          captureBrowserPreview(
+            activeDriver,
+            activeDriver,
+            {
+              sessionId: request.sessionId,
+              callId: `preview-${randomUUID()}`,
+              sandbox,
+              workspaceRoot: root,
+              signal: active,
+            },
+            generation,
+            () => new Date(),
+          ),
         execute: (command, active) =>
           tool.execute(command.args, {
             sessionId: command.sessionId,

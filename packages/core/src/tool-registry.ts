@@ -98,7 +98,7 @@ export class CoreToolRegistry implements ToolRegistry {
       return await def.execute(parsed.data, {
         ...ctx,
         callId: call.id,
-        sandbox: this.sandbox,
+        sandbox: this.sandbox.withSignal?.(signal) ?? this.sandbox,
         signal,
       });
     } catch (err) {

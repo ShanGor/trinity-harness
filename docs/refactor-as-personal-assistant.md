@@ -501,7 +501,7 @@ The memory store currently implements personal namespaces and explicit active/fo
 
 Sharing initially publishes links to selected answers and user-reviewed Work briefs. Automatic transfer of a side conversation's transcript, hidden team context, and merged model instructions is not part of this implementation. Date/timezone browsing is available; its browser preference is retained locally. User-managed archive state, daily digests and richer topic aggregation remain optional follow-ups.
 
-Scheduled remains visibly unavailable, as specified for the separate scheduling delivery phase. Durable recurrence, missed-run handling and scheduled-run controls have not been implemented.
+2026-10-24 delivery update: opt-in PG once/daily schedules, missed/overlap outcomes, independent Work runs, pause/resume and a durable Updates inbox are now implemented through `apps/control-worker`; Web initially creates daily schedules. Deployments without matching enabled server/worker/control-worker continue showing unavailable. This supersedes the earlier unavailable-only Scheduled delivery status. Durable batch continuations, long-lived question/approval resumption and external notification channels remain pending. See [runtime implementation](runtime-implementation.md) for the authoritative deployment and scope boundary.
 
 ### Verification
 

@@ -16,3 +16,5 @@ export * from './skills/index.js';
 export * from './personal-assistant/memory.js';
 export * from './personal-assistant/ordered-turns.js';
 export * from './personal-assistant/recall-tool.js';
+export * from './environments/controller.js';
+export * from './environments/guest-router.js';

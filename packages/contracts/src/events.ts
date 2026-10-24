@@ -99,6 +99,7 @@ export const userMessageEventSchema = z.object({
   type: z.literal('message/user'),
   surfaceOp: z.literal('append'),
   content: z.array(contentBlockSchema),
+  trigger: scheduleTriggerSchema.optional(),
 });
 
 export const assistantMessageEventSchema = z.object({
@@ -212,6 +213,7 @@ export const queuedPromptEventSchema = z.object({
   actor: z.string().max(200),
   tenantId: z.uuid(),
   policy: permissionPolicySchema,
+  trigger: scheduleTriggerSchema.optional(),
 });
 export const discardedPromptEventSchema = z.object({
   ...baseFields,
@@ -257,3 +259,4 @@ export const sessionEventSchema = z.discriminatedUnion('type', [
 ]);
 export type SessionEvent = z.infer<typeof sessionEventSchema>;
 export type SessionEventType = SessionEvent['type'];
+import { scheduleTriggerSchema } from './scheduling.js';

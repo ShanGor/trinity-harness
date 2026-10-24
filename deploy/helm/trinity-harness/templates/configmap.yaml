@@ -1,3 +1,9 @@
+{{- if eq .Values.config.executionDriver "firecracker" }}
+{{- if ne .Values.config.browserDriver "zendriver" }}
+{{- fail "Firecracker execution requires config.browserDriver=zendriver" }}
+{{- end }}
+{{- $_ := required "Firecracker execution requires config.firecrackerNodes" .Values.config.firecrackerNodes }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,6 +12,15 @@ metadata:
     {{- include "trinity-harness.labels" . | nindent 4 }}
 data:
   HOST: "0.0.0.0"
+  EXECUTION_DRIVER: {{ .Values.config.executionDriver | quote }}
+  BROWSER_DRIVER: {{ .Values.config.browserDriver | quote }}
+  {{- if eq .Values.config.browserDriver "zendriver" }}
+  BROWSER_RUNTIME_ENDPOINT: {{ required "Zendriver requires config.browserRuntimeEndpoint" .Values.config.browserRuntimeEndpoint | quote }}
+  {{- end }}
+  SCHEDULING_ENABLED: {{ .Values.controlWorker.enabled | quote }}
+  {{- if .Values.config.firecrackerNodes }}
+  FIRECRACKER_NODES: {{ .Values.config.firecrackerNodes | toJson | quote }}
+  {{- end }}
   PORT: "3000"
   WORKSPACE_ROOT: {{ .Values.workspace.mountPath | quote }}
   MODEL: {{ .Values.config.model | quote }}

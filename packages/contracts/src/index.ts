@@ -18,7 +18,11 @@ export * from './research.js';
 export * from './citations.js';
 export * from './browser.js';
 export * from './browser-driver.js';
+export * from './browser-preview.js';
 export * from './task.js';
 export * from './execution-context.js';
 
 export * from './personal-assistant.js';
+export * from './scheduling.js';
+export * from './environments.js';
+export * from './guest.js';

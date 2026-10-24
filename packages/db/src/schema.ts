@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  boolean,
   check,
   index,
   jsonb,
@@ -40,6 +41,76 @@ export const sessionEvents = pgTable(
 
 export type SessionEventRow = typeof sessionEvents.$inferSelect;
 export type NewSessionEventRow = typeof sessionEvents.$inferInsert;
+
+export const assistantEnvironments = pgTable(
+  'assistant_environments',
+  {
+    id: uuid('id').primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    nodeId: text('node_id').notNull(),
+    generation: uuid('generation').notNull(),
+    state: text('state').notNull(),
+    vcpus: bigint('vcpus', { mode: 'number' }).notNull(),
+    memoryMiB: bigint('memory_mib', { mode: 'number' }).notNull(),
+  },
+  (t) => [uniqueIndex('assistant_environment_owner').on(t.tenantId, t.userId)],
+);
+
+export const environmentEvents = pgTable(
+  'environment_events',
+  {
+    id: uuid('id').primaryKey(),
+    environmentId: uuid('environment_id').notNull(),
+    type: text('type').notNull(),
+    snapshot: jsonb('snapshot').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index('environment_events_owner').on(t.environmentId, t.createdAt)],
+);
+
+export const assistantSchedules = pgTable(
+  'assistant_schedules',
+  {
+    id: uuid('id').primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    operationId: uuid('operation_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    definition: jsonb('definition').notNull(),
+    enabled: boolean('enabled').notNull(),
+    nextFireAt: timestamp('next_fire_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull(),
+  },
+  (t) => [
+    uniqueIndex('assistant_schedule_operation').on(t.tenantId, t.userId, t.operationId),
+    index('assistant_schedule_due').on(t.enabled, t.nextFireAt),
+  ],
+);
+
+export const scheduleOccurrences = pgTable(
+  'schedule_occurrences',
+  {
+    id: uuid('id').primaryKey(),
+    scheduleId: uuid('schedule_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    scheduledAt: timestamp('scheduled_at', { withTimezone: true, mode: 'string' }).notNull(),
+    sessionId: uuid('session_id'),
+    promptId: uuid('prompt_id'),
+    title: text('title').notNull(),
+    status: text('status').notNull(),
+    reason: text('reason').notNull(),
+    readAt: timestamp('read_at', { withTimezone: true, mode: 'string' }),
+  },
+  (t) => [
+    uniqueIndex('schedule_occurrence_unique').on(t.scheduleId, t.revision, t.scheduledAt),
+    index('schedule_inbox_owner').on(t.tenantId, t.userId, t.scheduledAt),
+  ],
+);
 
 /** Managed browser authority and at-most-once dispatch journal; evidence stays in blobs/logs. */
 export const browserRuntimes = pgTable('browser_runtimes', {

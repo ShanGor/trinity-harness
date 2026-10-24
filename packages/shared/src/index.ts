@@ -3,6 +3,20 @@ export * from './ids.js';
 export * from './protocol.js';
 export * from './usage.js';
 export * from './workspace.js';
+export { browserPreviewSchema } from '@trinity-harness/contracts';
+export type { BrowserPreview } from '@trinity-harness/contracts';
+export {
+  scheduleDefinitionSchema,
+  scheduleListSchema,
+  inboxListSchema,
+  nextScheduleInstant,
+} from '@trinity-harness/contracts';
+export type {
+  ScheduleCreate,
+  ScheduleDefinition,
+  ScheduleRecord,
+  InboxItem,
+} from '@trinity-harness/contracts';
 
 export {
   memoryCommandSchema,

@@ -1,5 +1,19 @@
 import { createRecallTool } from '@trinity-harness/core';
-import { PgSessionRuns, PgPromptDispatcher } from '@trinity-harness/db';
+import {
+  PgSessionRuns,
+  PgPromptDispatcher,
+  PgScheduleStore,
+  PgEnvironmentStore,
+} from '@trinity-harness/db';
+import {
+  EnvironmentController,
+  FirecrackerGuestRouter,
+  RemoteSandbox,
+  RemoteSkillCatalog,
+  HttpNodeRuntime,
+  captureCommittedCdpPreview,
+  agentBrowserDriver,
+} from '@trinity-harness/core';
 import { PersonalContext } from '@trinity-harness/core';
 import { PgMemoryStore, PgConversationIndex } from '@trinity-harness/db';
 import path from 'node:path';
@@ -62,7 +76,7 @@ import {
   RedisTurnQueue,
 } from '@trinity-harness/redis';
 import { parsePermissionPolicy } from '@trinity-harness/contracts';
-import type { SessionStore } from '@trinity-harness/contracts';
+import type { SessionStore, SandboxPort } from '@trinity-harness/contracts';
 import { startTelemetry } from '@trinity-harness/otel';
 
 import { loadServerEnv } from './env.js';
@@ -100,17 +114,33 @@ async function main(): Promise<void> {
   // sandbox + tool registry are built PER ROOT and cached — the sandbox's
   // path-escape check is the isolation boundary between users/teams.
   interface RootAssembly {
-    sandbox: LocalSandbox;
+    sandbox: SandboxPort;
+    lsp: LspService | null;
     registry: CoreToolRegistry;
     skills: SkillRuntime;
   }
   const assemblies = new Map<string, RootAssembly>();
-  const assemblyFor = (root: string): RootAssembly => {
-    let assembly = assemblies.get(root);
+  let guestRouter: FirecrackerGuestRouter | undefined;
+  const assemblyFor = (root: string, sessionId: string): RootAssembly => {
+    if (env.EXECUTION_DRIVER === 'firecracker' && !guestRouter)
+      throw new Error('Guest execution routing unavailable');
+    const key = guestRouter ? sessionId : root;
+    let assembly = assemblies.get(key);
     if (!assembly) {
-      const sandbox = new LocalSandbox(root, { envMode: env.SANDBOX_ENV_MODE });
+      const sandbox: SandboxPort = guestRouter
+        ? new RemoteSandbox(guestRouter, sessionId)
+        : new LocalSandbox(root, { envMode: env.SANDBOX_ENV_MODE });
+      const catalog = guestRouter ? new RemoteSkillCatalog(guestRouter, sessionId) : skillCatalog;
+      const sessionLsp =
+        guestRouter && env.LSP_ENABLED
+          ? new LspService({
+              sandbox,
+              readText: async (file) => (await sandbox.readFile(file)).content,
+              maxServers: env.LSP_MAX_SERVERS,
+            })
+          : lsp;
       const registry = new CoreToolRegistry(sandbox);
-      const skills = new SkillRuntime(skillCatalog, store, {
+      const skills = new SkillRuntime(catalog, store, {
         browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
         managedBrowser: env.BROWSER_DRIVER === 'zendriver',
       });
@@ -161,8 +191,8 @@ async function main(): Promise<void> {
         registry.register(
           createRecallTool({ memory, index: conversationIndex, metas: auth.metas, store }),
         );
-      if (lsp) {
-        for (const tool of createLspTools(lsp)) {
+      if (sessionLsp) {
+        for (const tool of createLspTools(sessionLsp)) {
           registry.register(tool);
         }
       }
@@ -171,7 +201,7 @@ async function main(): Promise<void> {
           browserAccess: env.BROWSER_CDP_ENDPOINT ? 'live' : 'saved-only',
           createLoop: ({ parentSessionId, childSessionId }) => {
             const childStore = new MemorySessionStore();
-            const childSkills = new SkillRuntime(skillCatalog, childStore, {
+            const childSkills = new SkillRuntime(catalog, childStore, {
               browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
             });
             const childTools = new CoreToolRegistry(sandbox);
@@ -202,7 +232,8 @@ async function main(): Promise<void> {
               }),
             ])
               childTools.register(tool);
-            if (lsp) for (const tool of createLspTools(lsp)) childTools.register(tool);
+            if (sessionLsp)
+              for (const tool of createLspTools(sessionLsp)) childTools.register(tool);
             return new CoreAgentLoop({
               llm,
               model: env.MODEL,
@@ -233,8 +264,8 @@ async function main(): Promise<void> {
           },
         }),
       );
-      assembly = { sandbox, registry, skills };
-      assemblies.set(root, assembly);
+      assembly = { sandbox, registry, skills, lsp: sessionLsp };
+      assemblies.set(key, assembly);
     }
     return assembly;
   };
@@ -249,6 +280,10 @@ async function main(): Promise<void> {
   const blobStore = new LocalBlobStore(path.join(env.WORKSPACE_ROOT, '.trinity', 'blobs'));
 
   const databaseUrl = process.env['DATABASE_URL'];
+  if (env.SCHEDULING_ENABLED && (!databaseUrl || !env.REDIS_URL))
+    throw new Error('Scheduling requires PostgreSQL, Redis and matching enabled workers');
+  if (env.FIRECRACKER_NODES.length && (!databaseUrl || !env.NODE_RUNTIME_TOKEN))
+    throw new Error('Firecracker node management requires PostgreSQL and NODE_RUNTIME_TOKEN');
   let store: SessionStore = new MemorySessionStore();
 
   // M4 wiring for the inline-mode Loop (distributed turns run on the
@@ -264,7 +299,10 @@ async function main(): Promise<void> {
     if (bytes === null) throw new Error(`blob not found: ${uri}`);
     return bytes;
   };
-  const m4LoopExtras = (workspaceRoot: string): ConstructorParameters<typeof CoreAgentLoop>[0] => ({
+  const m4LoopExtras = (
+    workspaceRoot: string,
+    sessionId: string,
+  ): ConstructorParameters<typeof CoreAgentLoop>[0] => ({
     llm,
     model: env.MODEL,
     pricing: env.modelPricing,
@@ -288,10 +326,10 @@ async function main(): Promise<void> {
       env.modelPricing,
     ),
     systemPrompt: env.SYSTEM_PROMPT,
-    tools: assemblyFor(workspaceRoot).registry,
+    tools: assemblyFor(workspaceRoot, sessionId).registry,
     personalContext,
     sessionMetas: auth?.metas,
-    skills: assemblyFor(workspaceRoot).skills,
+    skills: assemblyFor(workspaceRoot, sessionId).skills,
     store,
     workspaceRoot,
     spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
@@ -300,7 +338,7 @@ async function main(): Promise<void> {
     // turns carry the same assembly on the agent-worker).
     usage,
   });
-  if (env.LSP_ENABLED) {
+  if (env.LSP_ENABLED && env.EXECUTION_DRIVER !== 'firecracker') {
     lsp = new LspService({
       sandbox: globalSandbox,
       readText: async (abs) =>
@@ -310,7 +348,7 @@ async function main(): Promise<void> {
   }
 
   let createLoop: ((sessionId: string, workspaceRoot: string) => CoreAgentLoop) | undefined = (
-    _sessionId,
+    sessionId,
     workspaceRoot,
   ) => {
     context ??= new ContextManager({
@@ -324,11 +362,13 @@ async function main(): Promise<void> {
       summaryWindowTokens: env.COMPACTION_CONTEXT_TOKENS ?? env.MODEL_CONTEXT_TOKENS,
     });
     return new CoreAgentLoop({
-      ...m4LoopExtras(workspaceRoot),
+      ...m4LoopExtras(workspaceRoot, sessionId),
       context,
       // Inline mode keeps turns in-process; diagnostics injection mirrors the
       // worker assembly (docs/design.md §9).
-      augmentSystem: lsp ? makeDiagnosticsAugment(lsp, () => store) : undefined,
+      augmentSystem: assemblyFor(workspaceRoot, sessionId).lsp
+        ? makeDiagnosticsAugment(assemblyFor(workspaceRoot, sessionId).lsp!, () => store)
+        : undefined,
     });
   };
 
@@ -346,6 +386,8 @@ async function main(): Promise<void> {
   let teams: PgTeamStore | undefined;
   let runPool: ReturnType<typeof createPool> | undefined;
   let sessionRuns: PgSessionRuns | undefined;
+  let schedules: PgScheduleStore | undefined;
+  let environments: EnvironmentController | undefined;
   let promptDispatcher: PgPromptDispatcher | undefined;
   let memory: PgMemoryStore | undefined;
   let conversationIndex: PgConversationIndex | undefined;
@@ -356,6 +398,22 @@ async function main(): Promise<void> {
     const db = createDb(pool);
     runPool = createPool(databaseUrl);
     sessionRuns = new PgSessionRuns(runPool);
+    if (env.SCHEDULING_ENABLED && env.REDIS_URL) schedules = new PgScheduleStore(db);
+    if (env.FIRECRACKER_NODES.length) {
+      if (!env.NODE_RUNTIME_TOKEN)
+        throw new Error('NODE_RUNTIME_TOKEN required for Firecracker hosts');
+      const runtimes = new Map(
+        env.FIRECRACKER_NODES.map((node) => [
+          node.id,
+          new HttpNodeRuntime(node.endpoint, env.NODE_RUNTIME_TOKEN!),
+        ]),
+      );
+      environments = new EnvironmentController(
+        new PgEnvironmentStore(db, runPool),
+        env.FIRECRACKER_NODES,
+        runtimes,
+      );
+    }
     store = new PgSessionStore(db);
     // M5: token metering read side (docs/design.md §17).
     usage = new PgUsageStore(db);
@@ -387,6 +445,18 @@ async function main(): Promise<void> {
     const hasher = new ScryptPasswordHasher();
     const users = new PgUserStore(db, hasher);
     const metas = new PgSessionMetaStore(db);
+    if (env.EXECUTION_DRIVER === 'firecracker') {
+      if (!environments) throw new Error('Environment controller unavailable');
+      guestRouter = new FirecrackerGuestRouter(
+        environments,
+        new PgEnvironmentStore(db, runPool),
+        metas,
+        users,
+        env.FIRECRACKER_NODES,
+        env.NODE_RUNTIME_TOKEN!,
+        env.WORKSPACE_ROOT,
+      );
+    }
     memory = new PgMemoryStore(db);
     conversationIndex = new PgConversationIndex(db);
     personalContext = new PersonalContext(memory, conversationIndex, store);
@@ -442,6 +512,50 @@ async function main(): Promise<void> {
       turns: turnCancel ? { cancel: (sid) => turnCancel!.cancel(sid) } : undefined,
       defaultPolicy,
       blobs: blobStore,
+      workspaceSandbox: guestRouter
+        ? (sessionId, root) => assemblyFor(root, sessionId).sandbox
+        : undefined,
+      browserPreview:
+        browserRuntime ??
+        (env.BROWSER_CDP_ENDPOINT && auth
+          ? {
+              preview: async (sessionId, signal) => {
+                const meta = await auth.metas.get(sessionId);
+                if (!meta || meta.closedAt || !meta.workspaceUri) return { state: 'unavailable' };
+                const sandbox = new LocalSandbox(meta.workspaceUri, {
+                  envMode: env.SANDBOX_ENV_MODE,
+                });
+                const access = new TrustedCdpBrowserAccess({
+                  endpoint: env.BROWSER_CDP_ENDPOINT!,
+                  sandbox,
+                  store,
+                  authorizeSession: (id, active) =>
+                    isCdpSessionOwner(
+                      id,
+                      auth!.metas,
+                      auth!.users,
+                      { id: env.BROWSER_CDP_OWNER_ID, email: env.ADMIN_EMAIL },
+                      active,
+                    ),
+                });
+                return captureCommittedCdpPreview(
+                  store,
+                  access,
+                  agentBrowserDriver,
+                  {
+                    sessionId,
+                    callId: 'user-preview',
+                    sandbox,
+                    workspaceRoot: meta.workspaceUri,
+                    signal,
+                  },
+                  () => new Date(),
+                );
+              },
+            }
+          : undefined),
+      schedules,
+      environments,
       usage,
       quotaAdmin: usage,
     },
@@ -458,6 +572,11 @@ async function main(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     await app.close();
     await promptDispatcher?.dispose();
+    await Promise.all(
+      [...new Set([lsp, ...[...assemblies.values()].map((assembly) => assembly.lsp)])].map(
+        (service) => service?.dispose(),
+      ),
+    );
     await runPool?.end();
     await telemetry?.shutdown();
     process.exit(0);

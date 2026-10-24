@@ -50,3 +50,21 @@ it('bounds binary reads before allocation and refuses symlink captures', async (
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it('writes binary uploads within the workspace and rejects symlink directories and escaping paths', async () => {
+  const { readFile, symlink } = await import('node:fs/promises');
+  const root = await mkdtemp(path.join(tmpdir(), 'trinity-binary-write-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'trinity-binary-outside-'));
+  try {
+    const sandbox = new LocalSandbox(root);
+    const bytes = new Uint8Array([0, 255, 10]);
+    await sandbox.writeBytes('uploads/file.bin', bytes);
+    expect(await readFile(path.join(root, 'uploads/file.bin'))).toEqual(Buffer.from(bytes));
+    await symlink(outside, path.join(root, 'linked'));
+    await expect(sandbox.writeBytes('linked/file.bin', bytes)).rejects.toThrow('Unsafe');
+    await expect(sandbox.writeBytes('../escape.bin', bytes)).rejects.toThrow('escapes');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});

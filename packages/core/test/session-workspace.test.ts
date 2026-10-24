@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, symlink } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { SessionMeta, SessionMetaStore } from '@trinity-harness/contracts';
+import type { SessionMeta, SessionMetaStore, SandboxPort } from '@trinity-harness/contracts';
 import { chatWorkspaceDir, saveWorkspaceAttachment, sessionWorkspaceRoot } from '../src/index.js';
 import { toModelMessages } from '../src/loop/to-model-messages.js';
 
@@ -106,4 +106,17 @@ it('copies uploads safely and replays their exact file reference without loading
     'Invalid uploads',
   );
   expect(await readdir(outside)).toEqual([]);
+});
+
+it('writes VM uploads through the supplied sandbox without creating a local copy', async () => {
+  const directory = await root();
+  const writeBytes = vi.fn(async () => {});
+  const sandbox = { writeBytes } as unknown as SandboxPort;
+  const bytes = new Uint8Array([0, 255, 1]);
+  const relative = await saveWorkspaceAttachment(directory, bytes, '../photo.png', sandbox);
+  expect(writeBytes).toHaveBeenCalledWith(relative, bytes);
+  expect(await readdir(directory)).toEqual([]);
+  await expect(
+    saveWorkspaceAttachment(directory, bytes, 'photo.png', {} as SandboxPort),
+  ).rejects.toThrow('unavailable');
 });

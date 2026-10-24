@@ -1,0 +1,25 @@
+[Unit]
+DefaultDependencies=no
+Description=Trinity guest execution supervisor
+RequiresMountsFor=/workspace /var/lib/trinity/browser
+After=local-fs.target
+
+[Service]
+Type=simple
+User=trinity
+Group=trinity
+RuntimeDirectory=trinity-guest
+RuntimeDirectoryMode=0700
+WorkingDirectory=/opt/trinity
+Environment=WORKSPACE_ROOT=/workspace
+Environment=ZENDRIVER_BINARY=/usr/local/bin/zendriver-mcp
+Environment=BROWSER_PROFILE_DIR=/var/lib/trinity/browser
+ExecStart=/usr/bin/node /opt/trinity/apps/guest-runtime/node_modules/tsx/dist/cli.mjs /opt/trinity/apps/guest-runtime/src/main.ts
+KillMode=control-group
+Restart=on-failure
+TimeoutStopSec=15
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

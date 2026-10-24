@@ -11,6 +11,7 @@ import {
   createBrowserTool,
   ZendriverMcpConnection,
   ZendriverBrowserDriver,
+  captureBrowserPreview,
 } from '../src/index.js';
 import {
   browserResultSchema,
@@ -28,6 +29,7 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
     let context: ToolContext;
     let binding: BrowserBinding;
     let url: string;
+    const generation = randomUUID();
     const sessionId = randomUUID();
     const server = createServer((_request, response) => {
       response.setHeader('content-type', 'text/html; charset=utf-8');
@@ -43,12 +45,16 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
       url = `http://127.0.0.1:${address.port}/`;
       const sandbox = new LocalSandbox(root);
       connection = new ZendriverMcpConnection(
-        sandbox.openProcess(process.env['ZENDRIVER_BINARY'] ?? 'zendriver-mcp', ['--log', 'off'], {
-          processGroup: true,
-          env: { TMPDIR: root },
-        }),
+        sandbox.openProcess(
+          process.env['ZENDRIVER_BINARY'] ?? 'zendriver-mcp',
+          ['--log', 'off', '--user-data-dir', path.join(root, 'profile')],
+          {
+            processGroup: true,
+            env: { TMPDIR: root },
+          },
+        ),
       );
-      driver = new ZendriverBrowserDriver(connection, sessionId, randomUUID(), async () => true);
+      driver = new ZendriverBrowserDriver(connection, sessionId, generation, async () => true);
       context = {
         sandbox,
         workspaceRoot: root,
@@ -66,6 +72,31 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
       await connection?.dispose();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       if (root) await rm(root, { recursive: true, force: true });
+    });
+    it('captures user-facing previews with Zendriver and suppresses sensitive pages', async () => {
+      const preview = () =>
+        captureBrowserPreview(
+          driver,
+          driver,
+          context,
+          generation,
+          () => new Date('2026-10-24T00:00:00Z'),
+        );
+      const frame = await preview();
+      expect(frame).toMatchObject({ state: 'frame', generation, securityMode: 'trusted-managed' });
+      if (frame.state !== 'frame') throw new Error('Zendriver preview did not return pixels');
+      expect(Buffer.from(frame.png, 'base64').subarray(1, 4).toString()).toBe('PNG');
+      await connection.call(
+        'browser_evaluate',
+        { expression: 'document.querySelector("input").type = "password"' },
+        context.signal,
+      );
+      expect(await preview()).toEqual({ state: 'privacy_blocked' });
+      await connection.call(
+        'browser_evaluate',
+        { expression: 'document.querySelector("input").type = "text"' },
+        context.signal,
+      );
     });
     it('preserves exact Unicode text, replaces input, dispatches native click, and returns bounded PNG', async () => {
       const capture = await driver.capture(binding, 'article', undefined, context);

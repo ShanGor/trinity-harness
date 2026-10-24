@@ -62,12 +62,15 @@ export interface OpenProcessOptions {
 }
 
 export interface SandboxPort {
+  /** Bind one tool invocation cancellation to every remote I/O operation. */
+  withSignal?(signal?: AbortSignal): SandboxPort;
   exec(command: string, opts?: ExecOptions): Promise<ExecResult>;
   /** No shell. Missing support must fail closed for bounded browser capture. */
   execArgv?(command: string, args: string[], opts: ArgvExecOptions): Promise<BoundedExecResult>;
   readFile(path: string, opts?: { maxBytes?: number }): Promise<ReadFileResult>;
   /** Bounded binary capture transfer; implementations reject symlinks and oversize files. */
   readBytes?(path: string, maxBytes: number): Promise<Uint8Array>;
+  writeBytes?(path: string, content: Uint8Array): Promise<void>;
   removeFile?(path: string): Promise<void>;
   writeFile(path: string, content: string): Promise<void>;
   /**
