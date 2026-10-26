@@ -288,6 +288,129 @@ function keyboardInput(): HTMLTextAreaElement {
 function inputs(f: Awaited<ReturnType<typeof mount>>) {
   return f.interactBrowser.mock.calls.map(([r]) => r).filter((r) => r.operation === 'input');
 }
+function pointerImage() {
+  const img = document.querySelector<HTMLImageElement>('.browser-preview-image')!;
+  let rect = new DOMRect(10, 20, 400, 200);
+  let captured: number | undefined;
+  img.getBoundingClientRect = () => rect;
+  img.setPointerCapture = vi.fn((id: number) => {
+    captured = id;
+  });
+  img.hasPointerCapture = (id: number) => captured === id;
+  img.releasePointerCapture = vi.fn(() => {
+    captured = undefined;
+  });
+  const dispatch = (type: string, x = 110, y = 70, pointerId = 1, button = 0): void => {
+    const event = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+      button,
+    });
+    Object.defineProperty(event, 'pointerId', { value: pointerId });
+    img.dispatchEvent(event);
+  };
+  return {
+    img,
+    dispatch,
+    resize: () => {
+      rect = new DOMRect(10, 20, 200, 100);
+    },
+  };
+}
+it('captures a drag across polling intervals and sends one action bound to the starting frame', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const takeIndex = f.interactBrowser.mock.calls.findIndex(([r]) => r.operation === 'take');
+    const initial = await f.interactBrowser.mock.results[takeIndex]!.value;
+    const p = pointerImage();
+    await act(async () => p.dispatch('pointerdown'));
+    expect(p.img.setPointerCapture).toHaveBeenCalledWith(1);
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(f.interactBrowser.mock.calls.filter(([r]) => r.operation === 'frame')).toHaveLength(0);
+    expect(f.interactBrowser.mock.calls.some(([r]) => r.operation === 'heartbeat')).toBe(true);
+    // Another pointer cannot complete or replace the captured gesture.
+    await act(async () => {
+      p.dispatch('pointerdown', 210, 120, 2);
+      p.dispatch('pointerup', 210, 120, 2);
+    });
+    expect(inputs(f)).toHaveLength(0);
+    await act(async () => p.dispatch('pointerup', 310, 170));
+    expect(p.img.releasePointerCapture).toHaveBeenCalledWith(1);
+    expect(inputs(f)).toHaveLength(1);
+    expect(inputs(f)[0]).toMatchObject({
+      frameId: initial.frame!.frameId,
+      generation: initial.frame!.generation,
+      epoch: initial.frame!.epoch,
+      capture: true,
+      action: { type: 'drag', from: { x: 200, y: 100 }, to: { x: 600, y: 300 } },
+    });
+    expect(document.activeElement).toBe(keyboardInput());
+  } finally {
+    await f.close();
+  }
+});
+it('keeps an in-flight screenshot from replacing the frame during a drag', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const takeIndex = f.interactBrowser.mock.calls.findIndex(([r]) => r.operation === 'take');
+    const initial = await f.interactBrowser.mock.results[takeIndex]!.value;
+    const p = pointerImage();
+    const src = p.img.src;
+    let complete!: () => void;
+    f.interactBrowser.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        complete = resolve;
+      });
+      return {
+        state: initial.state,
+        frame: { ...initial.frame!, frameId: randomUUID(), png: 'bmV3', width: 1600 },
+      };
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    await act(async () => p.dispatch('pointerdown'));
+    await act(async () => complete());
+    expect(p.img.src).toBe(src);
+    expect(p.img.width).toBe(800);
+    await act(async () => p.dispatch('pointerup', 310, 170));
+    expect(inputs(f)[0]).toMatchObject({
+      frameId: initial.frame!.frameId,
+      action: { type: 'drag', from: { x: 200, y: 100 }, to: { x: 600, y: 300 } },
+    });
+  } finally {
+    await f.close();
+  }
+});
+it.each(['pointercancel', 'lostpointercapture', 'resize', 'outside', 'pause', 'right button'])(
+  'discards a drag after %s without sending an effect',
+  async (reason) => {
+    fakeClock();
+    const f = await mount();
+    try {
+      await act(async () => f.button('Start browser').click());
+      const p = pointerImage();
+      const button = reason === 'right button' ? 2 : 0;
+      await act(async () => p.dispatch('pointerdown', 110, 70, 1, button));
+      await act(async () => {
+        if (reason === 'resize') p.resize();
+        else if (reason === 'pause') f.button('Pause').click();
+        else if (reason === 'pointercancel' || reason === 'lostpointercapture') p.dispatch(reason);
+      });
+      await act(async () =>
+        p.dispatch('pointerup', reason === 'outside' ? 500 : 310, 170, 1, button),
+      );
+      expect(inputs(f)).toHaveLength(0);
+      expect(p.img.releasePointerCapture).toHaveBeenCalledWith(1);
+    } finally {
+      await f.close();
+    }
+  },
+);
 it('batches adjacent text and preserves text, Enter and later text ordering without capture responses', async () => {
   fakeClock();
   const f = await mount();

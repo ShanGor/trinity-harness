@@ -70,7 +70,13 @@ chroot "$rootfs" /usr/bin/env DEBIAN_FRONTEND=noninteractive \
   dbus-user-session systemd-resolved libstdc++6 libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 \
   libcups2t64 libdbus-1-3 libdrm2 libgbm1 libgtk-3-0t64 libnspr4 libnss3 \
   libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 \
-  libxfixes3 libxkbcommon0 libxrandr2 fonts-liberation udev
+  libxfixes3 libxkbcommon0 libxrandr2 fontconfig fonts-liberation fonts-noto-cjk udev
+chroot "$rootfs" fc-cache --force
+for codepoint in 4e2d 570b 3042 ac00; do
+  [[ -n "$(chroot "$rootfs" fc-list --format='%{file}' ":charset=$codepoint")" ]] || {
+    echo "Guest font coverage missing for U+$codepoint." >&2; exit 1;
+  }
+done
 chroot "$rootfs" dpkg --audit > "$base/package-audit.log"
 if [[ -s "$base/package-audit.log" ]]; then
   cat "$base/package-audit.log" >&2

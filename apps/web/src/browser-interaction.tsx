@@ -101,10 +101,22 @@ export function InteractiveBrowserView({
   const pointer = useRef<{
     x: number;
     y: number;
+    pointerId: number;
+    button: number;
+    width: number;
+    height: number;
+    rect: DOMRect;
     frameId: string;
     generation: string;
     epoch: number;
   } | null>(null);
+  const cancelPointer = useCallback((): void => {
+    const active = pointer.current;
+    pointer.current = null;
+    if (active && image.current?.hasPointerCapture?.(active.pointerId))
+      image.current.releasePointerCapture(active.pointerId);
+    wake.current.dispatchEvent(new Event('change'));
+  }, []);
   const owns = state.mode === 'human' && state.controllerId === viewId;
   const enqueue = useCallback(
     (item: Queued): boolean => {
@@ -158,6 +170,8 @@ export function InteractiveBrowserView({
         old.generation !== result.state.generation ||
         old.controllerId !== result.state.controllerId
       ) {
+        cancelPointer();
+        lastClick.current = null;
         queue.current = [];
         setInsertingText(false);
         keyboardId.current = undefined;
@@ -166,6 +180,7 @@ export function InteractiveBrowserView({
         picture.current = null;
         setFrame(null);
       }
+      if (result.state.mode !== 'human') cancelPointer();
       if (result.keyboardId) keyboardId.current = result.keyboardId;
       if (result.input && !result.keyboardId) {
         keyboardId.current = undefined;
@@ -175,7 +190,7 @@ export function InteractiveBrowserView({
           setInsertingText(false);
         }
       }
-      if (result.frame) {
+      if (result.frame && !pointer.current) {
         picture.current = result.frame;
         setFrame(result.frame);
       } else if (
@@ -266,11 +281,20 @@ export function InteractiveBrowserView({
                 : {}),
             };
           } else
-            request = {
-              sessionId,
-              viewId,
-              operation: initialized && control.available ? 'frame' : 'state',
-            };
+            request =
+              pointer.current && control.generation
+                ? {
+                    sessionId,
+                    viewId,
+                    operation: 'heartbeat',
+                    generation: control.generation,
+                    epoch: control.epoch,
+                  }
+                : {
+                    sessionId,
+                    viewId,
+                    operation: initialized && control.available ? 'frame' : 'state',
+                  };
           if (item) setPending(true);
           const result = await client.interactBrowser(request, controller.signal);
           if (controller.signal.aborted) break;
@@ -284,6 +308,7 @@ export function InteractiveBrowserView({
             return;
           }
           initialized = false;
+          cancelPointer();
           queue.current = [];
           setInsertingText(false);
           keyboardId.current = undefined;
@@ -311,12 +336,13 @@ export function InteractiveBrowserView({
           await wait(
             controller.signal,
             wake.current,
-            retryDelay || (current.current.mode === 'human' ? 250 : 1000),
+            retryDelay || (current.current.mode === 'human' && !pointer.current ? 250 : 1000),
           );
       }
     };
     const visible = (): void => {
       if (document.visibilityState === 'hidden') {
+        cancelPointer();
         queue.current = [];
         if (current.current.mode === 'human' && current.current.controllerId === viewId)
           enqueue({ operation: 'pause' });
@@ -326,10 +352,11 @@ export function InteractiveBrowserView({
     void watch();
     return () => {
       controller.abort();
+      cancelPointer();
       queue.current = [];
       document.removeEventListener('visibilitychange', visible);
     };
-  }, [client, sessionId, viewId, onUnsupported, enqueue]);
+  }, [client, sessionId, viewId, onUnsupported, enqueue, cancelPointer]);
   useEffect(() => {
     const node = viewport.current;
     const wheel = (event: WheelEvent): void => {
@@ -437,39 +464,52 @@ export function InteractiveBrowserView({
               if (owns) event.preventDefault();
             }}
             onPointerDown={(event) => {
-              if (!owns || !picture.current) return;
+              if (!owns || !picture.current || pointer.current || event.isPrimary === false) return;
               event.preventDefault();
               keyboard.current?.focus({ preventScroll: true });
-              const point = mapBrowserPoint(
-                event.currentTarget.getBoundingClientRect(),
-                picture.current,
-                event.clientX,
-                event.clientY,
-              );
-              if (point)
+              const rect = event.currentTarget.getBoundingClientRect();
+              const point = mapBrowserPoint(rect, picture.current, event.clientX, event.clientY);
+              if (point) {
+                event.currentTarget.setPointerCapture?.(event.pointerId);
                 pointer.current = {
                   ...point,
+                  pointerId: event.pointerId,
+                  button: event.button,
+                  width: picture.current.width,
+                  height: picture.current.height,
+                  rect,
                   frameId: picture.current.frameId,
                   generation: picture.current.generation,
                   epoch: picture.current.epoch,
                 };
+                wake.current.dispatchEvent(new Event('change'));
+              }
             }}
-            onPointerCancel={() => {
-              pointer.current = null;
+            onPointerCancel={(event) => {
+              if (pointer.current?.pointerId === event.pointerId) cancelPointer();
+            }}
+            onLostPointerCapture={(event) => {
+              if (pointer.current?.pointerId === event.pointerId) cancelPointer();
             }}
             onPointerUp={(event) => {
               const from = pointer.current;
-              pointer.current = null;
-              if (!owns || !from || !picture.current) return;
-              const point = mapBrowserPoint(
-                event.currentTarget.getBoundingClientRect(),
-                picture.current,
-                event.clientX,
-                event.clientY,
-              );
+              if (!from || from.pointerId !== event.pointerId || from.button !== event.button)
+                return;
+              cancelPointer();
+              if (!owns || !picture.current) return;
+              const rect = event.currentTarget.getBoundingClientRect();
+              if (
+                rect.left !== from.rect.left ||
+                rect.top !== from.rect.top ||
+                rect.width !== from.rect.width ||
+                rect.height !== from.rect.height
+              )
+                return;
+              const point = mapBrowserPoint(rect, from, event.clientX, event.clientY);
               if (!point) return;
               const previous = lastClick.current;
               const isDrag = Math.hypot(point.x - from.x, point.y - from.y) > 4;
+              if (isDrag && from.button !== 0) return;
               const double =
                 !isDrag &&
                 previous &&

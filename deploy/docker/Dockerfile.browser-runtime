@@ -22,10 +22,11 @@ ARG CHROME_DEB_URL
 ARG CHROME_DEB_SHA256
 ARG CHROME_VERSION=155.0.8059.84
 RUN test -n "$CHROME_DEB_URL" && test -n "$CHROME_DEB_SHA256" \
-    && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl fontconfig fonts-noto-cjk \
     && curl --fail --location --proto '=https' "$CHROME_DEB_URL" -o /tmp/chrome.deb \
     && printf '%s  /tmp/chrome.deb\n' "$CHROME_DEB_SHA256" | sha256sum --check \
     && apt-get install -y --no-install-recommends /tmp/chrome.deb \
+    && fc-cache --force \
     && test "$(google-chrome --product-version)" = "$CHROME_VERSION" \
     && rm -f /tmp/chrome.deb && rm -rf /var/lib/apt/lists/*
 WORKDIR /repo

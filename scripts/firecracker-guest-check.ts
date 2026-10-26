@@ -73,6 +73,16 @@ console.log(`Guest ${phase}: typed missing-file errors and subsequent healthy re
 const identity = await remote.execArgv('/usr/bin/id', ['-u'], { signal, maxOutputBytes: 1024 });
 assert.equal(identity.exitCode, 0);
 assert.equal(identity.stdout.trim(), '1000');
+for (const codepoint of ['4e2d', '570b', '3042', 'ac00']) {
+  const fonts = await remote.execArgv(
+    '/usr/bin/fc-list',
+    ['--format=%{file}\\n', `:charset=${codepoint}`],
+    { signal, maxOutputBytes: 4096 },
+  );
+  assert.equal(fonts.exitCode, 0, 'Guest fontconfig is required; rebuild the guest image.');
+  assert(fonts.stdout.trim(), `Guest has no font for U+${codepoint}; rebuild with CJK fonts.`);
+}
+console.log(`Guest ${phase}: Chinese, Japanese and Korean font coverage passed.`);
 const secrets = await remote.execArgv(
   '/usr/bin/node',
   [
@@ -156,7 +166,7 @@ const fixture = remote.openProcess('/usr/bin/node', [
   `
   require('node:http').createServer((_request, response) => {
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
-    response.end('<main><h1>Trinity Firecracker Zendriver</h1><p>Real guest browser — 中文</p></main>');
+    response.end('<main><h1>Trinity Firecracker Zendriver</h1><p>Real guest browser — <span lang="zh-CN">中文</span> <span lang="zh-TW">繁體中文</span> <span lang="ja">日本語 あいう</span> <span lang="ko">한국어</span></p></main>');
   }).listen(8765, '127.0.0.1', () => console.log('FIXTURE_READY'));
 `,
 ]);
