@@ -34,6 +34,9 @@ data:
   MODEL_CONTEXT_TOKENS: {{ .Values.config.modelContextTokens | quote }}
   MODEL_OUTPUT_TOKENS: {{ .Values.config.modelOutputTokens | quote }}
   COMPACTION_CONTEXT_TOKENS: {{ .Values.config.compactionContextTokens | quote }}
+  {{- if ne .Values.config.taskMaxToolCalls nil }}
+  TASK_MAX_TOOL_CALLS: {{ .Values.config.taskMaxToolCalls | quote }}
+  {{- end }}
   {{- if ne .Values.config.taskMaxRequests nil }}
   TASK_MAX_REQUESTS: {{ .Values.config.taskMaxRequests | quote }}
   {{- end }}

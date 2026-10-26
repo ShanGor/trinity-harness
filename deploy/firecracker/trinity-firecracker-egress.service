@@ -1,0 +1,24 @@
+[Unit]
+Description=Trinity Firecracker host egress bridge and NAT
+Wants=network-online.target
+After=network-online.target docker.service snap.docker.dockerd.service
+Before=trinity-firecracker-egress-dns.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/trinity-firecracker-egress up
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+ProtectHome=yes
+ProtectKernelTunables=no
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

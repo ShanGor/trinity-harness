@@ -47,7 +47,29 @@ const rpc: GuestRequestPort = {
 const remote = new RemoteSandbox(rpc, sessionId);
 const marker = 'Trinity guest persistence verified — 中文';
 if (phase === 'write') await remote.writeFile('persistence.txt', marker);
+for (const kind of ['read', 'readBytes'] as const) {
+  const missing = await rpc.call(
+    sessionId,
+    {
+      kind,
+      path: `missing-${randomUUID()}.txt`,
+      maxBytes: 100,
+    },
+    signal,
+  );
+  assert.deepEqual(
+    missing,
+    {
+      kind: 'operationError',
+      operation: kind,
+      code: 'FILE_NOT_FOUND',
+      effect: 'none',
+    },
+    'Guest image must support typed file errors; rebuild the guest payload and image.',
+  );
+}
 assert.equal((await remote.readFile('persistence.txt')).content, marker);
+console.log(`Guest ${phase}: typed missing-file errors and subsequent healthy read passed.`);
 const identity = await remote.execArgv('/usr/bin/id', ['-u'], { signal, maxOutputBytes: 1024 });
 assert.equal(identity.exitCode, 0);
 assert.equal(identity.stdout.trim(), '1000');
@@ -80,6 +102,28 @@ except OSError:
   assert.equal(egress.exitCode, 0);
   assert.equal(egress.stdout.trim(), 'EGRESS_BLOCKED');
   console.log('Guest external TCP egress denied.');
+}
+const egressFlag = flags.indexOf('--check-network-egress');
+if (egressFlag !== -1) {
+  const host = flags[egressFlag + 1];
+  const port = flags[egressFlag + 2];
+  assert(host && port && /^\d{1,5}$/.test(port));
+  const egress = await remote.execArgv(
+    '/usr/bin/python3',
+    [
+      '-c',
+      `import socket,sys
+connection=socket.create_connection((sys.argv[1],int(sys.argv[2])),timeout=10)
+connection.close()
+print('EGRESS_CONNECTED')`,
+      host,
+      port,
+    ],
+    { signal, maxOutputBytes: 1024 },
+  );
+  assert.equal(egress.exitCode, 0, egress.stderr || egress.stdout);
+  assert.equal(egress.stdout.trim(), 'EGRESS_CONNECTED');
+  console.log(`Guest DNS/TCP egress to ${host}:${port} passed.`);
 }
 const skills = await rpc.call(sessionId, { kind: 'skillsList' }, signal);
 assert.equal(skills.kind, 'skills');

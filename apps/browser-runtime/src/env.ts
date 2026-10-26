@@ -26,13 +26,8 @@ export const browserRuntimeEnvSchema = z
       .string()
       .regex(/^\d+\.\d+\.\d+\.\d+$/)
       .default('155.0.8059.84'),
-    /**
-     * Operator-configured HTTP(S) proxy for the managed Chrome. The sandbox
-     * environment is scrubbed by default, so without this Chrome connects
-     * directly; destinations unreachable from the host then hang until the
-     * per-command deadline. Never logged or exposed to the model.
-     */
-    BROWSER_PROXY_URL: z
+    /** Host sandbox egress selection; also used by locally launched managed Chrome. */
+    SANDBOX_PROXY_URL: z
       .url()
       .refine((value) => {
         try {

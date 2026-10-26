@@ -5,6 +5,80 @@ import {
   type SessionEvent,
 } from '@trinity-harness/contracts';
 import { browserCommand } from '../tools/research.js';
+import { createHash } from 'node:crypto';
+import { recordedEffect } from './task-verification.js';
+
+function fingerprint(value: unknown): string {
+  const canonical = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(canonical);
+    if (item && typeof item === 'object')
+      return Object.fromEntries(
+        Object.entries(item)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([key, value]) => [key, canonical(value)]),
+      );
+    return item;
+  };
+  return createHash('sha256')
+    .update(JSON.stringify(canonical(value)) ?? 'undefined')
+    .digest('hex');
+}
+
+/** Pure replay projection; hashes and counts never include raw arguments in advice. */
+function actionGuidance(events: readonly SessionEvent[]): string[] {
+  const calls = new Map<string, Extract<SessionEvent, { type: 'tool/call' }>>();
+  const failures = new Map<string, { key: string; failed: boolean }[]>();
+  const reads = new Map<string, { result: string; count: number; scope: string; name: string }>();
+  for (const event of events) {
+    if (event.type === 'message/user' || event.type === 'turn/end') break;
+    if (event.type === 'tool/call') calls.set(event.callId, event);
+    if (event.type !== 'tool/result') continue;
+    const call = calls.get(event.callId);
+    if (!call || ['task', 'skill', 'research', 'recall'].includes(call.name)) continue;
+    if (
+      call.name === 'bash' &&
+      browserCommand((call.args as { command?: unknown } | null)?.command)
+    )
+      continue;
+    const effect = recordedEffect(call, event);
+    if (effect.kind !== 'read') {
+      for (const [key, read] of reads)
+        if (effect.scope === 'unknown' || effect.scope === read.scope) reads.delete(key);
+    }
+    const key = fingerprint({ name: call.name, args: call.args });
+    const recent = failures.get(call.name) ?? [];
+    const recovered = event.isError ? recent : recent.filter((item) => item.key !== key);
+    recovered.push({ key, failed: event.isError });
+    failures.set(call.name, recovered.slice(-6));
+    if (event.isError) continue;
+    if (effect.kind !== 'read' || effect.scope === 'control' || call.name === 'browser') continue;
+    const result = fingerprint(event.value);
+    const previous = reads.get(key);
+    reads.set(key, {
+      result,
+      count: previous?.result === result ? previous.count + 1 : 1,
+      scope: effect.scope,
+      name: call.name,
+    });
+  }
+  const advice: string[] = [];
+  const failed = [...failures]
+    .filter(([, recent]) => recent.filter((item) => item.failed).length >= 2)
+    .map(([name]) => name)
+    .sort();
+  if (failed.length)
+    advice.push(
+      `Repeated tool failures: ${failed.slice(0, 8).join(', ')}. At least two of the last six recorded calls to each listed tool failed without a subsequent success for those same arguments. Identify the specific failure and remaining user requirement before more probes. Unrelated successful calls do not prove recovery. Reusing different arguments or another tool does not by itself resolve the cause. Do not automatically repeat an unknown effect; reobserve safely first. If a different approach already resolved the issue, use that evidence and continue. Otherwise use a justified recovery, a supported qualified answer, or a focused clarification. These observations do not prove the task is blocked or complete.`,
+    );
+  const redundant = [
+    ...new Set([...reads.values()].filter((read) => read.count >= 3).map((read) => read.name)),
+  ].sort();
+  if (redundant.length)
+    advice.push(
+      `Repeated unchanged observations: ${redundant.slice(0, 8).join(', ')}. The same arguments returned the same recorded result at least three times without an intervening recorded effect on that scope. Reuse the delivered evidence. Repeat only to address a concrete remaining question or changed state; otherwise change strategy or answer with the evidence and limits. Repetition alone does not establish completion.`,
+    );
+  return advice;
+}
 
 /** Observations only: repeated output is not a judgment that the task has failed. */
 export function progressGuidance(
@@ -115,7 +189,7 @@ export function progressGuidance(
       repeated = 0;
     }
   }
-  const advice: string[] = [];
+  const advice: string[] = actionGuidance(events.slice(promptSeq));
   if (researchAvailable && citationFailures >= 2)
     advice.push(
       "Research citations have been rejected repeatedly. Prefer a delivered browser observation/block/range reference to resolve exact text without retyping. For legacy sources, change the quote, not just the claim: copy a short contiguous passage directly from the observed excerpt, preserving punctuation, or remove the unsupported finding and record the remaining notes. Check that each passage supports its claim. Successful browser reads remain usable. This is recovery advice, not a stop request. The final answer should address the user's question and evidence limits; omit internal research bookkeeping, retry plans, and complaints about the validator.",

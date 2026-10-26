@@ -56,6 +56,9 @@ beforeAll(async () => {
     'conversation_episodes',
   ])
     await admin.query(`create table ${schema}.${table} (like public.${table} including all)`);
+  await admin.query(
+    `create table ${schema}.firecracker_node_maintenance (node_id text primary key, state text not null, updated_at timestamptz not null default now())`,
+  );
   await pool.query(
     'create trigger environment_events_append_only before update or delete on environment_events for each row execute function public.reject_environment_event_mutation()',
   );
@@ -191,5 +194,51 @@ describe.skipIf(!reachable)('durable runtime control', () => {
         one.id,
       ]),
     ).rejects.toThrow('append-only');
+  });
+  it('blocks node assignments while maintenance is active and allows them after resume', async () => {
+    const store = new PgEnvironmentStore(db, pool);
+    const maintenanceOwner: Identity = {
+      tenantId: randomUUID(),
+      userId: randomUUID(),
+      role: 'developer',
+    };
+    const node = {
+      id: 'maintenance-node',
+      endpoint: 'https://node.test/',
+      vcpus: 2,
+      memoryMiB: 4096,
+    };
+    await store.beginNodeDrain(node.id);
+    expect(await store.isNodeDraining(node.id)).toBe(true);
+    await expect(store.reserve(maintenanceOwner, [node])).rejects.toMatchObject({
+      code: 'WAITING_CAPACITY',
+    });
+    await store.endNodeDrain(node.id);
+    expect(await store.isNodeDraining(node.id)).toBe(false);
+    await expect(store.reserve(maintenanceOwner, [node])).resolves.toMatchObject({
+      nodeId: node.id,
+      state: 'starting',
+    });
+  });
+  it('allows stop commands while draining and denies new starts and guest RPCs', async () => {
+    const store = new PgEnvironmentStore(db, pool);
+    const maintenanceOwner: Identity = {
+      tenantId: randomUUID(),
+      userId: randomUUID(),
+      role: 'developer',
+    };
+    const node = {
+      id: 'drain-auth-node',
+      endpoint: 'https://node.test/',
+      vcpus: 2,
+      memoryMiB: 4096,
+    };
+    const assigned = await store.reserve(maintenanceOwner, [node]);
+    await store.beginNodeDrain(node.id);
+    expect(await store.authorizeNode(assigned, 'start')).toBe(false);
+    expect(await store.authorizeNode(assigned, 'guest')).toBe(false);
+    expect(await store.authorizeNode(assigned, 'stop')).toBe(true);
+    await store.transition(assigned, 'stopped');
+    await store.endNodeDrain(node.id);
   });
 });

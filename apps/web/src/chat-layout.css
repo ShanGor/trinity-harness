@@ -808,3 +808,32 @@
   color: #626d66;
   font-size: 12px;
 }
+.browser-control-toolbar {
+  margin-bottom: 8px;
+}
+.browser-interactive-viewport {
+  position: relative;
+  margin-top: 12px;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  overflow: hidden;
+  min-height: 80px;
+}
+.browser-controlled {
+  border-color: #287a52;
+}
+.browser-controlled .browser-preview-image {
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+.browser-input-capture {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  left: 50%;
+  top: 50%;
+  padding: 0;
+  border: 0;
+}

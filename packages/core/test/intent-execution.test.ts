@@ -9,7 +9,7 @@ import type {
   SessionMeta,
   SessionMetaStore,
 } from '@trinity-harness/contracts';
-import { sessionEventSchema } from '@trinity-harness/contracts';
+import { sessionEventSchema, taskStatusSchema } from '@trinity-harness/contracts';
 import {
   CoreAgentLoop,
   CoreToolRegistry,
@@ -691,6 +691,62 @@ describe('intent context and recovery', () => {
 });
 
 describe('dependency-aware evidence', () => {
+  it('round-trips the model-visible result sequence through personal context without renumbering evidence', async () => {
+    const f = await intentRuntime({
+      files: { 'report.txt': 'Observed result' },
+      localHistory: [{ request: 'An earlier request', answer: 'An earlier final answer' }],
+    });
+    let selectedSeq = 0;
+    const llm = new FakeLLM(
+      () =>
+        toolCallThenFinish('plan', 'task', {
+          operation: 'plan',
+          checks: [{ id: 'read', requirement: 'Read report', kind: 'observation' }],
+        }),
+      () => toolCallThenFinish('opaque-runtime-id', 'read_file', { path: 'report.txt' }),
+      (request) => {
+        const control = request.messages.find((message) =>
+          message.content.startsWith('[Agent working plan and verification.'),
+        );
+        expect(control).toBeDefined();
+        const state = taskStatusSchema.parse(
+          JSON.parse(control!.content.slice(control!.content.indexOf('\n') + 1)),
+        );
+        selectedSeq = state.evidence.find((item) => item.callId === 'opaque-runtime-id')!.resultSeq;
+        expect(
+          request.messages.find((message) => message.toolCallId === 'opaque-runtime-id')?.content,
+        ).toContain(`Runtime verification reference: resultSeq=${selectedSeq}`);
+        return toolCallThenFinish('verify', 'task', {
+          operation: 'verify',
+          id: 'read',
+          resultSeq: selectedSeq,
+        });
+      },
+      () => textChunks('Report inspected.'),
+    );
+    const loop = new CoreAgentLoop({
+      llm,
+      model: 'fake/model',
+      tools: f.tools,
+      store: f.store,
+      workspaceRoot: '/fixture',
+      personalContext: f.personalContext,
+      sessionMetas: f.metas,
+      verification: true,
+    });
+    expect((await loop.run(f.owner.id, 'Read report.txt', sink)).reason).toBe('completed');
+    const events = await f.store.load(f.owner.id);
+    expect(events[selectedSeq - 1]).toMatchObject({
+      type: 'tool/result',
+      callId: 'opaque-runtime-id',
+    });
+    expect(events.findLast((event) => event.type === 'task/check')).toMatchObject({
+      callId: 'opaque-runtime-id',
+      resultSeq: selectedSeq,
+    });
+    llm.assertExhausted();
+  });
+
   it('runs the evaluation browser fixture through real capture, artifacts, initial planning and verification', async () => {
     const f = await intentRuntime({
       files: {},

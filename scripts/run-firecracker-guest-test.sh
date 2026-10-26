@@ -11,6 +11,12 @@ if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
 fi
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+node_binary="$(command -v node)" || { echo 'Node.js is required.' >&2; exit 1; }
+tsx_cli="$repo_root/apps/node-agent/node_modules/tsx/dist/cli.mjs"
+[[ -f "$tsx_cli" ]] || {
+  echo 'Install repository dependencies before running guest acceptance.' >&2
+  exit 1
+}
 guest_root="$HOME/.local/share/trinity/firecracker-guest"
 images="$guest_root/images"
 runtime="$guest_root/run"
@@ -161,8 +167,8 @@ if [[ "$ready" != true ]]; then
   exit 1
 fi
 
-pnpm --dir "$repo_root" exec tsx scripts/firecracker-guest-check.ts \
-  "$relay_state_root" "$environment_id" "$generation" "$tenant_id" "$user_id" "$session_id" "$phase" "$runtime/preview-$generation.json"
+(cd "$repo_root" && "$node_binary" "$tsx_cli" "$repo_root/scripts/firecracker-guest-check.ts" \
+  "$relay_state_root" "$environment_id" "$generation" "$tenant_id" "$user_id" "$session_id" "$phase" "$runtime/preview-$generation.json")
 echo "Real guest $phase acceptance passed."
 echo "Console log: $console_log"
 

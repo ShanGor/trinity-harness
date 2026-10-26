@@ -106,7 +106,17 @@ export const guestEnvelopeSchema = z
   })
   .strict();
 export type GuestEnvelope = z.infer<typeof guestEnvelopeSchema>;
+export const guestOperationErrorSchema = z
+  .object({
+    kind: z.literal('operationError'),
+    operation: z.enum(['read', 'readBytes']),
+    code: z.enum(['FILE_NOT_FOUND', 'ACCESS_DENIED', 'NOT_A_DIRECTORY', 'IS_A_DIRECTORY']),
+    effect: z.literal('none'),
+  })
+  .strict();
+export type GuestOperationFailure = z.infer<typeof guestOperationErrorSchema>;
 export const guestValueSchema = z.discriminatedUnion('kind', [
+  guestOperationErrorSchema,
   z
     .object({
       kind: z.literal('exec'),

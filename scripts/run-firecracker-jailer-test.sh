@@ -5,6 +5,47 @@ set -euo pipefail
   echo 'Run from the operator account: sudo bash scripts/run-firecracker-jailer-test.sh' >&2
   exit 1
 }
+network_check=denied
+test_host=""
+test_port=443
+case "${1:-}" in
+  '') [[ $# -eq 0 ]] || exit 64 ;;
+  --check-network-denied) [[ $# -eq 1 ]] || exit 64 ;;
+  --check-network-egress)
+    [[ $# -eq 1 ]] || { echo 'Usage: sudo bash scripts/run-firecracker-jailer-test.sh [--check-network-denied|--check-network-egress]' >&2; exit 64; }
+    network_check=egress
+    test_host="${TRINITY_EGRESS_TEST_HOST:-}"
+    test_port="${TRINITY_EGRESS_TEST_PORT:-443}"
+    [[ -n "$test_host" ]] || { echo 'Set TRINITY_EGRESS_TEST_HOST to an operator-approved DNS name or IPv4 address.' >&2; exit 64; }
+    python3 - "$test_host" "$test_port" <<'PY'
+import ipaddress
+import re
+import sys
+
+host, port = sys.argv[1:]
+if not re.fullmatch(r"[0-9]{1,5}", port):
+    raise SystemExit("TRINITY_EGRESS_TEST_PORT must be an integer from 1 to 65535")
+try:
+    number = int(port)
+except ValueError:
+    raise SystemExit("TRINITY_EGRESS_TEST_PORT must be an integer from 1 to 65535")
+if not 1 <= number <= 65535:
+    raise SystemExit("TRINITY_EGRESS_TEST_PORT must be an integer from 1 to 65535")
+try:
+    address = ipaddress.ip_address(host)
+    if address.version != 4:
+        raise SystemExit("The Firecracker guest egress test supports IPv4 destinations only")
+except ValueError:
+    labels = host.rstrip(".").split(".")
+    if len(host) > 253 or not labels or any(
+        not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+        for label in labels
+    ):
+        raise SystemExit("TRINITY_EGRESS_TEST_HOST must be a DNS name or IPv4 address")
+PY
+    ;;
+  *) echo 'Usage: sudo bash scripts/run-firecracker-jailer-test.sh [--check-network-denied|--check-network-egress]' >&2; exit 64 ;;
+esac
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 operator_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
 operator_group="$(id -gn "$SUDO_USER")"
@@ -12,7 +53,7 @@ source_root="$operator_home/.local/share/trinity/firecracker-guest"
 base=/srv/trinity-node
 report="$operator_home/.local/share/trinity/firecracker-jailer-test"
 
-for command in ip nft flock systemctl journalctl sha256sum python3 jq pgrep; do
+for command in bridge ip nft flock systemctl journalctl sha256sum python3 jq pgrep stat; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
 [[ -c /dev/kvm && -x /usr/local/bin/jailer && -x /usr/local/bin/firecracker ]] || {
@@ -68,7 +109,8 @@ available_kib="$(df -Pk "$base" | awk 'NR == 2 { print $4 }')"
   echo 'At least 3 GiB free on node storage is required for the copied development guest.' >&2; exit 1;
 }
 install -d -o root -g root -m 0700 "$base" "$base/images" "$base/instances" "$base/volumes" "$base/jailer"
-if [[ -n "$(find "$base/images" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+if [[ "$images_preinstalled" != true &&
+      -n "$(find "$base/images" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   echo "$base/images is not empty; refusing to replace node images." >&2; exit 1
 fi
 exec 9>/run/lock/trinity-firecracker-jailer-test.lock
@@ -149,14 +191,21 @@ ip tuntap add name tap0 mode tap user "$uid" group "$gid"
 ip link set tap0 netns "$namespace"
 ip netns exec "$namespace" ip link set lo up
 ip netns exec "$namespace" ip link set tap0 up
-ip netns exec "$namespace" nft -f - <<'NFT'
+if [[ "$network_check" == denied ]]; then
+  ip netns exec "$namespace" nft -f - <<'NFT'
 table inet trinity_acceptance {
   chain input { type filter hook input priority 0; policy drop; iifname "lo" accept; }
   chain output { type filter hook output priority 0; policy drop; oifname "lo" accept; }
   chain forward { type filter hook forward priority 0; policy drop; }
 }
 NFT
-ip netns exec "$namespace" nft list table inet trinity_acceptance > "$report/network-policy.txt"
+  ip netns exec "$namespace" nft list table inet trinity_acceptance > "$report/network-policy.txt"
+else
+  systemctl is-active --quiet trinity-firecracker-egress.service &&
+    systemctl is-active --quiet trinity-firecracker-egress-dns.service || {
+      echo 'Host egress gateway and DNS relay must be active for this acceptance mode.' >&2; exit 1;
+    }
+fi
 printf 'namespace=%s\nuid=%s\ngid=%s\n' "$namespace" "$uid" "$gid" > "$report/host-run.txt"
 
 # Copy the prior disposable test disk; do not attach or modify the user's smoke-test disk.
@@ -172,6 +221,10 @@ for phase in write read; do
     chmod 0600 "$volume/data.ext4"
     printf '{"uid":%s,"gid":%s}\n' "$uid" "$gid" > "$volume/runtime.json"
     chmod 0600 "$volume/runtime.json"
+    if [[ "$network_check" == egress ]]; then
+      bash "$repo_root/scripts/configure-firecracker-guest-egress.sh" "$id"
+      printf 'network_check=egress\ntest_host=%s\ntest_port=%s\n' "$test_host" "$test_port" >> "$report/host-run.txt"
+    fi
   fi
   jq -n --arg id "$id" --arg generation "$generation" --arg tenant "$tenant" --arg user "$user" \
     '{id:$id,generation:$generation,tenantId:$tenant,userId:$user,nodeId:"local-acceptance",state:"starting",vcpus:2,memoryMiB:2048}' \
@@ -198,9 +251,14 @@ for phase in write read; do
     echo 'Jailer VM did not report guest RPC readiness within 90 seconds.' >&2
     exit 1
   fi
+  if [[ "$network_check" == egress ]]; then
+    network_args=(--check-network-egress "$test_host" "$test_port")
+  else
+    network_args=(--check-network-denied)
+  fi
   (cd "$repo_root" && ./node_modules/.bin/tsx scripts/firecracker-guest-check.ts \
     "$base" "$id" "$generation" "$tenant" "$user" "$session" "$phase" \
-    "$report/preview-$generation.json" --check-network-denied)
+    "$report/preview-$generation.json" "${network_args[@]}")
   chmod 0644 "$report/preview-$generation.json" "$report/preview-$generation.json.png"
   systemctl stop "$unit"
   state="$(systemctl show --property=ActiveState --value "$unit")"
@@ -212,6 +270,10 @@ for phase in write read; do
   current_unit=""
 done
 
-echo 'Jailer + systemd boot, private vsock RPC, persistent data, Zendriver and guest egress-deny checks passed.'
+if [[ "$network_check" == egress ]]; then
+  echo "Jailer + systemd boot, private vsock RPC, persistent data, Zendriver and guest TCP egress to $test_host:$test_port passed."
+else
+  echo 'Jailer + systemd boot, private vsock RPC, persistent data, Zendriver and guest egress-deny checks passed.'
+fi
 echo "Reports and preview PNGs: $report"
 echo 'This verifies one local development node; it does not prove production tenant isolation or live Node Agent/PG assignment routing.'

@@ -139,12 +139,46 @@ export class EventTaskExecution implements TaskExecutionPort {
       }
       return { requests, tokens, costs: totals };
     };
+    const toolCount = (history: readonly SessionEvent[], through?: string): number => {
+      let count = 0;
+      for (const event of history) {
+        if (event.type !== 'task/tool_reservation' || event.promptId !== promptId) continue;
+        count += event.count;
+        if (event.reservationId === through) break;
+      }
+      return count;
+    };
     return {
       signal: combined,
       maxSteps: limits.maxSteps,
+      reserveTools: async (count) => {
+        if (combined.aborted || (deadlineAt !== undefined && this.now() >= deadlineAt))
+          throw new TaskBudgetError('Task deadline reached');
+        if (!Number.isSafeInteger(count) || count < 1 || count > 100_000)
+          throw new Error('Invalid tool reservation size');
+        if (limits.maxToolCalls === undefined) return true;
+        const reservationId = newId();
+        await this.store.append(
+          sessionId,
+          [
+            {
+              eventId: newId(),
+              at: new Date(this.now()).toISOString(),
+              type: 'task/tool_reservation',
+              promptId,
+              reservationId,
+              count,
+            },
+          ],
+          appendOpts,
+        );
+        return toolCount(await read(), reservationId) <= limits.maxToolCalls;
+      },
       shouldFinalize: async (request) => {
-        const used = usage(await read());
+        const history = await read();
+        const used = usage(history);
         return (
+          toolCount(history) >= (limits.maxToolCalls ?? Infinity) ||
           used.requests + 1 >= maxRequests ||
           used.tokens + size(request) * 2 > maxTokens ||
           costs(request).some(

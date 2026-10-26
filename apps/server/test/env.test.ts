@@ -6,16 +6,26 @@ vi.mock('dotenv', () => ({ config: vi.fn() }));
 const budgetKeys = [
   'MAX_TURN_STEPS',
   'TASK_MAX_REQUESTS',
+  'TASK_MAX_TOOL_CALLS',
   'TASK_MAX_TOKENS',
   'TASK_MAX_DURATION_MS',
   'TASK_MAX_COST',
 ] as const;
+const maintenanceTokenKey = 'FIRECRACKER_MAINTENANCE_TOKEN';
 
 beforeEach(() => {
   for (const key of budgetKeys) vi.stubEnv(key, undefined);
+  vi.stubEnv(maintenanceTokenKey, undefined);
   vi.stubEnv('MODEL', 'fake/model');
 });
 afterEach(() => vi.unstubAllEnvs());
+
+it('requires a dedicated long token for Firecracker host maintenance', () => {
+  vi.stubEnv(maintenanceTokenKey, 'short');
+  expect(() => loadServerEnv()).toThrow(maintenanceTokenKey);
+  vi.stubEnv(maintenanceTokenKey, 'm'.repeat(32));
+  expect(loadServerEnv().FIRECRACKER_MAINTENANCE_TOKEN).toBe('m'.repeat(32));
+});
 
 it('leaves every server task ceiling unlimited when unset', () => {
   const env = loadServerEnv();
@@ -23,6 +33,7 @@ it('leaves every server task ceiling unlimited when unset', () => {
 });
 
 it('parses independently configured server task ceilings', () => {
+  vi.stubEnv('TASK_MAX_TOOL_CALLS', '12');
   vi.stubEnv('TASK_MAX_REQUESTS', '20');
   expect(loadServerEnv().TASK_MAX_REQUESTS).toBe(20);
   expect(loadServerEnv().TASK_MAX_TOKENS).toBeUndefined();
@@ -33,6 +44,7 @@ it('parses independently configured server task ceilings', () => {
   expect(loadServerEnv()).toMatchObject({
     MAX_TURN_STEPS: 10,
     TASK_MAX_REQUESTS: 20,
+    TASK_MAX_TOOL_CALLS: 12,
     TASK_MAX_TOKENS: 50000,
     TASK_MAX_DURATION_MS: 1000,
     TASK_MAX_COST: 'USD:1.50',

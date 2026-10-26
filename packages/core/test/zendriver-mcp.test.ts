@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BROWSER_LIMITS, type LongRunningProcess } from '@trinity-harness/contracts';
 import { ZendriverMcpConnection } from '../src/index.js';
 
@@ -119,10 +119,44 @@ describe('bounded Zendriver MCP transport', () => {
     const result = connection.initialize(controller.signal);
     await started;
     controller.abort();
-    await expect(result).rejects.toMatchObject({ code: 'DRIVER_FAILED' });
+    await expect(result).rejects.toMatchObject({
+      code: 'DRIVER_FAILED',
+      message: 'DRIVER_FAILED',
+    });
     expect(process.writes.some((m) => m.method === 'notifications/cancelled')).toBe(true);
     expect(process.kills).toBe(1);
     await connection.dispose();
+  });
+  it('preserves a safe timeout explanation while cancelling and disposing the driver', async () => {
+    const timeout = new AbortController();
+    const deadline = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(timeout.signal);
+    const process = new Process((message, p) => {
+      if (message.method === 'initialize') p.respond(message.id, initialize);
+    });
+    const connection = new ZendriverMcpConnection(process);
+    try {
+      await connection.initialize();
+      const result = connection.call('browser_goto', {
+        url: 'https://private.invalid/?token=must-not-appear',
+      });
+      const rejected = expect(result).rejects.toMatchObject({
+        code: 'DRIVER_FAILED',
+        message:
+          'The browser driver did not respond within 30 seconds. Its process was stopped; the operation may have taken effect. Check the browser runtime and host-managed guest egress before retrying.',
+        recovery: 'conclude',
+      });
+      expect(deadline).toHaveBeenCalledWith(30_000);
+      timeout.abort();
+      await rejected;
+      expect(process.writes.at(-1)).toMatchObject({
+        method: 'notifications/cancelled',
+        params: { requestId: 2, reason: 'cancelled' },
+      });
+      expect(process.kills).toBe(1);
+    } finally {
+      deadline.mockRestore();
+      await connection.dispose();
+    }
   });
   it('rejects unsupported server requests without sampling or executing them', async () => {
     const process = new Process((message, p) => {

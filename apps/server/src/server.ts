@@ -7,8 +7,12 @@ import {
 } from '@trinity-harness/contracts';
 import {
   environmentResponseSchema,
+  environmentNodeDrainResultSchema,
   browserPreviewSchema,
+  browserInteractionRequestSchema,
+  browserInteractionResultSchema,
   type EnvironmentPort,
+  type EnvironmentMaintenancePort,
 } from '@trinity-harness/contracts';
 import {
   chatWorkspaceDir,
@@ -34,6 +38,7 @@ import type {
   AuditStore,
   BlobStore,
   BrowserPreviewPort,
+  BrowserInteractionPort,
   ScheduleStore,
   ContentBlock,
   EventSink,
@@ -64,6 +69,7 @@ import {
 import type { ServerEvent } from '@trinity-harness/shared';
 import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { timingSafeEqual } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { z } from 'zod';
 import { resolveBrowserImage } from '@trinity-harness/core';
@@ -535,8 +541,11 @@ export interface ServerAuthDeps {
 
 export interface ServerDeps {
   browserPreview?: BrowserPreviewPort;
+  browserInteraction?: BrowserInteractionPort;
   schedules?: ScheduleStore;
   environments?: EnvironmentPort;
+  environmentMaintenance?: EnvironmentMaintenancePort;
+  firecrackerMaintenanceToken?: string;
   sessionRuns?: SessionRunPort | undefined;
   memory?: MemoryStorePort | undefined;
   conversationIndex?: ConversationIndexPort | undefined;
@@ -631,7 +640,12 @@ export async function buildServer(
   if (auth) {
     app.addHook('onRequest', async (req, reply) => {
       const url = req.raw.url ?? '';
-      if (url === '/api/health' || url.startsWith('/api/auth/')) return;
+      if (
+        url === '/api/health' ||
+        url.startsWith('/api/auth/') ||
+        /^\/api\/ops\/firecracker-nodes\/[a-z0-9-]{1,63}\/(?:drain|resume)(?:\?|$)/u.test(url)
+      )
+        return;
       const token = tokenFrom(req);
       const identity = token ? await auth.tokens.verify(token) : null;
       if (!identity) {
@@ -640,6 +654,85 @@ export async function buildServer(
       req.identity = identity;
     });
   }
+
+  const maintenanceAuthorized = (req: FastifyRequest): boolean => {
+    const expected = deps.firecrackerMaintenanceToken;
+    const header = req.headers.authorization;
+    if (!expected || !header?.startsWith('Bearer ')) return false;
+    const actual = Buffer.from(header.slice('Bearer '.length).trim());
+    const secret = Buffer.from(expected);
+    return actual.length === secret.length && timingSafeEqual(actual, secret);
+  };
+  app.post('/api/ops/firecracker-nodes/:nodeId/drain', async (req, reply) => {
+    if (!maintenanceAuthorized(req)) return reply.code(401).send({ error: 'unauthorized' });
+    if (!deps.environmentMaintenance)
+      return reply.code(503).send({ error: 'Firecracker maintenance unavailable' });
+    const params = z
+      .object({ nodeId: z.string().regex(/^[a-z0-9-]{1,63}$/) })
+      .safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: 'invalid node id' });
+    if (
+      !z
+        .object({})
+        .strict()
+        .safeParse(req.body ?? {}).success
+    )
+      return reply.code(400).send({ error: 'empty request body required' });
+    const cancelled = new AbortController();
+    const abort = (): void => {
+      if (!reply.raw.writableFinished) cancelled.abort();
+    };
+    req.raw.once('aborted', abort);
+    reply.raw.once('close', abort);
+    try {
+      const result = await deps.environmentMaintenance.drainNode(
+        params.data.nodeId,
+        cancelled.signal,
+      );
+      environmentNodeDrainResultSchema.parse(result);
+      return reply.code(result.remaining === 0 ? 200 : 409).send(result);
+    } catch (error) {
+      if ((error as { code?: string }).code === 'UNKNOWN_NODE')
+        return reply.code(404).send({ error: 'unknown Firecracker node' });
+      return reply
+        .code(503)
+        .send({ error: 'node drain could not be confirmed; node remains drained' });
+    } finally {
+      req.raw.removeListener('aborted', abort);
+      reply.raw.removeListener('close', abort);
+    }
+  });
+  app.post('/api/ops/firecracker-nodes/:nodeId/resume', async (req, reply) => {
+    if (!maintenanceAuthorized(req)) return reply.code(401).send({ error: 'unauthorized' });
+    if (!deps.environmentMaintenance)
+      return reply.code(503).send({ error: 'Firecracker maintenance unavailable' });
+    const params = z
+      .object({ nodeId: z.string().regex(/^[a-z0-9-]{1,63}$/) })
+      .safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: 'invalid node id' });
+    if (
+      !z
+        .object({})
+        .strict()
+        .safeParse(req.body ?? {}).success
+    )
+      return reply.code(400).send({ error: 'empty request body required' });
+    try {
+      await deps.environmentMaintenance.resumeNode(params.data.nodeId);
+      return reply.code(200).send(
+        z.object({ nodeId: z.string(), state: z.literal('ready') }).parse({
+          nodeId: params.data.nodeId,
+          state: 'ready',
+        }),
+      );
+    } catch (error) {
+      if ((error as { code?: string }).code === 'UNKNOWN_NODE')
+        return reply.code(404).send({ error: 'unknown Firecracker node' });
+      if ((error as { code?: string }).code === 'NODE_ACTIVE')
+        return reply.code(409).send({ error: 'active environments prevent node resume' });
+      return reply.code(503).send({ error: 'node remains in maintenance' });
+    }
+  });
 
   app.get('/api/me/environment', async (req) =>
     environmentResponseSchema.parse({
@@ -1896,6 +1989,61 @@ export async function buildServer(
       reply.raw.removeListener('close', abort);
     }
   });
+  app.post(
+    '/api/sessions/:sessionId/browser-interaction',
+    { bodyLimit: 24 * 1024 },
+    async (req, reply) => {
+      const sessionId = await sessionIdOf(req, reply);
+      if (!sessionId) return;
+      const granted = await authorizeSession(sessionId, req.identity, reply);
+      if (!granted) return;
+      if (
+        auth &&
+        (!granted.meta ||
+          granted.meta.scope === 'team' ||
+          granted.meta.closedAt ||
+          granted.meta.userId !== req.identity?.userId)
+      )
+        return reply.code(404).send({ error: 'browser unavailable' });
+      if (!deps.browserInteraction)
+        return reply.code(503).send({ error: 'browser interaction unavailable' });
+      const body =
+        req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+          ? (req.body as Record<string, unknown>)
+          : {};
+      if ('sessionId' in body)
+        return reply.code(400).send({ error: 'invalid browser interaction' });
+      const parsed = browserInteractionRequestSchema.safeParse({ ...body, sessionId });
+      if (!parsed.success) return reply.code(400).send({ error: 'invalid browser interaction' });
+      const cancelled = new AbortController();
+      const abort = (): void => {
+        if (!reply.raw.writableFinished) cancelled.abort();
+      };
+      req.raw.once('aborted', abort);
+      reply.raw.once('close', abort);
+      try {
+        const result = await deps.browserInteraction.interact(parsed.data, cancelled.signal);
+        const current = await authorizeSession(sessionId, req.identity, reply);
+        if (!current) return;
+        if (
+          auth &&
+          (current.meta?.scope === 'team' ||
+            current.meta?.closedAt ||
+            current.meta?.userId !== req.identity?.userId)
+        )
+          return reply.code(404).send({ error: 'browser unavailable' });
+        return reply
+          .header('cache-control', 'private, no-store')
+          .header('x-content-type-options', 'nosniff')
+          .send(browserInteractionResultSchema.parse(result));
+      } catch {
+        return reply.code(503).send({ error: 'browser interaction unavailable' });
+      } finally {
+        req.raw.removeListener('aborted', abort);
+        reply.raw.removeListener('close', abort);
+      }
+    },
+  );
 
   // ---- M4: attachments & blob storage (docs/design.md §10) ------------------
 

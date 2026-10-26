@@ -6,6 +6,7 @@ import type {
   LongRunningProcess,
   SandboxPort,
   SkillCatalogPort,
+  GuestOperationFailure,
 } from '@trinity-harness/contracts';
 
 interface ProcessRecord {
@@ -61,6 +62,30 @@ export class GuestRuntime {
       throw new Error('Guest process ownership mismatch');
     this.arm(record);
     return record;
+  }
+  private async read(
+    operation: GuestOperationFailure['operation'],
+    run: () => Promise<GuestValue>,
+  ): Promise<GuestValue> {
+    try {
+      return await run();
+    } catch (error) {
+      const code = error instanceof Error && 'code' in error ? error.code : undefined;
+      const failure = {
+        ENOENT: 'FILE_NOT_FOUND',
+        EACCES: 'ACCESS_DENIED',
+        EPERM: 'ACCESS_DENIED',
+        ENOTDIR: 'NOT_A_DIRECTORY',
+        EISDIR: 'IS_A_DIRECTORY',
+      } as const;
+      if (typeof code !== 'string' || !Object.hasOwn(failure, code)) throw error;
+      return {
+        kind: 'operationError',
+        operation,
+        code: failure[code as keyof typeof failure],
+        effect: 'none',
+      };
+    }
   }
   async execute(request: GuestEnvelope, signal?: AbortSignal): Promise<GuestValue> {
     if (request.environmentId !== this.environmentId || request.generation !== this.generation)
@@ -133,13 +158,17 @@ export class GuestRuntime {
         return { kind: 'exec', ...result };
       }
       case 'read':
-        return { kind: 'read', ...(await sandbox.readFile(op.path, { maxBytes: op.maxBytes })) };
+        return this.read('read', async () => ({
+          kind: 'read',
+          ...(await sandbox.readFile(op.path, { maxBytes: op.maxBytes })),
+        }));
       case 'readBytes': {
         if (!sandbox.readBytes) throw new Error('Binary reading unavailable');
-        return {
+        const readBytes = sandbox.readBytes.bind(sandbox);
+        return this.read('readBytes', async () => ({
           kind: 'bytes',
-          data: Buffer.from(await sandbox.readBytes(op.path, op.maxBytes)).toString('base64'),
-        };
+          data: Buffer.from(await readBytes(op.path, op.maxBytes)).toString('base64'),
+        }));
       }
       case 'write':
         await sandbox.writeFile(op.path, op.content);

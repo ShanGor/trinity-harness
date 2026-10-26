@@ -90,3 +90,53 @@ it('authenticates every request and validates bounded typed operations before di
     await app.close();
   }
 });
+
+it('authenticates and bounds human interaction separately without exposing raw transport', async () => {
+  const sessionId = randomUUID(),
+    viewId = randomUUID(),
+    token = 'h'.repeat(32);
+  const state = {
+    available: false,
+    mode: 'paused' as const,
+    generation: null,
+    epoch: 0,
+    controllerId: null,
+    expiresAt: null,
+    nextSequence: 1,
+  };
+  const interact = vi.fn(async () => ({ state }));
+  const app = buildBrowserRuntimeServer({ execute: vi.fn(), interact }, token);
+  try {
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/interaction',
+          payload: { sessionId, viewId, operation: 'take' },
+        })
+      ).statusCode,
+    ).toBe(401);
+    const headers = { authorization: `Bearer ${token}` };
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/interaction',
+          headers,
+          payload: { sessionId, viewId, operation: 'take', evaluate: 'arbitrary' },
+        })
+      ).statusCode,
+    ).toBe(400);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/interaction',
+      headers,
+      payload: { sessionId, viewId, operation: 'take' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['cache-control']).toBe('private, no-store');
+    expect(interact).toHaveBeenCalledOnce();
+  } finally {
+    await app.close();
+  }
+});

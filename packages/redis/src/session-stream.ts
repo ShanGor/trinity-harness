@@ -3,6 +3,7 @@ import type {
   SessionEvent,
   SessionEventPublisher,
   SessionEventReader,
+  SessionStore,
 } from '@trinity-harness/contracts';
 import { sessionEventSchema } from '@trinity-harness/contracts';
 import type { Redis } from 'ioredis';
@@ -26,6 +27,20 @@ export const sessionStreamKey = (sessionId: string): string => `sess:${sessionId
 const seqToId = (seq: number): string => `${seq}-0`;
 const idToSeq = (id: string): number => Number(id.split('-')[0]);
 
+// PG commits can be published out of order by different processes. Skip only
+// Redis's stale-ID rejection; a duplicate must not suppress later batch entries.
+const publishBatch = `
+for i = 2, #ARGV, 2 do
+  local result = redis.pcall('XADD', KEYS[1], 'MAXLEN', '~', ARGV[1], ARGV[i], 'data', ARGV[i + 1])
+  if type(result) == 'table' and result.err then
+    if not string.find(result.err, 'The ID specified in XADD is equal or smaller than the target stream top item', 1, true) then
+      return redis.error_reply(result.err)
+    end
+  end
+end
+return 1
+`;
+
 export class RedisSessionEventPublisher implements SessionEventPublisher {
   constructor(
     private readonly redis: Redis,
@@ -39,17 +54,13 @@ export class RedisSessionEventPublisher implements SessionEventPublisher {
     if (entries.length === 0) return;
     const key = sessionStreamKey(sessionId);
     const maxlen = this.opts?.maxlen ?? 10_000;
-    for (const { seq, event } of entries) {
-      await this.redis.xadd(
-        key,
-        'MAXLEN',
-        '~',
-        maxlen,
-        seqToId(seq),
-        'data',
-        JSON.stringify(event),
-      );
-    }
+    await this.redis.eval(
+      publishBatch,
+      1,
+      key,
+      maxlen,
+      ...entries.flatMap(({ seq, event }) => [seqToId(seq), JSON.stringify(event)]),
+    );
   }
 }
 
@@ -84,7 +95,7 @@ async function streamInfo(redis: Redis, key: string): Promise<StreamInfo | null>
 export class RedisSessionEventReader implements SessionEventReader {
   constructor(
     private readonly redis: Redis,
-    private readonly opts?: { blockMs?: number },
+    private readonly opts?: { blockMs?: number; store?: Pick<SessionStore, 'loadRange'> },
   ) {}
 
   async firstRetainedSeq(sessionId: string): Promise<number | null> {
@@ -125,17 +136,40 @@ export class RedisSessionEventReader implements SessionEventReader {
       }
       markStarted();
 
+      let delivered = afterSeq;
+
       while (!stopped) {
         const res = (await conn.xread('COUNT', 128, 'BLOCK', blockMs, 'STREAMS', key, cursor)) as
           [string, [string, string[]][]][] | null;
         if (!res) continue; // timeout — loop (BLOCK is also our shutdown point)
         for (const [, entries] of res) {
           for (const [id, fields] of entries) {
-            cursor = id;
             if (stopped) return;
             const raw = fields[fields.indexOf('data') + 1];
             if (raw === undefined) continue;
-            handler({ seq: idToSeq(id), event: sessionEventSchema.parse(JSON.parse(raw)) });
+            const seq = idToSeq(id);
+            const event = sessionEventSchema.parse(JSON.parse(raw));
+            // Late publishers and Redis truncation can leave internal gaps.
+            // Repair from PG before advancing the consumer's durable cursor.
+            while (this.opts?.store && delivered + 1 < seq) {
+              const toSeq = Math.min(seq - 1, delivered + 128);
+              const missing = await this.opts.store.loadRange(sessionId, {
+                afterSeq: delivered,
+                toSeq,
+              });
+              if (missing.length !== toSeq - delivered)
+                throw new Error('Session distribution gap is missing from the durable log');
+              for (const entry of missing) {
+                if (stopped) return;
+                if (entry.seq !== delivered + 1) throw new Error('Invalid durable gap sequence');
+                handler(entry);
+                delivered = entry.seq;
+              }
+            }
+            if (stopped) return;
+            handler({ seq, event });
+            delivered = seq;
+            cursor = id;
           }
         }
       }

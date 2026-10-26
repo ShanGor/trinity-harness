@@ -38,7 +38,9 @@ export class PolicyToolRegistry implements ToolRegistry {
   }
 
   schemas(): ToolSchema[] {
-    return this.inner.schemas();
+    return this.inner
+      .schemas()
+      .filter((tool) => (this.policy?.tools[tool.name] ?? this.policy?.tools['*']) !== 'denied');
   }
 
   concurrencyOf(name: string): 'parallel' | 'exclusive' {

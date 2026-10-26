@@ -51,3 +51,11 @@ Compare before/after source versions using identical runtime mode, fixtures, mod
 For Pi/OpenCode comparisons, supply the same fixture files in isolated temporary workspaces and the same prompts, model and limits where supported. Record harness versions, effective prompts, tools, provider settings and any differences rather than claiming exact parity. Compare stronger models within Trinity separately from harness changes. The built-in runner does not yet automate external harness adapters or production browser/memory evaluations.
 
 Promote changes based on representative repeated task success without material regressions on simple requests, safety boundaries, latency or cost. Broaden evaluation with fresh domains and realistic stock-session tasks before any SOTA claim. Mechanical tests, these small synthetic cases and a single model cannot establish that claim.
+
+## General action economy evaluation
+
+Development fixtures `retry-original-objective` and `bounded-readonly-analysis` exercise short continuations after an overbroad assistant proposal and diagnosis from sufficient supplied evidence. Compare these with `scoped-configuration-change` to ensure useful authorized edits remain possible. They are synthetic cross-domain cases, not production prompt rules or a host-health workflow.
+
+Reports include action metrics after the fixture's seeded history: calls by tool, failed results, declared mutation/unknown-effect calls and runtime guidance. Mutation counts describe attempted calls, not confirmed effects. Review final workspace differences and outcomes alongside the transcript; fewer calls alone is not success. The source fingerprint list includes general guidance and tool-budget implementation. If using a temporary baseline source overlay, record its effective source hashes separately because the report's on-disk hashes describe the checkout, not transformed code.
+
+The 2026-10-25 tool affordance update adds exact `resultSeq` selection for task verification, retaining legacy call IDs and all evidence fences. Compare evidence-selection failures and control-call counts alongside completion, rather than counting a shorter failed run as an improvement. Development iterations and observed limitations are recorded in [the action-control evaluation report](action-control-evaluation-2026-10-25.md).

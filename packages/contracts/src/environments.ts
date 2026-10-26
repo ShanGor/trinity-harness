@@ -57,6 +57,16 @@ export const nodeRuntimeResultSchema = z
   })
   .strict();
 export type NodeRuntimeResult = z.infer<typeof nodeRuntimeResultSchema>;
+export const environmentNodeDrainResultSchema = z
+  .object({
+    nodeId: z.string().regex(/^[a-z0-9-]{1,63}$/),
+    state: z.literal('draining'),
+    stopped: z.number().int().nonnegative(),
+    remaining: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+  })
+  .strict();
+export type EnvironmentNodeDrainResult = z.infer<typeof environmentNodeDrainResultSchema>;
 export interface NodeRuntimePort {
   command(
     operation: 'start' | 'stop' | 'status',
@@ -70,10 +80,23 @@ export interface EnvironmentStore {
     action: (signal: AbortSignal) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T>;
+  /** Shared lifecycle lock: parallel guest calls drain before an exclusive stop. */
+  runShared<T>(
+    identity: Identity,
+    action: (signal: AbortSignal) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T>;
   get(identity: Identity): Promise<EnvironmentRecord | null>;
   /** Capacity admission and a durable generation reservation, never TTL takeover. */
   reserve(identity: Identity, nodes: readonly EnvironmentNode[]): Promise<EnvironmentRecord>;
-  authorizeNode(record: EnvironmentRecord): Promise<boolean>;
+  authorizeNode(
+    record: EnvironmentRecord,
+    operation?: 'start' | 'stop' | 'status' | 'guest' | 'guest-complete',
+  ): Promise<boolean>;
+  isNodeDraining(nodeId: string): Promise<boolean>;
+  beginNodeDrain(nodeId: string): Promise<void>;
+  endNodeDrain(nodeId: string): Promise<void>;
+  listNodeEnvironments(nodeId: string): Promise<EnvironmentRecord[]>;
   transition(
     record: EnvironmentRecord,
     state: EnvironmentRecord['state'],
@@ -83,4 +106,8 @@ export interface EnvironmentPort {
   get(identity: Identity): Promise<EnvironmentRecord | null>;
   wake(identity: Identity, signal?: AbortSignal): Promise<EnvironmentRecord>;
   suspend(identity: Identity, signal?: AbortSignal): Promise<EnvironmentRecord | null>;
+}
+export interface EnvironmentMaintenancePort {
+  drainNode(nodeId: string, signal?: AbortSignal): Promise<EnvironmentNodeDrainResult>;
+  resumeNode(nodeId: string): Promise<void>;
 }

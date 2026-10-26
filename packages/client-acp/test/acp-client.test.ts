@@ -59,6 +59,50 @@ describe('AcpClient', () => {
       vi.unstubAllGlobals();
     }
   });
+  it('posts fenced browser input without session routing in the body and validates replies', async () => {
+    const sessionId = crypto.randomUUID(),
+      viewId = crypto.randomUUID();
+    const response = {
+      state: {
+        available: false,
+        mode: 'paused',
+        generation: null,
+        epoch: 0,
+        controllerId: null,
+        expiresAt: null,
+        nextSequence: 1,
+      },
+    };
+    const fetcher = vi.fn(async () => Response.json(response));
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      const client = new AcpClient({ baseUrl: 'https://trinity.test', token: 'private-token' });
+      const abort = new AbortController();
+      expect(
+        await client.interactBrowser({ sessionId, viewId, operation: 'state' }, abort.signal),
+      ).toEqual(response);
+      const [url, init] = fetcher.mock.calls[0]! as unknown as [string, RequestInit];
+      expect(url).toBe(`https://trinity.test/api/sessions/${sessionId}/browser-interaction`);
+      expect(JSON.parse(String(init.body))).toEqual({ viewId, operation: 'state' });
+      expect(init.headers).toEqual({
+        authorization: 'Bearer private-token',
+        'content-type': 'application/json',
+      });
+      expect(init.cache).toBe('no-store');
+      abort.abort();
+      expect(init.signal?.aborted).toBe(true);
+      fetcher.mockImplementationOnce(async () => Response.json({ state: 'untyped' }));
+      await expect(
+        client.interactBrowser({ sessionId, viewId, operation: 'state' }),
+      ).rejects.toThrow();
+      fetcher.mockImplementationOnce(async () => new Response('', { status: 503 }));
+      await expect(
+        client.interactBrowser({ sessionId, viewId, operation: 'state' }),
+      ).rejects.toMatchObject({ status: 503 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it('creates Main chat over LAN HTTP without crypto.randomUUID', async () => {
     const requests: unknown[] = [];
     const { impl } = fakeFetch({
@@ -78,6 +122,7 @@ describe('AcpClient', () => {
         expect.objectContaining({
           kind: 'chat',
           sessionRole: 'main',
+          policy: 'workspace-write',
           creationOperationId: expect.stringMatching(
             /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
           ),

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import type { EventSink, LLMRequest, LoopEvent, SessionEvent } from '@trinity-harness/contracts';
 
@@ -47,6 +48,84 @@ class CollectingSink implements EventSink {
 const eventTypes = (events: SessionEvent[]) => events.map((e) => e.type);
 
 describe('CoreAgentLoop', () => {
+  it('persists general failure guidance before dispatch and isolates it from the next prompt', async () => {
+    const llm = new FakeLLM(
+      () => toolCallThenFinish('a', 'inspect', { item: 'one' }),
+      () => toolCallThenFinish('b', 'inspect', { item: 'one' }),
+      (req) => {
+        expect(JSON.stringify(req.messages)).toContain('Repeated tool failures: inspect');
+        expect(req.system).toContain('Choose the smallest action');
+        expect(req.system).toContain('never seek physical host access');
+        return textChunks('Inspection is unavailable; the requested fact remains unknown.');
+      },
+      (req) => {
+        expect(JSON.stringify(req.messages)).not.toContain('Repeated tool failures: inspect');
+        return textChunks('A separate answer.');
+      },
+    );
+    const store = new MemorySessionStore();
+    const tools = new CoreToolRegistry(new FakeSandbox());
+    tools.register({
+      name: 'inspect',
+      description: 'Inspect an item',
+      parameters: z.object({ item: z.string() }),
+      effect: { kind: 'read', scope: 'workspace', evidence: 'observation' },
+      execute: async () => ({ isError: true, value: { code: 'UNAVAILABLE' } }),
+    });
+    const loop = new CoreAgentLoop({
+      llm,
+      model: 'fake/model',
+      tools,
+      store,
+      workspaceRoot: '/ws',
+    });
+    await loop.run('s', 'Inspect item one', new CollectingSink());
+    expect(
+      (await store.load('s')).some(
+        (event) =>
+          event.type === 'turn/guidance' &&
+          event.advice.includes('Repeated tool failures: inspect'),
+      ),
+    ).toBe(true);
+    await loop.run('s', 'Answer separately', new CollectingSink());
+    llm.assertExhausted();
+  });
+
+  it('advertises the effective policy and omits denied tools while retaining execution denial', async () => {
+    const llm = new FakeLLM(
+      (request) => {
+        expect(request.tools.map((t) => t.name)).toEqual(['read_file']);
+        expect(request.system).toContain('Session permission policy excludes these tools: bash');
+        // A generated call must still be denied even if it was never advertised.
+        return toolCallThenFinish('denied-call', 'bash', { command: 'uname -a' });
+      },
+      () => textChunks('Shell execution is denied by the session policy.'),
+    );
+    const sandbox = new FakeSandbox();
+    const store = new MemorySessionStore();
+    const registry = new CoreToolRegistry(sandbox);
+    registry.register(bashTool);
+    registry.register(readFileTool);
+    const loop = new CoreAgentLoop({
+      llm,
+      model: 'fake/model',
+      systemPrompt: 'test',
+      tools: registry,
+      store,
+      workspaceRoot: '/ws',
+    });
+    const { parsePermissionPolicy } = await import('@trinity-harness/contracts');
+    await loop.run('policy-session', 'Describe the runtime', new CollectingSink(), {
+      policy: parsePermissionPolicy('read-only'),
+    });
+    expect(
+      (await store.load('policy-session')).find((e) => e.type === 'tool/result'),
+    ).toMatchObject({
+      isError: true,
+      value: { message: expect.stringContaining('denied by the session permission policy') },
+    });
+    llm.assertExhausted();
+  });
   it('guides workspace reads to read_file instead of Bash', async () => {
     const llm = new FakeLLM(() => textChunks('Done.'));
     const store = new MemorySessionStore();

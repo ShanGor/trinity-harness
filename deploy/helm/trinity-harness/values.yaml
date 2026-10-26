@@ -33,6 +33,7 @@ secrets:
   openaiApiKey: ''
   browserRuntimeToken: '' # private Zendriver supervisor credential, min 32 characters
   nodeRuntimeToken: '' # optional, dedicated host-management credential
+  firecrackerMaintenanceToken: '' # host release drain/resume credential, min 32 URL-safe characters
 
 server:
   image:
@@ -125,6 +126,7 @@ config:
   modelContextTokens: 200000 # Must match the routed model.
   modelOutputTokens: 8192
   compactionContextTokens: 200000 # Set separately when using a smaller summarizer.
+  taskMaxToolCalls: null
   taskMaxRequests: null
   taskMaxTokens: null
   taskMaxDurationMs: null

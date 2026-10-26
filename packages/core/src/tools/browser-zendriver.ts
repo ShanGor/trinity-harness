@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { PNG } from 'pngjs';
 import {
   BROWSER_LIMITS,
   browserCaptureSchema,
@@ -13,13 +14,19 @@ import {
   type BrowserDriverState,
   type BrowserSurface,
   type BrowserCapture,
+  type BrowserHumanCapture,
+  type BrowserHumanAction,
+  type BrowserFrameTarget,
+  type ToolContext,
 } from '@trinity-harness/contracts';
 import { browserExtractor } from './browser-extractor.js';
 import {
   browserSurfaceScript,
   browserTargetSelector,
   browserReadinessScript,
+  interactionFromSurface,
 } from './browser-interactions.js';
+import { captureBrowserPreview } from './browser-preview.js';
 import {
   browserPointScript,
   browserPaintScript,
@@ -51,6 +58,148 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
           await this.client.call('browser_evaluate', { expression: script }, signal),
         ),
       ).value;
+  }
+  private async humanBinding(signal?: AbortSignal): Promise<BrowserBinding> {
+    if (!(await this.authorizeSession(this.sessionId, signal)))
+      throw new BrowserDriverError('NOT_AUTHORIZED');
+    const state = await this.inspect(signal);
+    return this.binding(state);
+  }
+  private binding(state: BrowserDriverState): BrowserBinding {
+    return {
+      bindingId: createHash('sha256').update(`${this.sessionId}\n${this.generation}`).digest('hex'),
+      tabId: state.tabId,
+      documentRevision: state.documentRevision,
+      cliVersion: `zendriver-${ZENDRIVER_VERSION}`,
+      browserVersion: state.browserVersion,
+      cliSession: `managed-${this.generation}`,
+      observedUrl: state.url,
+      securityMode: 'trusted-managed',
+      driver: {
+        engine: 'zendriver',
+        adapterVersion: 1,
+        upstreamVersion: ZENDRIVER_VERSION,
+        runtimeGeneration: this.generation,
+      },
+    };
+  }
+  async humanFrame(
+    privateView: boolean,
+    ctx: ToolContext,
+    now: () => Date = () => new Date(),
+  ): Promise<BrowserHumanCapture> {
+    if (!privateView)
+      return { preview: await captureBrowserPreview(this, this, ctx, this.generation, now) };
+    const binding = await this.humanBinding(ctx.signal);
+    const before = await this.surface(binding, 'all', undefined, ctx);
+    const { width, height } = before.context;
+    if (width > BROWSER_LIMITS.imageDimension || height > BROWSER_LIMITS.imageDimension)
+      return { preview: { state: 'unavailable' } };
+    if ((await this.paint(binding, ctx)) !== 'ready') return { preview: { state: 'busy' } };
+    const bytes = Buffer.from(await this.screenshot(binding, ctx));
+    if (
+      bytes.length < 24 ||
+      bytes.length > BROWSER_LIMITS.image ||
+      !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
+      bytes.readUInt32BE(16) !== width ||
+      bytes.readUInt32BE(20) !== height
+    )
+      return { preview: { state: 'unavailable' } };
+    PNG.sync.read(bytes);
+    const current = await this.humanBinding(ctx.signal);
+    const after = await this.surface(current, 'all', undefined, ctx);
+    const fingerprint = interactionFromSurface(before).fingerprint;
+    if (
+      binding.tabId !== current.tabId ||
+      binding.documentRevision !== current.documentRevision ||
+      fingerprint !== interactionFromSurface(after).fingerprint
+    )
+      return { preview: { state: 'busy' } };
+    const capturedAt = now().toISOString();
+    return {
+      preview: {
+        state: 'frame',
+        generation: this.generation,
+        capturedAt,
+        securityMode: 'trusted-managed',
+        width,
+        height,
+        png: bytes.toString('base64'),
+      },
+      target: {
+        tabId: binding.tabId,
+        documentRevision: binding.documentRevision,
+        fingerprint,
+        width,
+        height,
+        capturedAt,
+      },
+    };
+  }
+  async humanInput(
+    action: BrowserHumanAction,
+    target: BrowserFrameTarget,
+    ctx: ToolContext,
+  ): Promise<void> {
+    const binding = await this.humanBinding(ctx.signal);
+    const surface = await this.surface(binding, 'all', undefined, ctx);
+    if (
+      binding.tabId !== target.tabId ||
+      binding.documentRevision !== target.documentRevision ||
+      interactionFromSurface(surface).fingerprint !== target.fingerprint
+    )
+      throw new BrowserDriverError('STALE_TARGET');
+    const inside = (p: { x: number; y: number }): boolean =>
+      p.x < target.width && p.y < target.height;
+    if (
+      (action.type === 'click' && !inside(action.point)) ||
+      (action.type === 'drag' && (!inside(action.from) || !inside(action.to)))
+    )
+      throw new BrowserDriverError('STALE_TARGET');
+    if (action.type === 'navigate') {
+      await this.navigate(binding, action.url, ctx);
+      return;
+    }
+    if (action.type === 'click' || action.type === 'drag') {
+      const args =
+        action.type === 'click'
+          ? {
+              action: 'click',
+              ...action.point,
+              button: action.button,
+              click_count: action.count,
+              modifiers: action.modifiers,
+            }
+          : { action: 'drag', ...action.from, to_x: action.to.x, to_y: action.to.y, steps: 12 };
+      ack.parse(
+        zendriverStructured(
+          await this.client.call('browser_mouse', { ...args, return_snapshot: false }, ctx.signal),
+        ),
+      );
+    } else if (action.type === 'scroll') {
+      await this.client.call(
+        'browser_scroll',
+        { dx: action.dx, dy: action.dy, return_snapshot: false },
+        ctx.signal,
+      );
+    } else {
+      const focused = z
+        .boolean()
+        .parse(await this.evaluate('Boolean(document.querySelector(":focus"))', ctx.signal));
+      const step =
+        action.type === 'text'
+          ? { text: action.text }
+          : { key: action.key, modifiers: action.modifiers };
+      ack.parse(
+        zendriverStructured(
+          await this.client.call(
+            'browser_key_sequence',
+            { css: focused ? ':focus' : 'body', sequence: [step], return_snapshot: false },
+            ctx.signal,
+          ),
+        ),
+      );
+    }
   }
   async open(signal?: AbortSignal, expectedChromeVersion = '155.0.8059.84'): Promise<void> {
     const configured = z
@@ -153,22 +302,7 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
       );
     if (url && operation !== 'navigate' && url !== state.url)
       throw new BrowserDriverError('STALE_TARGET');
-    return {
-      bindingId: createHash('sha256').update(`${sessionId}\n${this.generation}`).digest('hex'),
-      tabId: state.tabId,
-      documentRevision: state.documentRevision,
-      cliVersion: `zendriver-${ZENDRIVER_VERSION}`,
-      browserVersion: state.browserVersion,
-      cliSession: `managed-${this.generation}`,
-      observedUrl: state.url,
-      securityMode: 'trusted-managed',
-      driver: {
-        engine: 'zendriver',
-        adapterVersion: 1,
-        upstreamVersion: ZENDRIVER_VERSION,
-        runtimeGeneration: this.generation,
-      },
-    };
+    return this.binding(state);
   }
   async verify(binding: BrowserBinding, ctx: { signal?: AbortSignal }): Promise<void> {
     const state = await this.inspect(ctx.signal);
@@ -205,16 +339,35 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
     ctx: { signal?: AbortSignal },
   ): Promise<void> {
     browserUrlSchema.parse(url);
-    z.object({ url: z.string(), title: z.string() }).parse(
-      zendriverStructured(
-        await this.client.call(
-          'browser_goto',
-          { url, wait_for: 'none', return_snapshot: false },
-          ctx.signal,
+    try {
+      z.object({ url: z.string(), title: z.string() }).parse(
+        zendriverStructured(
+          await this.client.call(
+            'browser_goto',
+            { url, wait_for: 'none', return_snapshot: false },
+            ctx.signal,
+          ),
         ),
-      ),
-    );
-    await this.client.call('browser_wait_for_load', { ready_state: 'interactive' }, ctx.signal);
+      );
+      await this.client.call('browser_wait_for_load', { ready_state: 'interactive' }, ctx.signal);
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      try {
+        if ((await this.inspect(ctx.signal)).url === CHROME_ERROR_PAGE_URL)
+          throw new BrowserDriverError(
+            'PAGE_UNAVAILABLE',
+            'The requested page could not be reached. Check the host-managed guest egress or proxy gateway, then navigate to another validated HTTP(S) source.',
+            'navigate',
+          );
+      } catch (inspectionError) {
+        if (
+          inspectionError instanceof BrowserDriverError &&
+          inspectionError.code === 'PAGE_UNAVAILABLE'
+        )
+          throw inspectionError;
+      }
+      throw error;
+    }
   }
   async act(
     _binding: BrowserBinding,

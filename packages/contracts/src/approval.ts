@@ -6,7 +6,7 @@ import { z } from 'zod';
  * Per-session tool-execution policy (permission presets, §12.1):
  * - `workspace-write + ask` (default): writes inside the workspace are free,
  *   anything dangerous (bash, writes outside the workspace) asks the user;
- * - `read-only`: every write/command asks;
+ * - `read-only`: Bash is denied; file writes require approval;
  * - `danger-full-access + never` (CI): broad access without routine prompts;
  *   the agent-owned sensitive-file gate still asks before listed paths.
  *

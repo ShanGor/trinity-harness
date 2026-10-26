@@ -610,6 +610,21 @@ async function captureLive(
       );
     if (!source || latestCall?.type !== 'tool/call' || latestCall.callId !== source.callId)
       throw new BrowserFailure('STALE_TARGET');
+    const sourceIndex = events.findLastIndex(
+      (event) => event.type === 'tool/result' && event.callId === source.callId,
+    );
+    if (
+      events.some(
+        (event, index) =>
+          index > sourceIndex &&
+          (event.type === 'browser/user_input' || event.type === 'browser/control_changed'),
+      )
+    )
+      throw new BrowserFailure(
+        'STALE_TARGET',
+        'The user changed browser control or state. Capture a fresh page snapshot before acting.',
+        'reobserve',
+      );
     const observation = await loadBrowserObservation(
       options.blobs,
       events,

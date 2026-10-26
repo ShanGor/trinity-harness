@@ -1,5 +1,6 @@
 export * from './client.js';
 export * from './browser-runtime-store.js';
+export * from './browser-interaction-store.js';
 export * from './schema.js';
 export * from './session-store.js';
 export * from './user-store.js';

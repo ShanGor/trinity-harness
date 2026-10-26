@@ -476,6 +476,8 @@ The proposed defaults are concrete so review can focus on product behavior:
 
 ### Workspace/capability correction (2026-10-21)
 
+New Main and side Chat created by the stock client use `workspace-write` with normal approvals, matching the default Work policy. Chat creation and its recovery descriptor must never force `read-only` based on kind. Explicit per-session policies remain authoritative; an admin role does not bypass them. Existing sessions and pending creation retries retain their recorded policy to preserve idempotency and deliberate restrictions. Correct an affected existing session through the authenticated `POST /api/sessions/:sessionId/policy` endpoint with `{"policy":"workspace-write"}` before submitting a new prompt; do not bulk-upgrade stored policies or rewrite creation events.
+
 Chat now gets an automatic persistent workspace at `$WORKSPACE_ROOT/sessions/<user_id>/<session_uuid_v7>`. Task/Work keeps its selected workspace. The loop uses the full configured registry, skill preparation, workspace context and verification for both kinds. Knowledge retrieval and browser availability still depend on configured implementations and normal policy; there is no new knowledge-base service or implicit browser deployment.
 
 Older null-workspace Chat is bound on first execution or upload. A PG transaction appends `session/workspace_bound` and fills the metadata once, preserving original creation history and rejecting later rebinding. Both server and worker use this path. Uploads retain their original blob plus a writable workspace copy; a `session/attachment` event exposes the file path alongside matching model-visible attachment references. Large browser evidence retains its existing bounded artifact/receipt path.

@@ -151,6 +151,9 @@ importers:
       '@trinity-harness/db':
         specifier: '*'
         version: link:../../packages/db
+      '@trinity-harness/otel':
+        specifier: '*'
+        version: link:../../packages/otel
       dotenv:
         specifier: ^18.0.4
         version: 18.0.4

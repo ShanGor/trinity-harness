@@ -19,7 +19,7 @@ Enterprise-grade, multi-user, browser ↔ server general-purpose AI Agent platfo
 - **Audit** — logins, session creation, prompts and tool invocations are published to the `audit` stream and persisted by the standalone `audit-consumer` into `audit_log` (idempotent, at-least-once).
 - **Tools** — `read_file`, `write_file`, `edit_file` (exact-match str-replace), `glob`, `bash`, `read_blob`, `lsp_*`, `subagent` — all routed through a `SandboxPort`.
 - **Web UI** — React 19 + Ant Design 5 + Ant Design X chat; sign-in screen, streaming bubbles, tool-call cards, image/PDF attachments, admin audit tab.
-- **Permission presets** — per-session policy (`workspace-write + ask` default, `read-only`, `danger-full-access + never`) stored on the session; listed sensitive files still require agent approval under every preset, and workspace-internal Bash commands run free under the default preset.
+- **Permission presets** — per-session policy (`workspace-write + ask` default for Main Chat, side Chat and Work, `read-only`, `danger-full-access + never`) stored on the session; listed sensitive files still require agent approval under every preset, and workspace-internal Bash commands run free under the default preset.
 - **Human approval flow** — gated tool calls block the turn and push a `permission_request` to every connected UI; answers travel back over Redis Pub/Sub (fail-closed: no listener/timeout ⇒ rejected); request + outcome are committed to the event log (`approval/requested`, `approval/resolved`) and the `approvals` table, and audited.
 - **ACP HTTP binding** — `POST /acp` (JSON-RPC) + `GET /acp/stream` (SSE of JSON-RPC messages, seq ids) on the server; `session/prompt` holds until the turn ends (ACP semantics); `session/cancel`, `session/set_config_option`, `session/load` supported.
 - **acp-gateway** — stdio ACP process (`apps/acp-gateway`, official `@agentclientprotocol/sdk`) for Zed et al.; translates to the server's HTTP binding, bridges `session/request_permission` to the editor client.
@@ -29,44 +29,119 @@ Enterprise-grade, multi-user, browser ↔ server general-purpose AI Agent platfo
 - **Kubernetes (M5)** — `deploy/docker/*.Dockerfile` images and the `deploy/helm/trinity-harness` chart: server HPA 2–20 + PDB, agent-worker HPA 1–50 (KEDA for queue-depth 0→N, see the checklist), hardened `securityContext`, default-deny egress NetworkPolicy with allowlist, gVisor `runtimeClassName` option for the worker, Ingress with SSE buffering disabled. Release gate: [`docs/production-checklist.md`](docs/production-checklist.md).
 - **Load test (M5)** — `pnpm load:test` (`scripts/load-test.mjs`): auth / prompt-enqueue / SSE-replay-fan-out phases with p50/p95/p99 and an error-rate gate, runnable against any deployed instance.
 
-## Quick start
+## Quick start (local development)
 
-Prerequisites: **Node.js ≥ 22.12**, **pnpm 11+**, **PostgreSQL 16+**, **Redis 7+** (local testing env).
+This starts the full local app: the web UI, API, background agent worker and audit consumer. You need Node.js **22.12+**, pnpm **11+**, PostgreSQL **16+**, Redis **7+**, and an API key for the provider selected by `MODEL`.
+
+### 1. Install and configure
+
+From the repository root:
 
 ```bash
-# 1. Install dependencies
 pnpm install
+```
 
-# 2. Configure the environment
+Create `.env` from `.env.example` the first time only:
+
+```bash
 cp .env.example .env
-#   - DATABASE_URL: defaults to the local trinity_harness test DB
-#   - REDIS_URL:    defaults to redis://localhost:6379
-#   - TOKEN_SECRET / ADMIN_EMAIL / ADMIN_PASSWORD: first-boot auth bootstrap
-#   - ANTHROPIC_API_KEY (or OPENAI_API_KEY when using "openai/..." models)
+```
 
-# 3. Apply database migrations (Drizzle Kit)
+If `.env` already exists, keep it and edit it instead of copying over it. Set `ANTHROPIC_API_KEY` for the default `MODEL=anthropic/claude-sonnet-4-20250514`, or set `MODEL` and the matching provider key. Keep keys in `.env`; never paste them into source files. The example file includes development values for `TOKEN_SECRET`, `ADMIN_PASSWORD`, and the local PostgreSQL URL. Change the admin password before first startup if you want a different login.
+
+### 2. Start PostgreSQL and Redis
+
+Start both services using your operating system's service manager. On Ubuntu/Debian, for example:
+
+```bash
+sudo systemctl start postgresql
+sudo systemctl start redis-server
+```
+
+The example `.env` expects a PostgreSQL role/database named `trinity_harness`, with password `trinity_harness`. Create them once if they do not already exist (choose `trinity_harness` when prompted for the role password):
+
+```bash
+sudo -u postgres createuser --pwprompt trinity_harness
+sudo -u postgres createdb --owner=trinity_harness trinity_harness
+```
+
+If you use different database credentials, update `DATABASE_URL` in `.env`. Check service readiness with `pg_isready` and `redis-cli ping` (`PONG` means Redis is ready).
+
+### 3. Apply database migrations
+
+```bash
 pnpm db:migrate
+```
 
-# 4. Run the topology (three processes; four with BROWSER_DRIVER=zendriver)
-pnpm dev:server    # API + SSE relay + /acp  (http://127.0.0.1:3000)
-pnpm dev:worker    # agent loop consumer
-pnpm dev:audit     # audit consumer
-pnpm dev:browser-runtime   # managed Chrome supervisor; only for BROWSER_DRIVER=zendriver
-#                            (see "Browser (live web access)" below)
+### 4. Run the app in separate terminals
 
-# 5. In another terminal, run the web UI (http://localhost:5173)
+Run each command from the repository root and leave its terminal open:
+
+| Terminal | Command           | What it starts                                  |
+| -------- | ----------------- | ----------------------------------------------- |
+| 1        | `pnpm dev:server` | API and SSE endpoint at `http://127.0.0.1:3000` |
+| 2        | `pnpm dev:worker` | Background agent that handles prompts           |
+| 3        | `pnpm dev:audit`  | Audit event consumer                            |
+| 4        | `pnpm dev:web`    | Web UI at `http://localhost:5173`               |
+
+```shell
+pnpm dev:server
+```
+
+```shell
+pnpm dev:worker
+```
+
+```shell
+pnpm dev:audit
+```
+
+```shell
 pnpm dev:web
 ```
 
-Open http://localhost:5173, sign in with the bootstrap admin (`ADMIN_EMAIL` / `ADMIN_PASSWORD`), and describe a coding task. The agent can read/write/edit files and run shell commands inside `WORKSPACE_ROOT` (defaults to the repo root). Sign in as `admin` to see the **Audit** tab.
+The server, worker and audit consumer share `.env`. The first server startup creates the bootstrap admin when the users table is empty, using `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Open `http://localhost:5173` and sign in with those values. The agent runs tools inside `WORKSPACE_ROOT` (by default, the repository directory). Stop each process with **Ctrl+C**.
+
+To start again later, ensure PostgreSQL and Redis are running, then start the four terminal commands above. You only need to install dependencies, create `.env`, create the database role/database, and apply migrations when setting up or upgrading the checkout.
+
+**No responses from the agent?** Confirm the API is running with `curl http://127.0.0.1:3000/api/health` (it should return `{"ok":true}`), keep the worker terminal running, and check that `.env` has a valid key for the model named by `MODEL`. If sign-in fails, check `ADMIN_EMAIL` and `ADMIN_PASSWORD`; bootstrap credentials are used only when the database has no users yet.
+
+## Firecracker guest execution (optional)
+
+The four local commands above start the control plane and web app. With Firecracker enabled, components run in three places:
+
+| Where                | Components                                        | What they do                                                                                    |
+| -------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Control-plane host   | `server`, `agent-worker`, `audit-consumer`, `web` | The worker runs the agent loop and model calls. Tool execution is routed to the selected guest. |
+| KVM host             | Node Agent and Firecracker/jailer systemd units   | The Node Agent starts and stops assigned VMs and relays authorized guest RPC.                   |
+| Firecracker guest VM | `apps/guest-runtime` (`trinity-guest.service`)    | Runs workspace file and shell operations, skills, and—when configured—Zendriver/Chrome.         |
+
+For **Zendriver** browsing, also start the Browser Runtime in a fifth terminal:
+
+```bash
+pnpm dev:browser-runtime
+```
+
+The server, worker and Browser Runtime must share `EXECUTION_DRIVER=firecracker`, `BROWSER_DRIVER=zendriver`, the same `FIRECRACKER_NODES` inventory and `NODE_RUNTIME_TOKEN`, plus the Browser Runtime endpoint/token settings. The browser process handles private browser requests; with Firecracker selected, the browser itself runs inside the guest VM.
+
+The **Node Agent runs on the KVM host** as a privileged systemd service, separate from the four or five development terminals. After one-time host installation and configuration, start or check it with:
+
+```bash
+sudo systemctl start trinity-node-agent.service
+sudo systemctl status trinity-node-agent.service
+```
+
+Its root-owned configuration is `/etc/trinity/node-agent.env`; it needs the control database URL, the matching `NODE_RUNTIME_TOKEN`, node ID, `/srv/trinity-node` state directory, and an explicit storage mode. Do not start the Node Agent inside the guest or load model/provider keys into it. The Node Agent service and host images, storage and networking must be provisioned before using guest execution. Follow the [Firecracker host and guest setup guide](deploy/firecracker/README.md) for those one-time steps and environment settings.
+
+You do **not** start `apps/guest-runtime` with a separate host command. It is installed in the guest image and is launched by the VM's systemd unit when the control plane wakes an assigned environment. Each environment also needs its own provisioned data disk, runtime metadata and network namespace. Power state alone does not prove guest tools are ready. If this setup is missing any of those pieces, guest tool calls will fail even while the web app is running.
 
 ## Browser (live web access)
 
 The `browser` tool always provides saved reads (`read_observation` / `search_observation`, available offline). Live operations require one of two modes, selected by `BROWSER_DRIVER`:
 
-**Trusted CDP (default; no extra service).** Attach to an operator-started Chrome: set `BROWSER_CDP_ENDPOINT=9222` (or a full URL) and optionally `BROWSER_CDP_OWNER_ID` to restrict browser use to one user. The worker talks to that Chrome directly through the pinned `agent-browser` CLI (0.38.x), so no browser process runs inside Trinity and no extra service is needed. Chrome must be started with remote debugging by the operator; Trinity never launches or replaces it.
+**Trusted CDP (optional; no extra service).** Live access stays off while `BROWSER_CDP_ENDPOINT` is unset. To enable it, attach to an operator-started Chrome: set `BROWSER_CDP_ENDPOINT=9222` (or a full URL) and optionally `BROWSER_CDP_OWNER_ID` to restrict browser use to one user. The worker talks to that Chrome directly through the pinned `agent-browser` CLI (0.38.x), so no browser process runs inside Trinity and no extra service is needed. Chrome must be started with remote debugging by the operator; Trinity never launches or replaces it.
 
-**Managed Zendriver (separate supervisor process).** Set `BROWSER_DRIVER=zendriver`, `BROWSER_RUNTIME_ENDPOINT=http://127.0.0.1:3010`, a shared `BROWSER_RUNTIME_TOKEN` (min 32 chars, same value in server, worker and runtime), and `BROWSER_PROFILE_DIR` (a persistent, encrypted volume mounted only into the runtime). Then run the supervisor as a fourth process next to `dev:server` / `dev:worker`:
+**Managed Zendriver (separate supervisor process).** Set `BROWSER_DRIVER=zendriver`, `BROWSER_RUNTIME_ENDPOINT=http://127.0.0.1:3010`, and a shared `BROWSER_RUNTIME_TOKEN` (min 32 characters, same value in server, worker and runtime). With `EXECUTION_DRIVER=local`, set `BROWSER_PROFILE_DIR` to the protected persistent profile directory mounted into the Browser Runtime. With `EXECUTION_DRIVER=firecracker`, set it to the per-user profile directory on the encrypted guest data volume; do not mount that guest path into the host Browser Runtime. Then run the supervisor as an additional process next to `dev:server` / `dev:worker`:
 
 ```bash
 pnpm dev:browser-runtime   # or `pnpm start:browser-runtime` (no watch)
@@ -74,44 +149,45 @@ pnpm dev:browser-runtime   # or `pnpm start:browser-runtime` (no watch)
 
 It launches a private Chrome per session under `<BROWSER_PROFILE_DIR>/<tenant-id>/<user-id>`, with exclusive per-profile leases, bounded idle shutdown and per-call PostgreSQL command journaling.
 
-**Managed Chrome connects directly.** The sandbox environment is scrubbed (no inherited proxy variables), so if this host needs a proxy for outbound traffic, set it explicitly on the runtime process: `BROWSER_PROXY_URL=http://127.0.0.1:7890` (optional `BROWSER_NO_PROXY` override). Without it, destinations unreachable directly (e.g. Google from a network that requires a proxy) hang until the per-command deadline and surface as `DRIVER_FAILED`.
+**Sandbox egress follows the host configuration.** Set `SANDBOX_PROXY_URL=http://127.0.0.1:20112` in the deployment `.env` to use an existing host HTTP proxy for the whole Firecracker guest, then apply the host egress installer through the maintenance release wrapper. Empty/unset uses direct host routing. This does not change the host default route or control-plane traffic. Proxy settings stay on the host; no Clash configuration or browser-specific guest route is needed. Locally launched managed Chrome also consumes this setting. The development network still blocks IPv6 and private/reserved destinations; see the [host guide](deploy/firecracker/README.md#whole-guest-egress-with-sandbox_proxy_url).
 
 **Profile locks.** A graceful stop (`CTRL+C`, SIGINT/SIGTERM) terminates managed Chrome via SIGTERM so Chrome removes its own `Singleton*` locks; the runtime then exits deterministically. After a crash or SIGKILL, the next session start reclaims provably stale locks automatically: the lease's recorded pid is dead on this host, the Chrome `SingletonLock` owner pid is dead, and no live process references the profile directory. Ambiguous cases (live pid, foreign host, unverifiable ownership) fail closed and still need operator recovery: confirm every Chrome using the profile has stopped, then remove `.locks/<tenant-id>-<user-id>.lock` and the profile's `Singleton*` symlinks.
 
 ## Configuration (`.env`)
 
-| Variable                          | Required                   | Default                                                                       | Purpose                                                                           |
-| --------------------------------- | -------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `DATABASE_URL`                    | for PG store / migrations  | `postgresql://trinity_harness:trinity_harness@localhost:5432/trinity_harness` | PostgreSQL connection                                                             |
-| `REDIS_URL`                       | for distributed mode (M2)  | —                                                                             | Redis 7+ connection (streams, Pub/Sub, BullMQ)                                    |
-| `TOKEN_SECRET`                    | when `DATABASE_URL` is set | —                                                                             | HMAC key for bearer tokens (min 16 chars)                                         |
-| `ADMIN_EMAIL`                     | no                         | `admin@trinity.local`                                                         | First-boot bootstrap admin email                                                  |
-| `ADMIN_PASSWORD`                  | first boot only            | —                                                                             | First-boot bootstrap admin password (min 8 chars)                                 |
-| `ANTHROPIC_API_KEY`               | for `anthropic/...` models | —                                                                             | Anthropic API key (server-side only)                                              |
-| `ANTHROPIC_BASE_URL`              | no                         | —                                                                             | Custom Anthropic-compatible endpoint                                              |
-| `OPENAI_API_KEY`                  | for `openai/...` models    | —                                                                             | OpenAI API key (server-side only)                                                 |
-| `OPENAI_BASE_URL`                 | no                         | —                                                                             | Custom OpenAI-compatible endpoint                                                 |
-| `MODEL`                           | no                         | `anthropic/claude-sonnet-4-20250514`                                          | Model in `provider/model-id` form                                                 |
-| `REASONING_BUDGET_TOKENS`         | no                         | —                                                                             | Anthropic extended-thinking budget (tokens)                                       |
-| `REASONING_EFFORT`                | no                         | —                                                                             | OpenAI reasoning effort (`low`/`medium`/`high`/…)                                 |
-| `PORT` / `HOST`                   | no                         | `3000` / `127.0.0.1`                                                          | Server listen address                                                             |
-| `WORKSPACE_ROOT`                  | no                         | cwd                                                                           | Directory the agent sandbox is rooted at                                          |
-| `SYSTEM_PROMPT`                   | no                         | `You are Trinity…`                                                            | System prompt for the loop                                                        |
-| `MAX_TURN_STEPS`                  | no                         | unlimited                                                                     | Optional per-agent step ceiling; reserves the last step for an answer             |
-| `TASK_MAX_REQUESTS`               | no                         | unlimited                                                                     | Optional shared request ceiling, including children, compaction and retries       |
-| `TASK_MAX_TOKENS`                 | no                         | unlimited                                                                     | Optional shared input + output token ceiling                                      |
-| `TASK_MAX_DURATION_MS`            | no                         | unlimited                                                                     | Optional task deadline in milliseconds                                            |
-| `TASK_MAX_COST`                   | no                         | unlimited                                                                     | Optional currency ceiling, e.g. `USD:1.50`; prices come from `config/models.yaml` |
-| `DEFAULT_PERMISSION_POLICY`       | no                         | `workspace-write`                                                             | M3: preset name or JSON policy for new sessions                                   |
-| `ACP_SERVER_URL` / `ACP_TOKEN`    | for acp-gateway            | `http://127.0.0.1:3000` / —                                                   | M3: server HTTP binding + bearer for the gateway                                  |
-| `CONTEXT_MAX_TOKENS`              | no                         | `160000`                                                                      | M4: projected-context budget before compaction                                    |
-| `CONTEXT_KEEP_TOKENS`             | no                         | `40000`                                                                       | M4: retained recent-context floor when compacting                                 |
-| `COMPACTION_MODEL`                | no                         | = `MODEL`                                                                     | M4: summarizer model                                                              |
-| `SPILL_THRESHOLD_BYTES`           | no                         | `50000`                                                                       | M4: tool results above this spill to the BlobStore                                |
-| `LSP_ENABLED` / `LSP_MAX_SERVERS` | no                         | `true` / `4`                                                                  | M4: language servers + per-process pool ceiling                                   |
-| `SANDBOX_ENV_MODE`                | no                         | `minimal`                                                                     | M5: `minimal` scrubs secrets from tool children; `inherit` is local-only          |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`     | no                         | —                                                                             | M5: OTLP/gRPC endpoint for traces + metrics                                       |
-| `OTEL_PROMETHEUS_PORT`            | no                         | —                                                                             | M5: serve Prometheus `/metrics` on this port                                      |
+| Variable                          | Required                   | Default                                                                       | Purpose                                                                                   |
+| --------------------------------- | -------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                    | for PG store / migrations  | `postgresql://trinity_harness:trinity_harness@localhost:5432/trinity_harness` | PostgreSQL connection                                                                     |
+| `REDIS_URL`                       | for distributed mode (M2)  | —                                                                             | Redis 7+ connection (streams, Pub/Sub, BullMQ)                                            |
+| `TOKEN_SECRET`                    | when `DATABASE_URL` is set | —                                                                             | HMAC key for bearer tokens (min 16 chars)                                                 |
+| `ADMIN_EMAIL`                     | no                         | `admin@trinity.local`                                                         | First-boot bootstrap admin email                                                          |
+| `ADMIN_PASSWORD`                  | first boot only            | —                                                                             | First-boot bootstrap admin password (min 8 chars)                                         |
+| `ANTHROPIC_API_KEY`               | for `anthropic/...` models | —                                                                             | Anthropic API key (server-side only)                                                      |
+| `ANTHROPIC_BASE_URL`              | no                         | —                                                                             | Custom Anthropic-compatible endpoint                                                      |
+| `OPENAI_API_KEY`                  | for `openai/...` models    | —                                                                             | OpenAI API key (server-side only)                                                         |
+| `OPENAI_BASE_URL`                 | no                         | —                                                                             | Custom OpenAI-compatible endpoint                                                         |
+| `MODEL`                           | no                         | `anthropic/claude-sonnet-4-20250514`                                          | Model in `provider/model-id` form                                                         |
+| `REASONING_BUDGET_TOKENS`         | no                         | —                                                                             | Anthropic extended-thinking budget (tokens)                                               |
+| `REASONING_EFFORT`                | no                         | —                                                                             | OpenAI reasoning effort (`low`/`medium`/`high`/…)                                         |
+| `PORT` / `HOST`                   | no                         | `3000` / `127.0.0.1`                                                          | Server listen address                                                                     |
+| `WORKSPACE_ROOT`                  | no                         | cwd                                                                           | Directory the agent sandbox is rooted at                                                  |
+| `SYSTEM_PROMPT`                   | no                         | `You are Trinity…`                                                            | System prompt for the loop                                                                |
+| `MAX_TURN_STEPS`                  | no                         | unlimited                                                                     | Optional per-agent step ceiling; reserves the last step for an answer                     |
+| `TASK_MAX_TOOL_CALLS`             | no                         | unlimited                                                                     | Optional shared attempted tool-call ceiling; complete waves are admitted before execution |
+| `TASK_MAX_REQUESTS`               | no                         | unlimited                                                                     | Optional shared request ceiling, including children, compaction and retries               |
+| `TASK_MAX_TOKENS`                 | no                         | unlimited                                                                     | Optional shared input + output token ceiling                                              |
+| `TASK_MAX_DURATION_MS`            | no                         | unlimited                                                                     | Optional task deadline in milliseconds                                                    |
+| `TASK_MAX_COST`                   | no                         | unlimited                                                                     | Optional currency ceiling, e.g. `USD:1.50`; prices come from `config/models.yaml`         |
+| `DEFAULT_PERMISSION_POLICY`       | no                         | `workspace-write`                                                             | M3: preset name or JSON policy for new sessions                                           |
+| `ACP_SERVER_URL` / `ACP_TOKEN`    | for acp-gateway            | `http://127.0.0.1:3000` / —                                                   | M3: server HTTP binding + bearer for the gateway                                          |
+| `CONTEXT_MAX_TOKENS`              | no                         | `160000`                                                                      | M4: projected-context budget before compaction                                            |
+| `CONTEXT_KEEP_TOKENS`             | no                         | `40000`                                                                       | M4: retained recent-context floor when compacting                                         |
+| `COMPACTION_MODEL`                | no                         | = `MODEL`                                                                     | M4: summarizer model                                                                      |
+| `SPILL_THRESHOLD_BYTES`           | no                         | `50000`                                                                       | M4: tool results above this spill to the BlobStore                                        |
+| `LSP_ENABLED` / `LSP_MAX_SERVERS` | no                         | `true` / `4`                                                                  | M4: language servers + per-process pool ceiling                                           |
+| `SANDBOX_ENV_MODE`                | no                         | `minimal`                                                                     | M5: `minimal` scrubs secrets from tool children; `inherit` is local-only                  |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`     | no                         | —                                                                             | M5: OTLP/gRPC endpoint for traces + metrics                                               |
+| `OTEL_PROMETHEUS_PORT`            | no                         | —                                                                             | M5: serve Prometheus `/metrics` on this port                                              |
 
 Server modes (auto-selected in `apps/server/src/main.ts`): `DATABASE_URL` + `REDIS_URL` → **distributed** (BullMQ turns run on `agent-worker`; SSE relayed via Redis Streams); `DATABASE_URL` only → PG event log with the loop in-server; neither → M1 in-memory inline mode (tests/local fallback). `REDIS_URL` without `DATABASE_URL` is rejected (fail-closed: distributed mode needs the PG event log).
 

@@ -19,6 +19,7 @@ export * from './citations.js';
 export * from './browser.js';
 export * from './browser-driver.js';
 export * from './browser-preview.js';
+export * from './browser-interaction.js';
 export * from './task.js';
 export * from './execution-context.js';
 

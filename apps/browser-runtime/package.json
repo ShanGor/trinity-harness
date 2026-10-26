@@ -12,6 +12,7 @@
     "@trinity-harness/contracts": "*",
     "@trinity-harness/core": "*",
     "@trinity-harness/db": "*",
+    "@trinity-harness/otel": "*",
     "dotenv": "^18.0.4",
     "fastify": "^5.12.5",
     "tsx": "^4.23.15",

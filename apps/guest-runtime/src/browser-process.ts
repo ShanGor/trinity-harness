@@ -9,7 +9,7 @@ import {
 /** Operator-owned executable and authenticated boot identity select the durable profile. */
 export async function openGuestBrowser(
   sandbox: SandboxPort,
-  config: { binary: string; profileRoot: string; tenantId: string; userId: string; proxy?: string },
+  config: { binary: string; profileRoot: string; tenantId: string; userId: string },
   sessionId: string,
   signal: AbortSignal,
 ): Promise<LongRunningProcess> {
@@ -35,15 +35,6 @@ export async function openGuestBrowser(
       ['--log', 'off', '--user-data-dir', profile.userDataDir],
       {
         processGroup: true,
-        ...(config.proxy
-          ? {
-              env: {
-                http_proxy: config.proxy,
-                https_proxy: config.proxy,
-                no_proxy: 'localhost,127.0.0.1,::1',
-              },
-            }
-          : {}),
       },
     );
     return {

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { guestRpcDuration, tracer } from '../telemetry.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -13,6 +14,7 @@ import {
   type GuestRequestPort,
   type GuestOperation,
   type GuestValue,
+  type GuestOperationFailure,
   type SessionMetaStore,
   type UserStore,
 } from '@trinity-harness/contracts';
@@ -23,6 +25,21 @@ export class GuestUnavailableError extends Error {
     super(
       'Personal VM execution is unavailable; no operation was retried or routed locally. A lost response can have an unknown effect.',
     );
+  }
+}
+
+export class GuestOperationError extends Error {
+  readonly code: GuestOperationFailure['code'];
+  readonly effect = 'none';
+  constructor(failure: GuestOperationFailure) {
+    const messages: Record<GuestOperationFailure['code'], string> = {
+      FILE_NOT_FOUND: 'File not found in the guest workspace.',
+      ACCESS_DENIED: 'Access to the requested guest file was denied.',
+      NOT_A_DIRECTORY: 'A component of the requested guest path is not a directory.',
+      IS_A_DIRECTORY: 'The requested guest path is a directory, not a file.',
+    };
+    super(`${messages[failure.code]} (${failure.code})`);
+    this.code = failure.code;
   }
 }
 
@@ -43,8 +60,56 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
   }
   async call(sessionId: string, input: GuestOperation, signal?: AbortSignal): Promise<GuestValue> {
     const operation = guestOperationSchema.parse(input);
-    const meta = await this.metas.get(sessionId);
-    const user = meta ? await this.users.findById(meta.userId) : null;
+    return tracer.startActiveSpan(
+      'trinity.guest.rpc',
+      {
+        attributes: { 'trinity.guest.operation': operation.kind },
+      },
+      async (span) => {
+        const started = performance.now();
+        let status = 'error';
+        try {
+          signal?.throwIfAborted();
+          const value = await this.route(sessionId, operation, signal);
+          status = 'ok';
+          return value;
+        } finally {
+          guestRpcDuration.record(performance.now() - started, {
+            'trinity.guest.operation': operation.kind,
+            'trinity.guest.phase': 'total',
+            'trinity.guest.status': status,
+          });
+          span.setAttribute('trinity.guest.status', status);
+          span.end();
+        }
+      },
+    );
+  }
+  private async measure<T>(
+    operation: GuestOperation,
+    phase: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const started = performance.now();
+    try {
+      return await run();
+    } finally {
+      guestRpcDuration.record(performance.now() - started, {
+        'trinity.guest.operation': operation.kind,
+        'trinity.guest.phase': phase,
+      });
+    }
+  }
+  private async route(
+    sessionId: string,
+    operation: GuestOperation,
+    signal?: AbortSignal,
+  ): Promise<GuestValue> {
+    const { meta, user } = await this.measure(operation, 'metadata', async () => {
+      const meta = await this.metas.get(sessionId);
+      const user = meta ? await this.users.findById(meta.userId) : null;
+      return { meta, user };
+    });
     if (
       !meta?.workspaceUri ||
       meta.closedAt ||
@@ -61,16 +126,19 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
     );
     guestEnvelopeSchema.shape.workspace.parse(workspace);
     const identity = { tenantId: meta.tenantId, userId: meta.userId, role: user.role };
-    let environment = await this.store.get(identity);
-    if (environment?.state === 'starting') environment = await this.environments.get(identity);
-    if (
-      (!environment || environment.state === 'stopped') &&
-      ['processRead', 'processWrite', 'processKill'].includes(operation.kind)
-    )
-      throw new GuestUnavailableError();
-    if (!environment || environment.state === 'stopped')
-      environment = await this.environments.wake(identity, signal);
-    if (environment.state !== 'running') throw new GuestUnavailableError();
+    const environment = await this.measure(operation, 'environment', async () => {
+      let environment = await this.store.get(identity);
+      if (environment?.state === 'starting') environment = await this.environments.get(identity);
+      if (
+        (!environment || environment.state === 'stopped') &&
+        ['processRead', 'processWrite', 'processKill'].includes(operation.kind)
+      )
+        throw new GuestUnavailableError();
+      if (!environment || environment.state === 'stopped')
+        environment = await this.environments.wake(identity, signal);
+      if (environment.state !== 'running') throw new GuestUnavailableError();
+      return environment;
+    });
     const node = this.nodes.find((candidate) => candidate.id === environment.nodeId);
     if (!node) throw new GuestUnavailableError();
     const request = guestEnvelopeSchema.parse({
@@ -82,43 +150,52 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
       operation,
     });
     const active = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(125_000)]);
-    try {
-      const response = await this.fetcher(new URL('/guest', node.endpoint), {
-        method: 'POST',
-        redirect: 'error',
-        signal: active,
-        headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ environment, request }),
-      });
-      if (!response.ok || !response.body) {
-        await response.body?.cancel();
+    const value = await this.measure(operation, 'transport', async () => {
+      try {
+        const response = await this.fetcher(new URL('/guest', node.endpoint), {
+          method: 'POST',
+          redirect: 'error',
+          signal: active,
+          headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ environment, request }),
+        });
+        if (!response.ok || !response.body) {
+          await response.body?.cancel();
+          throw new GuestUnavailableError();
+        }
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        try {
+          for (;;) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            size += chunk.value.byteLength;
+            if (size > GUEST_WIRE_BYTES) throw new GuestUnavailableError();
+            chunks.push(chunk.value);
+          }
+          const result = guestResponseSchema.parse(
+            JSON.parse(Buffer.concat(chunks).toString('utf8')),
+          );
+          if (
+            result.requestId !== request.requestId ||
+            result.generation !== environment.generation
+          )
+            throw new GuestUnavailableError();
+          if (result.value.kind === 'operationError' && result.value.operation !== operation.kind)
+            throw new GuestUnavailableError();
+          return result.value;
+        } finally {
+          await reader.cancel();
+          reader.releaseLock();
+        }
+      } catch {
+        signal?.throwIfAborted();
         throw new GuestUnavailableError();
       }
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      try {
-        for (;;) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          size += chunk.value.byteLength;
-          if (size > GUEST_WIRE_BYTES) throw new GuestUnavailableError();
-          chunks.push(chunk.value);
-        }
-        const result = guestResponseSchema.parse(
-          JSON.parse(Buffer.concat(chunks).toString('utf8')),
-        );
-        if (result.requestId !== request.requestId || result.generation !== environment.generation)
-          throw new GuestUnavailableError();
-        return result.value;
-      } finally {
-        await reader.cancel();
-        reader.releaseLock();
-      }
-    } catch {
-      signal?.throwIfAborted();
-      throw new GuestUnavailableError();
-    }
+    });
+    if (value.kind === 'operationError') throw new GuestOperationError(value);
+    return value;
   }
 }
 

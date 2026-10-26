@@ -20,7 +20,7 @@ import {
 
 export function buildNodeAgent(
   runtime: NodeRuntimePort,
-  store: Pick<EnvironmentStore, 'authorizeNode'>,
+  store: Pick<EnvironmentStore, 'authorizeNode' | 'runShared'>,
   nodeId: string,
   token: string,
   guest?: {
@@ -44,7 +44,7 @@ export function buildNodeAgent(
     const { operation, environment } = parsed.data;
     if (operation === 'start' && !['starting', 'running'].includes(environment.state))
       return reply.code(409).send({ error: 'a current capacity reservation is required' });
-    if (environment.nodeId !== nodeId || !(await store.authorizeNode(environment)))
+    if (environment.nodeId !== nodeId || !(await store.authorizeNode(environment, operation)))
       return reply.code(409).send({ error: 'stale or unassigned instance' });
     const cancel = new AbortController();
     const abort = (): void => {
@@ -54,7 +54,7 @@ export function buildNodeAgent(
     reply.raw.once('close', abort);
     try {
       const result = await runtime.command(operation, environment, cancel.signal);
-      if (!(await store.authorizeNode(environment)))
+      if (!(await store.authorizeNode(environment, operation)))
         return reply.code(409).send({ error: 'instance generation changed' });
       return nodeRuntimeResultSchema.parse(result);
     } finally {
@@ -70,16 +70,23 @@ export function buildNodeAgent(
       .safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid guest envelope' });
     const { environment, request: envelope } = parsed.data;
-    const authorized = async (env: EnvironmentRecord, rpc: GuestEnvelope): Promise<boolean> => {
+    const authorized = async (
+      env: EnvironmentRecord,
+      rpc: GuestEnvelope,
+      operation: 'guest' | 'guest-complete' = 'guest',
+    ): Promise<boolean> => {
       if (
         env.nodeId !== nodeId ||
         env.state !== 'running' ||
         env.id !== rpc.environmentId ||
-        env.generation !== rpc.generation ||
-        !(await store.authorizeNode(env))
+        env.generation !== rpc.generation
       )
         return false;
-      const meta = await guest.metas.get(rpc.sessionId);
+      const [assigned, meta] = await Promise.all([
+        store.authorizeNode(env, operation),
+        guest.metas.get(rpc.sessionId),
+      ]);
+      if (!assigned) return false;
       const user = meta ? await guest.users.findById(meta.userId) : null;
       return !!(
         meta?.workspaceUri &&
@@ -95,8 +102,6 @@ export function buildNodeAgent(
           rpc.workspace
       );
     };
-    if (!(await authorized(environment, envelope)))
-      return reply.code(409).send({ error: 'guest assignment or session access changed' });
     const cancelled = new AbortController();
     const abort = (): void => {
       if (!reply.raw.writableFinished) cancelled.abort();
@@ -104,15 +109,32 @@ export function buildNodeAgent(
     request.raw.once('aborted', abort);
     reply.raw.once('close', abort);
     try {
-      const value = await guest.relay.call(environment, envelope, cancelled.signal);
-      if (!(await authorized(environment, envelope)))
+      const result = await store.runShared(
+        { tenantId: environment.tenantId, userId: environment.userId, role: 'developer' },
+        async (lockSignal) => {
+          if (!(await authorized(environment, envelope)))
+            return { ok: false, effect: 'none' } as const;
+          const value = await guest.relay.call(
+            environment,
+            envelope,
+            AbortSignal.any([cancelled.signal, lockSignal]),
+          );
+          if (!(await authorized(environment, envelope, 'guest-complete')))
+            return { ok: false, effect: 'unknown' } as const;
+          return { ok: true, value } as const;
+        },
+        cancelled.signal,
+      );
+      if (!result.ok && result.effect === 'none')
+        return reply.code(409).send({ error: 'guest assignment or session access changed' });
+      if (!result.ok)
         return reply
           .code(409)
           .send({ error: 'guest assignment or session access changed; effect may be unknown' });
       return guestResponseSchema.parse({
         requestId: envelope.requestId,
         generation: envelope.generation,
-        value,
+        value: result.value,
       });
     } finally {
       request.raw.removeListener('aborted', abort);

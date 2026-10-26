@@ -7,6 +7,7 @@ import type {
   User,
   EnvironmentPort,
 } from '@trinity-harness/contracts';
+import { guestOperationSchema } from '@trinity-harness/contracts';
 
 function fixture() {
   const user: User = {
@@ -172,4 +173,158 @@ it('keeps managed guest Chrome alive after the allocating tool deadline expires'
   child.kill();
   await expect(child.exited).resolves.toBeNull();
   expect(call.mock.calls[1]![1].kind).toBe('processKill');
+});
+
+it('opens guest browser without passing host proxy configuration', async () => {
+  const processId = randomUUID();
+  const f = fixture();
+  f.fetcher.mockImplementation(async (_url, options) => {
+    const body = JSON.parse(options!.body as string) as {
+      request: {
+        requestId: string;
+        generation: string;
+        operation: { kind: string; proxyUrl?: string };
+      };
+    };
+    const value =
+      body.request.operation.kind === 'browserOpen'
+        ? { kind: 'process', processId }
+        : { kind: 'ok' };
+    return new Response(
+      JSON.stringify({
+        requestId: body.request.requestId,
+        generation: body.request.generation,
+        value,
+      }),
+    );
+  });
+  const child = new RemoteSandbox(f.router, f.meta.id).openBrowser();
+  child.kill();
+  await expect(child.exited).resolves.toBeNull();
+  const firstBody = JSON.parse(f.fetcher.mock.calls[0]![1]!.body as string);
+  expect(firstBody.request.operation).toEqual({ kind: 'browserOpen' });
+  expect(f.fetcher).toHaveBeenCalledTimes(2);
+  expect(
+    guestOperationSchema.safeParse({ kind: 'browserOpen', proxyUrl: 'http://proxy:7890' }).success,
+  ).toBe(false);
+});
+
+it('records bounded RPC phase timings on success and uncertain failure', async () => {
+  const { guestRpcDuration } = await import('../src/telemetry.js');
+  const record = vi.spyOn(guestRpcDuration, 'record');
+  const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+  try {
+    const f = fixture();
+    await f.router.call(f.meta.id, { kind: 'skillsList' });
+    expect(record.mock.calls.map(([, attrs]) => attrs?.['trinity.guest.phase'])).toEqual([
+      'metadata',
+      'environment',
+      'transport',
+      'total',
+    ]);
+    expect(record.mock.calls.at(-1)).toEqual([
+      0,
+      {
+        'trinity.guest.operation': 'skillsList',
+        'trinity.guest.phase': 'total',
+        'trinity.guest.status': 'ok',
+      },
+    ]);
+    record.mockClear();
+    f.fetcher.mockRejectedValueOnce(new Error('private transport details'));
+    await expect(f.router.call(f.meta.id, { kind: 'skillsList' })).rejects.toThrow(
+      'unknown effect',
+    );
+    expect(record.mock.calls.at(-1)?.[1]?.['trinity.guest.status']).toBe('error');
+    expect(JSON.stringify(record.mock.calls)).not.toContain('private transport details');
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+  } finally {
+    record.mockRestore();
+    clock.mockRestore();
+  }
+});
+
+it.each(['read', 'readBytes'] as const)(
+  'preserves a verified %s operation error without reporting a VM outage',
+  async (kind) => {
+    const f = fixture();
+    f.fetcher.mockImplementationOnce(async (_url, options) => {
+      const { request } = JSON.parse(options!.body as string);
+      return new Response(
+        JSON.stringify({
+          requestId: request.requestId,
+          generation: request.generation,
+          value: {
+            kind: 'operationError',
+            operation: kind,
+            code: 'FILE_NOT_FOUND',
+            effect: 'none',
+          },
+        }),
+      );
+    });
+    await expect(
+      f.router.call(f.meta.id, { kind, path: 'missing', maxBytes: 100 }),
+    ).rejects.toMatchObject({
+      code: 'FILE_NOT_FOUND',
+      effect: 'none',
+      message: expect.stringContaining('File not found'),
+    });
+    expect(f.fetcher).toHaveBeenCalledOnce();
+    expect(f.wake).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['operation', 'generation', 'request', 'effect', 'extra', 'http'] as const)(
+  'rejects a typed failure with mismatched or invalid %s without retry',
+  async (mode) => {
+    const f = fixture();
+    f.fetcher.mockImplementationOnce(async (_url, options) => {
+      const { request } = JSON.parse(options!.body as string);
+      return new Response(
+        JSON.stringify({
+          requestId: mode === 'request' ? randomUUID() : request.requestId,
+          generation: mode === 'generation' ? randomUUID() : request.generation,
+          value: {
+            kind: 'operationError',
+            operation: mode === 'operation' ? 'readBytes' : 'read',
+            code: 'FILE_NOT_FOUND',
+            effect: mode === 'effect' ? 'unknown' : 'none',
+            ...(mode === 'extra' ? { rawMessage: 'private syscall details' } : {}),
+          },
+        }),
+        { status: mode === 'http' ? 503 : 200 },
+      );
+    });
+    await expect(
+      f.router.call(f.meta.id, { kind: 'read', path: 'missing', maxBytes: 100 }),
+    ).rejects.toMatchObject({
+      code: 'GUEST_UNAVAILABLE',
+      message: expect.stringContaining('unknown effect'),
+    });
+    expect(f.fetcher).toHaveBeenCalledOnce();
+  },
+);
+
+it('never accepts a read failure as acknowledgement of a mutation', async () => {
+  const f = fixture();
+  f.fetcher.mockImplementationOnce(async (_url, options) => {
+    const { request } = JSON.parse(options!.body as string);
+    return new Response(
+      JSON.stringify({
+        requestId: request.requestId,
+        generation: request.generation,
+        value: {
+          kind: 'operationError',
+          operation: 'read',
+          code: 'FILE_NOT_FOUND',
+          effect: 'none',
+        },
+      }),
+    );
+  });
+  await expect(
+    f.router.call(f.meta.id, { kind: 'write', path: 'file', content: 'effect' }),
+  ).rejects.toMatchObject({ code: 'GUEST_UNAVAILABLE' });
+  expect(f.fetcher).toHaveBeenCalledOnce();
 });

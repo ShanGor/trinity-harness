@@ -11,6 +11,7 @@ const fake = vi.hoisted(() => ({
   onEvent: undefined as ((event: ServerEvent) => void) | undefined,
   markdown: vi.fn(),
   getTimeline: vi.fn<() => Promise<TimelinePage>>(),
+  createSession: vi.fn<(...args: unknown[]) => Promise<string>>(async () => 'new-session'),
   sendPrompt: vi.fn(async () => undefined),
   respondApproval: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ ok: true as const, alreadyStopped: false })),
@@ -41,7 +42,7 @@ vi.mock('@trinity-harness/client-acp', () => ({
     getSchedules = async () => ({ available: false, schedules: [] });
     getInbox = async () => ({ available: false, items: [] });
     getBrowserPreview = fake.getBrowserPreview;
-    createSession = async () => 'new-session';
+    createSession = fake.createSession;
     ensureMainChat = async () => 'main-session';
     getTimeline = fake.getTimeline;
     sendPrompt = fake.sendPrompt;
@@ -110,6 +111,7 @@ beforeEach(async () => {
   fake.getTimeline.mockReset().mockResolvedValue({ events: [], lastSeq: 0, nextBefore: null });
   fake.onEvent = undefined;
   fake.markdown.mockClear();
+  fake.createSession.mockReset().mockResolvedValue('new-session');
   fake.sendPrompt.mockClear();
   fake.cancelTurn.mockClear();
   fake.getBrowserPreview.mockClear();
@@ -131,6 +133,44 @@ afterEach(async () => {
 });
 
 describe('chat typing and streaming performance', () => {
+  it('creates side Chat with workspace-write permissions', async () => {
+    await type(container.querySelector('textarea')!, 'Save research notes');
+    await click(container.querySelector('.ant-sender-actions-btn'));
+    expect(fake.createSession).toHaveBeenCalledWith(
+      expect.any(String),
+      'workspace-write',
+      undefined,
+      expect.objectContaining({ kind: 'chat' }),
+    );
+  });
+
+  it('retains workspace-write in the Chat recovery descriptor after a lost creation response', async () => {
+    fake.createSession.mockRejectedValueOnce(new Error('connection lost'));
+    await type(container.querySelector('textarea')!, 'Save research notes');
+    await click(container.querySelector('.ant-sender-actions-btn'));
+    expect(JSON.parse(sessionStorage.getItem('trinity.pendingCreation:user')!)).toMatchObject({
+      kind: 'chat',
+      policy: 'workspace-write',
+    });
+  });
+
+  it('preserves the recorded policy when recovering an existing Chat creation operation', async () => {
+    await act(async () => root.unmount());
+    const operationId = '019a1e10-1234-7000-8000-000000000001';
+    sessionStorage.setItem(
+      'trinity.pendingCreation:user',
+      JSON.stringify({ operationId, kind: 'chat', policy: 'read-only', title: 'Pending Chat' }),
+    );
+    fake.createSession.mockClear();
+    root = createRoot(container);
+    await act(async () => root.render(createElement(AntdApp, null, createElement(App))));
+    expect(fake.createSession).toHaveBeenCalledWith('Pending Chat', 'read-only', undefined, {
+      kind: 'chat',
+      creationOperationId: operationId,
+    });
+    expect(sessionStorage.getItem('trinity.pendingCreation:user')).toBeNull();
+  });
+
   it('shows Browser activity and opens the viewer without replacing the composer or draft', async () => {
     await click(container.querySelector('.history-item'));
     const textarea = container.querySelector('textarea')!;

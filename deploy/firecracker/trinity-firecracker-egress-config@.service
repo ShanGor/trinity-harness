@@ -1,0 +1,20 @@
+[Unit]
+Description=Configure guest egress for Firecracker environment %i
+Requires=trinity-firecracker-egress.service trinity-firecracker-egress-dns.service
+After=trinity-firecracker-egress.service trinity-firecracker-egress-dns.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/trinity-configure-firecracker-guest-egress %i
+TimeoutStartSec=90s
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=no
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+ReadWritePaths=/srv/trinity-node /run/lock
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN

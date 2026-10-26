@@ -15,7 +15,7 @@ export function createTaskTool(store: SessionStore): ToolDefinition {
     effect: { kind: 'read', scope: 'control', evidence: 'none' },
     concurrency: 'exclusive',
     description:
-      'Track a revisable working plan and verify checks using current-task tool evidence. Plan substantial changes around the requested outcome and explicit constraints. Routine reads and direct answers need no checklist. Optional intent records source user event IDs, deliverables, constraints and action purpose; these remain your interpretation. Optional interpretation and assumptions distinguish your understanding from the original request. To replace mistaken checks, interpretation or assumptions, submit the full updated checks and a revisionReason explaining the correction and how user requirements remain covered. Omitted interpretation/assumptions retain their previous values; use assumptions: [] to clear assumptions. Changed checks or interpretations require fresh evidence; unchanged checks retain valid evidence. An initial plan may bind earlier successful reads from this request. Mark a check purpose method only when it is a chosen method rather than a requested outcome; retire such checks with a revisionReason when irrelevant, preserving user obligations. Optional assess records your outcome judgment and unresolved requirements; it does not verify semantic success. Command checks require the exact test/build command; observation checks require a successful read. Set dependency workspace or browser for checks about current state; immutable source evidence proves only the recorded observation. After execution, verify each check using an exact callId from the working-plan evidence list or task status, not a guessed provider ID. Later effects invalidate checks. This tool never executes commands or changes user requirements or permissions. Status reports pending checks and recent eligible evidence IDs. Verified checks do not prove relevance, semantic correctness or task completeness.',
+      'Track a revisable working plan and verify checks using current-task tool evidence. In verification-enabled runs, record a minimal plan before mutations or unknown-effect calls, even for small edits, tied to the requested outcome and constraints. Routine reads and direct answers need no checklist. Optional intent records source user event IDs, deliverables, constraints and action purpose; these remain your interpretation. Optional interpretation and assumptions distinguish your understanding from the original request. To replace mistaken checks, interpretation or assumptions, submit the full updated checks and a revisionReason explaining the correction and how user requirements remain covered. Omitted interpretation/assumptions retain their previous values; use assumptions: [] to clear assumptions. Changed checks or interpretations require fresh evidence; unchanged checks retain valid evidence. An initial plan may bind earlier successful reads from this request. Mark a check purpose method only when it is a chosen method rather than a requested outcome; retire such checks with a revisionReason when irrelevant, preserving user obligations. Optional assess records your outcome judgment and unresolved requirements; it does not verify semantic success. Command checks require the exact shell command string, including formatting, redirections and filters. Run the planned command unchanged; extra diagnostics belong in separate calls. Observation checks require a successful read. Set dependency workspace or browser for checks about current state; immutable source evidence proves only the recorded observation. After execution, verify each check using the exact resultSeq from the working-plan evidence list or task status (preferred), or its exact recorded callId. Never guess provider IDs; both selectors, if supplied, must identify the same result. Later effects invalidate checks. This tool never executes commands or changes user requirements or permissions. Status reports pending checks, recent eligible evidence IDs and commandRepairs. For exact_command_required, run the supplied command unchanged through bash; exit code 0 from a different command is not matching evidence. For fresh_evidence_required, collect a fresh exact-command result under the current plan. For verification_required, call task verify with checkId as id and the supplied resultSeq. Before rerunning commands, inspect prior effects and apply normal permissions; never repeat mutations merely to repair bookkeeping. Repairing the plan or assessing fulfilled does not verify checks. Never guess a resultSeq or use 0. Verified checks do not prove relevance, semantic correctness or task completeness.',
     parameters: taskToolInputSchema,
     execute: async (args, ctx): Promise<ToolResult> => {
       const events = await store.load(ctx.sessionId);
@@ -130,23 +130,32 @@ export function createTaskTool(store: SessionStore): ToolDefinition {
             },
           ]);
       } else if (args.operation === 'verify') {
-        const resultIndex = events.findLastIndex(
-          (event) => event.type === 'tool/result' && event.callId === args.callId,
-        );
-        if (resultIndex < events.findIndex((event) => event.eventId === promptId))
+        const resultIndex =
+          args.resultSeq !== undefined
+            ? args.resultSeq - 1
+            : events.findLastIndex(
+                (event) => event.type === 'tool/result' && event.callId === args.callId,
+              );
+        const selected = events[resultIndex];
+        if (
+          selected?.type !== 'tool/result' ||
+          (args.callId !== undefined && selected.callId !== args.callId) ||
+          resultIndex < events.findIndex((event) => event.eventId === promptId)
+        )
           return {
             isError: true,
             value: {
               message:
-                'Evidence must come from this task. Use an exact callId from the evidence list.',
+                'Select an exact resultSeq (preferred) or callId from this task’s eligible evidence list; both selectors must agree.',
               ...taskState(events, promptId),
             },
           };
+        const callId = selected.callId;
         const candidate = {
           ...meta,
           type: 'task/check' as const,
           id: args.id,
-          callId: args.callId,
+          callId,
           resultSeq: resultIndex + 1,
         };
         const plan = events.findLast(
@@ -163,7 +172,7 @@ export function createTaskTool(store: SessionStore): ToolDefinition {
           return {
             isError: true,
             value: {
-              message: evidenceRejection(events, promptId, args.id, args.callId),
+              message: evidenceRejection(events, promptId, args.id, callId),
               ...taskState(events, promptId),
             },
           };

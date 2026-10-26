@@ -129,6 +129,48 @@ describe('ZendriverBrowserDriver error pages', () => {
     expect(binding.tabId).toBe('TAB1');
   });
 
+  it('reports an unreachable destination as PAGE_UNAVAILABLE when load waiting reaches Chrome error page', async () => {
+    const driver = new ZendriverBrowserDriver(
+      {
+        async call(name) {
+          if (name === 'browser_goto')
+            return {
+              content: [],
+              structuredContent: { url: 'https://unreachable.example/', title: '' },
+            };
+          if (name === 'browser_wait_for_load') throw new Error('navigation failed');
+          if (name === 'browser_status')
+            return {
+              content: [],
+              structuredContent: {
+                open: true,
+                tab_count: 1,
+                current_tab: { id: 'TAB1', url: 'https://unreachable.example/' },
+              },
+            };
+          if (name === 'browser_evaluate')
+            return {
+              content: [],
+              structuredContent: {
+                value: {
+                  url: 'chrome-error://chromewebdata/',
+                  documentRevision: '1792716860773_1',
+                  browserVersion: 'Chrome/155.0.0.0',
+                },
+              },
+            };
+          throw new Error(`unexpected call ${name}`);
+        },
+      },
+      sessionId,
+      generation,
+      owner,
+    );
+    await expect(
+      driver.navigate({} as never, 'https://unreachable.example/', {}),
+    ).rejects.toMatchObject({ code: 'PAGE_UNAVAILABLE', recovery: 'navigate' });
+  });
+
   it('rejects non-HTTP(S) documents with a typed denial instead of a schema error', async () => {
     const driver = new ZendriverBrowserDriver(
       fakeClient([{ tabUrl: 'file:///etc/passwd', documentUrl: 'file:///etc/passwd' }]),

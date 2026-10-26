@@ -6,6 +6,7 @@ vi.mock('dotenv', () => ({ config: vi.fn() }));
 const budgetKeys = [
   'MAX_TURN_STEPS',
   'TASK_MAX_REQUESTS',
+  'TASK_MAX_TOOL_CALLS',
   'TASK_MAX_TOKENS',
   'TASK_MAX_DURATION_MS',
   'TASK_MAX_COST',
@@ -25,6 +26,7 @@ it('leaves every worker task ceiling unlimited when unset', () => {
 });
 
 it('parses independently configured worker task ceilings', () => {
+  vi.stubEnv('TASK_MAX_TOOL_CALLS', '12');
   vi.stubEnv('TASK_MAX_REQUESTS', '20');
   expect(loadWorkerEnv().TASK_MAX_REQUESTS).toBe(20);
   expect(loadWorkerEnv().TASK_MAX_TOKENS).toBeUndefined();
@@ -35,6 +37,7 @@ it('parses independently configured worker task ceilings', () => {
   expect(loadWorkerEnv()).toMatchObject({
     MAX_TURN_STEPS: 10,
     TASK_MAX_REQUESTS: 20,
+    TASK_MAX_TOOL_CALLS: 12,
     TASK_MAX_TOKENS: 50000,
     TASK_MAX_DURATION_MS: 1000,
     TASK_MAX_COST: 'USD:1.50',

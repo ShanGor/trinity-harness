@@ -34,6 +34,7 @@ import type { ContextManager } from '../context/context-manager.js';
 import { PolicyToolRegistry } from '../policy-tool-registry.js';
 import {
   approvalDuration,
+  modelLatency,
   tokenCounter,
   toolCounter,
   tracer,
@@ -198,7 +199,12 @@ export class CoreAgentLoop implements AgentLoop {
     try {
       // M3: policy gating (docs/design.md §12). No policy ⇒ M2 behavior.
       const gate = new PolicyToolRegistry(tools, runOpts?.policy);
-      const researchAvailable = tools.schemas().some((tool) => tool.name === 'research');
+      const availableNames = new Set(gate.schemas().map((tool) => tool.name));
+      const deniedNames = tools
+        .schemas()
+        .filter((tool) => !availableNames.has(tool.name))
+        .map((tool) => tool.name);
+      const researchAvailable = gate.schemas().some((tool) => tool.name === 'research');
 
       const throwIfAborted = (): void => {
         if (signal?.aborted) {
@@ -338,6 +344,7 @@ export class CoreAgentLoop implements AgentLoop {
         request: LLMRequest,
         purpose: ModelUsage['purpose'],
       ): Promise<AsyncIterable<StreamChunk>> => {
+        const preparationStarted = performance.now();
         if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
         await ctx.contextGuard?.();
         if (signal?.aborted) signal.throwIfAborted();
@@ -364,21 +371,59 @@ export class CoreAgentLoop implements AgentLoop {
         }
         await ctx.contextGuard?.();
         throwIfAborted();
+        const modelStarted = performance.now();
+        const attributes = {
+          'trinity.model': request.model,
+          'trinity.llm.purpose': effectivePurpose,
+        };
+        modelLatency.record(modelStarted - preparationStarted, {
+          ...attributes,
+          'trinity.llm.phase': 'preparation',
+        });
+        const modelSpan = tracer.startSpan('trinity.llm.request', { attributes });
+        const recordLatency = (phase: string): void => {
+          const elapsed = performance.now() - modelStarted;
+          modelLatency.record(elapsed, { ...attributes, 'trinity.llm.phase': phase });
+          modelSpan.setAttribute(`trinity.llm.${phase}_ms`, elapsed);
+        };
         let stream: AsyncIterable<StreamChunk>;
         try {
           stream = await llm.stream(request);
         } catch (err) {
+          recordLatency('duration');
+          modelSpan.setStatus({ code: 2 });
+          modelSpan.end();
           await recordUsage(request.model, purpose, [], requestId);
           throw err;
         }
         const samples: TokenUsage[] = [];
+        let firstOutput = false;
+        let firstText = false;
         return (async function* () {
           try {
             for await (const chunk of stream) {
+              if (
+                !firstOutput &&
+                ((chunk.kind === 'text-delta' && chunk.text.length > 0) ||
+                  (chunk.kind === 'reasoning-delta' && chunk.text.length > 0) ||
+                  chunk.kind === 'tool-call')
+              ) {
+                firstOutput = true;
+                recordLatency('first_output');
+              }
+              if (!firstText && chunk.kind === 'text-delta' && chunk.text.length > 0) {
+                firstText = true;
+                recordLatency('first_text');
+              }
               if (chunk.kind === 'usage') samples.push(chunk);
               yield chunk;
             }
+          } catch (err) {
+            modelSpan.setStatus({ code: 2 });
+            throw err;
           } finally {
+            recordLatency('duration');
+            modelSpan.end();
             await recordUsage(request.model, purpose, samples, requestId);
           }
         })();
@@ -478,7 +523,7 @@ export class CoreAgentLoop implements AgentLoop {
                 creation?.type === 'session/created' && creation.kind ? promptId : undefined,
               model: this.opts.model,
               ...(system ? { system } : {}),
-              tools: tools.schemas(),
+              tools: gate.schemas(),
               llm: { stream: (request) => requestStream(request, 'compaction') },
             });
             return result.compacted;
@@ -616,7 +661,7 @@ export class CoreAgentLoop implements AgentLoop {
                 const inputTokens = estimateRequestTokens({
                   messages: active,
                   system: this.opts.systemPrompt,
-                  tools: tools.schemas(),
+                  tools: gate.schemas(),
                 });
                 const dialogueCharacters = Math.max(
                   0,
@@ -691,7 +736,7 @@ export class CoreAgentLoop implements AgentLoop {
             (await taskBudget?.shouldConclude({
               model: this.opts.model,
               messages: toModelMessages(history),
-              tools: tools.schemas(),
+              tools: gate.schemas(),
               system: this.opts.systemPrompt,
               maxOutputTokens: this.opts.maxOutputTokens ?? 8192,
             })) ?? false;
@@ -700,7 +745,7 @@ export class CoreAgentLoop implements AgentLoop {
               model: this.opts.model,
               messages: toModelMessages(history),
               system: this.opts.systemPrompt,
-              tools: tools.schemas(),
+              tools: gate.schemas(),
               maxOutputTokens: this.opts.maxOutputTokens ?? 8192,
             })) ?? false;
           const verifying =
@@ -711,7 +756,7 @@ export class CoreAgentLoop implements AgentLoop {
             steps === stepLimit
               ? `step limit (${stepLimit}) reached`
               : budgetFinalizing || (budgetConcluding && !verifying)
-                ? 'Task request/token/cost budget reached'
+                ? 'Task request/tool/token/cost budget reached'
                 : undefined;
           const concluding = conclusionReason !== undefined;
           lane = concluding ? 'final' : verifying ? 'verification' : 'work';
@@ -720,21 +765,40 @@ export class CoreAgentLoop implements AgentLoop {
             : undefined;
           const system = [
             this.opts.systemPrompt,
+            runOpts?.policy
+              ? `Current runtime permission snapshot: ${JSON.stringify({
+                  onAsk: runOpts.policy.onAsk,
+                  tools: Object.fromEntries(
+                    Object.entries(runOpts.policy.tools).filter(
+                      ([name]) =>
+                        name === '*' ||
+                        tools.schemas().some((tool) => tool.name === name) ||
+                        /^browser\.(click|fill|key|scroll)$/.test(name),
+                    ),
+                  ),
+                  allowWorkspaceInternalBash: runOpts.policy.allowWorkspaceInternalBash,
+                })}. This applies to this run; older conversation statements do not override it. An advertised tool may still require operation-specific approval. Account role does not bypass this policy.`
+              : undefined,
+            deniedNames.length
+              ? `Session permission policy excludes these tools: ${deniedNames.join(', ')}. Do not call them or delegate around their denial. Tools listed in this request may still require approval for particular operations. A denied tool does not prove that the execution environment is unavailable.`
+              : undefined,
             isChat
               ? 'This is an ad-hoc Chat with its own durable workspace. Use the available tools to fulfill the request, including research, files and commands under the effective permission policy. Store large intermediate data as artifacts and read bounded excerpts. A separate Work task is useful when the user wants a specific existing workspace, but is not required for research or execution here.'
               : undefined,
             augmented,
             `Current committed user request reference: eventId=${promptId}, seq=${promptSeq}. This identifies the original user message; working interpretations and reference data do not change its authority.`,
-            'Keep the scope of research, plans and delegation proportional to the requested outcome. Identify the specific unresolved question and how answering it changes the next decision before expanding work. Delegate a focused question with a useful stopping condition, not an exhaustive survey or a comparison matrix the user did not request. For a delegated task, return supported findings and explicit gaps when they suffice for the delegated question; do not take over the entire parent task. Context compaction and available budget are capacity controls, not reasons to expand research. Repeated output or failed approaches call for a strategy change; they do not certify completion or impose an automatic stop.',
+            'Choose the smallest action that advances an unresolved user requirement. Reuse delivered evidence; tool availability and your earlier proposals do not create requirements. Batch only independently necessary calls, and inspect prerequisites before dependent work. Avoid speculative probes, artificial test files or workspace changes unrelated to the requested outcome. Delegate focused questions with stopping conditions, without taking over the parent task. Available budget and compaction are capacity controls, not reasons to expand work.',
+            'For retry or continue, recover the relevant user objective and failure from authorized conversation; do not automatically execute every action previously offered. Follow current corrections and runtime policy instead of historical assistant descriptions. Clarify only when materially different interpretations remain. After failure, inspect the cause and choose an evidence-based recovery; changing tools, arguments or domains does not itself repair infrastructure. Never automatically repeat an unknown effect: safely observe its state first. Answer with supported findings and material gaps when further work would not change the answer. Strategy warnings do not certify completion or automatically end the task.',
+            'Tools operate within their configured sandbox. Describe the measured user environment accurately and never seek physical host access, host credentials or an escape from a personal guest VM.',
             verificationEnabled && !concluding
-              ? 'Plan substantial changes using task with checks tied to the requested outcome and constraints, including required tests/builds. Direct answers and routine reads need no checklist; tool use alone does not create a new user requirement. Use optional intent sourceEventIds to link your current outcome, deliverables, constraints and action purpose to the committed user messages. The plan is your working interpretation, not a replacement for the user request. Listing an assumption does not resolve it: investigate or clarify assumptions that would change the task before building dependent checks or broadening research. Resolve task-defining terminology with a focused source lookup or clarification before constructing a broad survey around an assumption. Keep checks proportional to the requested outcome; do not invent prerequisites for answering a clarification question. If tools remain unavailable, return supported partial findings or a focused clarification and report pending work explicitly rather than repeatedly probing or claiming verification. Correct mistaken methods or assumptions using a complete revised plan and revisionReason; do not discard user requirements to claim completion. Execute checks through normal tools, then call task verify with their current successful call IDs. Changed checks or interpretations and relevant later effects require fresh evidence. Unchanged checks can retain valid evidence, and an initial plan may bind earlier current-request reads. If a chosen method was irrelevant, revise it with a reason rather than expanding the task to satisfy it. A verified checklist proves recorded checks passed, not that the task was understood or completed. If work or verification is incomplete, say so explicitly.'
+              ? 'Before mutations or commands with unknown effects, record a minimal task plan tied to the requested outcome and constraints, including required tests/builds. In this verification-enabled runtime even a small edit needs its plan before execution; do not add unnecessary diagnostics or checks. Direct answers and routine reads need no checklist; tool use alone does not create a new user requirement. Use optional intent sourceEventIds to link your current outcome, deliverables, constraints and action purpose to the committed user messages. The plan is your working interpretation, not a replacement for the user request. Listing an assumption does not resolve it: investigate or clarify assumptions that would change the task before building dependent checks or broadening research. Resolve task-defining terminology with a focused source lookup or clarification before constructing a broad survey around an assumption. Keep checks proportional to the requested outcome; do not invent prerequisites for answering a clarification question. If tools remain unavailable, return supported partial findings or a focused clarification and report pending work explicitly rather than repeatedly probing or claiming verification. Correct mistaken methods or assumptions using a complete revised plan and revisionReason; do not discard user requirements to claim completion. Execute checks through normal tools, then call task verify using exact resultSeq values from the current eligible evidence list (preferred), or their exact recorded call IDs. Changed checks or interpretations and relevant later effects require fresh evidence. Unchanged checks can retain valid evidence, and an initial plan may bind earlier current-request reads. If a chosen method was irrelevant, revise it with a reason rather than expanding the task to satisfy it. A verified checklist proves recorded checks passed, not that the task was understood or completed. If work or verification is incomplete, say so explicitly.'
               : undefined,
             verifying
               ? 'Use the reserved verification allowance to run pending checks and record evidence. Do not start new implementation or delegate more work.'
               : undefined,
             conclusion,
             'For workspace text-file inspection, use read_file (and glob to locate files) instead of Bash commands such as cat, head, tail, sed, or grep. Reserve Bash for running commands, tests, builds, version-control operations, and other shell tasks. Sensitive-file reads are checked by the agent and may trigger the normal approval flow; call read_file directly when needed, do not invoke a separate approval tool or bypass the gate with Bash, and stop if access is rejected. Never repeat secret values in your final answer.',
-            'Keep progress updates brief. The final answer must synthesize the user request and link factual claims to reference documents actually read, using Markdown links. Distinguish supported findings, inference and unresolved questions. The interface lists observed sources separately; do not invent citations or describe internal bookkeeping.',
+            'Keep progress updates brief. Answer the requested question directly with decisive observed evidence and material limits. Label inference; avoid speculative causal stories, unrequested calculations, unmeasured performance promises and internal verification bookkeeping. A later success does not make a recorded earlier failure false. Link factual claims to reference documents actually read using Markdown links. The interface lists sources separately; do not invent citations.',
           ]
             .filter((s) => s !== undefined)
             .join('\n\n');
@@ -745,7 +809,7 @@ export class CoreAgentLoop implements AgentLoop {
             tools: concluding
               ? []
               : verifying
-                ? tools
+                ? gate
                     .schemas()
                     .filter(
                       (schema) =>
@@ -753,7 +817,7 @@ export class CoreAgentLoop implements AgentLoop {
                           schema.name,
                         ),
                     )
-                : tools.schemas(),
+                : gate.schemas(),
             signal,
             maxOutputTokens: Math.min(
               this.opts.maxOutputTokens ?? 8192,
@@ -764,7 +828,7 @@ export class CoreAgentLoop implements AgentLoop {
                     estimateRequestTokens({
                       messages: toModelMessages(history),
                       system,
-                      tools: concluding ? [] : tools.schemas(),
+                      tools: concluding ? [] : gate.schemas(),
                     }) * 1.15,
                   ),
               ),
@@ -1172,7 +1236,19 @@ export class CoreAgentLoop implements AgentLoop {
             // preserved); only allowed calls reach the execution pool.
             const presolved = new Map<string, ToolResult>();
             const executable: ToolCall[] = [];
+            const toolBudgetAllowed = (await taskBudget?.reserveTools(wave.length)) ?? true;
             for (const call of wave) {
+              if (!toolBudgetAllowed) {
+                presolved.set(call.id, {
+                  isError: true,
+                  value: {
+                    code: 'TOOL_BUDGET_EXHAUSTED',
+                    message:
+                      'The shared task tool-call budget cannot admit this complete wave. No call in this wave was executed. Conclude with supported findings and explicit incomplete work.',
+                  },
+                });
+                continue;
+              }
               if (
                 verifying &&
                 !verificationToolAllowed(await store.load(sessionId), promptId, call)
@@ -1198,8 +1274,9 @@ export class CoreAgentLoop implements AgentLoop {
                     code: 'NOT_EXECUTED',
                     operation: 'browser',
                     effect: 'none',
-                    message:
-                      'An earlier browser operation failed or the step call limit was reached. Inspect its result before proceeding.',
+                    message: browserFailed
+                      ? 'An earlier browser operation failed in this model step. This call was not executed; inspect that failure before proceeding.'
+                      : 'The browser call limit for this model step was reached. This call was not executed; inspect existing results before proceeding.',
                   },
                 });
                 continue;
@@ -1220,6 +1297,26 @@ export class CoreAgentLoop implements AgentLoop {
                   )
                     decision = 'allowed';
                 }
+              }
+              const effect = tools.effectOf?.(call) ?? { kind: 'unknown', scope: 'unknown' };
+              if (
+                decision !== 'denied' &&
+                verificationEnabled &&
+                executionVersion === 2 &&
+                (effect.kind === 'mutation' || effect.kind === 'unknown') &&
+                !(await store.load(sessionId)).some(
+                  (event) => event.type === 'task/plan' && event.promptId === promptId,
+                )
+              ) {
+                presolved.set(call.id, {
+                  isError: true,
+                  value: {
+                    code: 'TASK_PLAN_REQUIRED',
+                    message:
+                      'This action was not executed. Before mutations or unknown-effect commands, record a minimal task plan for the user-requested outcome and required checks. Direct answers and ordinary reads need no plan. Do not turn an unnecessary action into a new requirement.',
+                  },
+                });
+                continue;
               }
               if (decision === 'denied') {
                 presolved.set(call.id, {

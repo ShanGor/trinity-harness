@@ -41,4 +41,14 @@ export const turnSteps = meter.createHistogram('trinity.turn.steps', {
   unit: '{step}',
 });
 
+export const guestRpcDuration = meter.createHistogram('trinity.guest.rpc.duration_ms', {
+  description: 'Guest RPC latency by operation and phase; transport includes guest execution',
+  unit: 'ms',
+});
+
+export const modelLatency = meter.createHistogram('trinity.llm.latency_ms', {
+  description: 'Model stream latency to first output, first text and completion',
+  unit: 'ms',
+});
+
 export { tracer };

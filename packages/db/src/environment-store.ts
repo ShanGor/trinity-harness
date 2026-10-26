@@ -10,7 +10,7 @@ import {
   type Identity,
 } from '@trinity-harness/contracts';
 import type { Db } from './client.js';
-import { assistantEnvironments, environmentEvents } from './schema.js';
+import { assistantEnvironments, environmentEvents, firecrackerNodeMaintenance } from './schema.js';
 
 function scope(identity: Identity) {
   return and(
@@ -27,6 +27,21 @@ export class PgEnvironmentStore implements EnvironmentStore {
     identity: Identity,
     action: (signal: AbortSignal) => Promise<T>,
     signal?: AbortSignal,
+  ): Promise<T> {
+    return this.runWithLock(identity, action, signal, false);
+  }
+  async runShared<T>(
+    identity: Identity,
+    action: (signal: AbortSignal) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return this.runWithLock(identity, action, signal, true);
+  }
+  private async runWithLock<T>(
+    identity: Identity,
+    action: (signal: AbortSignal) => Promise<T>,
+    signal: AbortSignal | undefined,
+    shared: boolean,
   ): Promise<T> {
     signal?.throwIfAborted();
     const client = await this.locks.connect();
@@ -47,7 +62,10 @@ export class PgEnvironmentStore implements EnvironmentStore {
     try {
       if (signal?.aborted) abort();
       lost.signal.throwIfAborted();
-      await client.query('select pg_advisory_lock(hashtextextended($1, 23997))', [key]);
+      await client.query(
+        `select pg_advisory_lock${shared ? '_shared' : ''}(hashtextextended($1, 23997))`,
+        [key],
+      );
       locked = true;
       return await action(AbortSignal.any([lost.signal, ...(signal ? [signal] : [])]));
     } finally {
@@ -56,7 +74,10 @@ export class PgEnvironmentStore implements EnvironmentStore {
       if (!destroyed) {
         try {
           if (locked && !lost.signal.aborted)
-            await client.query('select pg_advisory_unlock(hashtextextended($1, 23997))', [key]);
+            await client.query(
+              `select pg_advisory_unlock${shared ? '_shared' : ''}(hashtextextended($1, 23997))`,
+              [key],
+            );
         } finally {
           client.release(lost.signal.aborted);
         }
@@ -71,11 +92,23 @@ export class PgEnvironmentStore implements EnvironmentStore {
     return this.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(89274315)`);
       const [previous] = await tx.select().from(assistantEnvironments).where(scope(identity));
-      if (previous && previous.state !== 'stopped') return environmentRecordSchema.parse(previous);
+      if (previous && previous.state !== 'stopped') {
+        const [maintenance] = await tx
+          .select({ nodeId: firecrackerNodeMaintenance.nodeId })
+          .from(firecrackerNodeMaintenance)
+          .where(eq(firecrackerNodeMaintenance.nodeId, previous.nodeId));
+        if (maintenance)
+          throw Object.assign(new Error('Node is in maintenance'), { code: 'NODE_DRAINING' });
+        return environmentRecordSchema.parse(previous);
+      }
       const allocations = await tx.select().from(assistantEnvironments);
+      const draining = await tx
+        .select({ nodeId: firecrackerNodeMaintenance.nodeId })
+        .from(firecrackerNodeMaintenance);
+      const drainingIds = new Set(draining.map((entry) => entry.nodeId));
       const resources = { vcpus: previous?.vcpus ?? 2, memoryMiB: previous?.memoryMiB ?? 2048 };
       const choices = nodes
-        .filter((node) => !previous || previous.nodeId === node.id)
+        .filter((node) => (!previous || previous.nodeId === node.id) && !drainingIds.has(node.id))
         .map((node) => {
           const used = allocations.filter(
             (env) => env.nodeId === node.id && env.state !== 'stopped',
@@ -120,12 +153,15 @@ export class PgEnvironmentStore implements EnvironmentStore {
       return record;
     });
   }
-  async authorizeNode(record: EnvironmentRecord): Promise<boolean> {
+  async authorizeNode(
+    record: EnvironmentRecord,
+    operation: 'start' | 'stop' | 'status' | 'guest' | 'guest-complete' = 'guest',
+  ): Promise<boolean> {
     const [row] = await this.db
       .select()
       .from(assistantEnvironments)
       .where(eq(assistantEnvironments.id, record.id));
-    return (
+    const authorized =
       !!row &&
       row.id === record.id &&
       row.state === record.state &&
@@ -134,8 +170,48 @@ export class PgEnvironmentStore implements EnvironmentStore {
       row.userId === record.userId &&
       row.tenantId === record.tenantId &&
       row.vcpus === record.vcpus &&
-      row.memoryMiB === record.memoryMiB
+      row.memoryMiB === record.memoryMiB;
+    if (!authorized) return false;
+    return (
+      operation === 'stop' ||
+      operation === 'status' ||
+      operation === 'guest-complete' ||
+      !(await this.isNodeDraining(record.nodeId))
     );
+  }
+  async isNodeDraining(nodeId: string): Promise<boolean> {
+    const [row] = await this.db
+      .select({ nodeId: firecrackerNodeMaintenance.nodeId })
+      .from(firecrackerNodeMaintenance)
+      .where(eq(firecrackerNodeMaintenance.nodeId, nodeId));
+    return !!row;
+  }
+  async beginNodeDrain(nodeId: string): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(89274315)`);
+      await tx
+        .insert(firecrackerNodeMaintenance)
+        .values({ nodeId, state: 'draining' })
+        .onConflictDoUpdate({
+          target: firecrackerNodeMaintenance.nodeId,
+          set: { state: 'draining', updatedAt: sql`now()` },
+        });
+    });
+  }
+  async endNodeDrain(nodeId: string): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(89274315)`);
+      await tx
+        .delete(firecrackerNodeMaintenance)
+        .where(eq(firecrackerNodeMaintenance.nodeId, nodeId));
+    });
+  }
+  async listNodeEnvironments(nodeId: string): Promise<EnvironmentRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(assistantEnvironments)
+      .where(eq(assistantEnvironments.nodeId, nodeId));
+    return rows.map((row) => environmentRecordSchema.parse(row));
   }
   async transition(
     record: EnvironmentRecord,

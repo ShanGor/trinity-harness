@@ -24,6 +24,7 @@ import {
   createPool,
   createDb,
   PgBrowserRuntimeStore,
+  PgBrowserInteractionStore,
   PgSessionStore,
   PgSessionMetaStore,
   PgUserStore,
@@ -31,6 +32,7 @@ import {
 } from '@trinity-harness/db';
 import { buildBrowserRuntimeServer } from './server.js';
 import { loadBrowserRuntimeEnv } from './env.js';
+import { startTelemetry } from '@trinity-harness/otel';
 import {
   acquireBrowserProfileLease,
   prepareBrowserProfile,
@@ -40,6 +42,7 @@ import {
 async function main(): Promise<void> {
   const env = loadBrowserRuntimeEnv();
   validateGuestDeployment({ ...env, BROWSER_DRIVER: 'zendriver' }, true);
+  const telemetry = startTelemetry({ serviceName: 'trinity-browser-runtime' });
   const pool = createPool(env.DATABASE_URL, {
     connectionTimeoutMillis: 5000,
     query_timeout: 10_000,
@@ -96,6 +99,17 @@ async function main(): Promise<void> {
     );
   const supervisor = new ManagedBrowserSupervisor({
     store: journal,
+    interactionStore: new PgBrowserInteractionStore(pool),
+    events: {
+      append: async (sessionId, events) => {
+        const meta = await metas.get(sessionId);
+        if (!meta) throw new Error('Browser owner unavailable');
+        return store.append(
+          sessionId,
+          events.map((event) => ({ ...event, actor: meta.userId })),
+        );
+      },
+    },
     owner: randomUUID(),
     maxSessions: env.BROWSER_RUNTIME_MAX_SESSIONS,
     idleMs: env.BROWSER_RUNTIME_IDLE_MS,
@@ -154,11 +168,11 @@ async function main(): Promise<void> {
                   processGroup: true,
                   // Explicit operator-configured egress only; the sandbox env is
                   // scrubbed, so managed Chrome sees no proxy unless configured.
-                  ...(env.BROWSER_PROXY_URL
+                  ...(env.SANDBOX_PROXY_URL
                     ? {
                         env: {
-                          http_proxy: env.BROWSER_PROXY_URL,
-                          https_proxy: env.BROWSER_PROXY_URL,
+                          http_proxy: env.SANDBOX_PROXY_URL,
+                          https_proxy: env.SANDBOX_PROXY_URL,
                           no_proxy: env.BROWSER_NO_PROXY,
                         },
                       }
@@ -204,6 +218,22 @@ async function main(): Promise<void> {
       });
       return {
         generation,
+        humanFrame: (privateView, active) =>
+          activeDriver.humanFrame(privateView, {
+            sessionId: request.sessionId,
+            callId: `human-frame-${randomUUID()}`,
+            sandbox,
+            workspaceRoot: root,
+            signal: active,
+          }),
+        humanInput: (action, target, active) =>
+          activeDriver.humanInput(action, target, {
+            sessionId: request.sessionId,
+            callId: `human-input-${randomUUID()}`,
+            sandbox,
+            workspaceRoot: root,
+            signal: active,
+          }),
         preview: (active) =>
           captureBrowserPreview(
             activeDriver,
@@ -247,11 +277,15 @@ async function main(): Promise<void> {
     // and force-quits. Exiting deterministically guarantees the graceful
     // Chrome shutdown (which removes profile locks) always runs to completion.
     shutdownPromise ??= (async () => {
-      await supervisor.dispose();
-      await app.close();
-      notifications.release(true);
-      await pool.end();
-      await lockPool.end();
+      try {
+        await supervisor.dispose();
+        await app.close();
+        notifications.release(true);
+        await pool.end();
+        await lockPool.end();
+      } finally {
+        await telemetry?.shutdown();
+      }
     })();
     return shutdownPromise.then(
       () => process.exit(exitCode),

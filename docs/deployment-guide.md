@@ -77,6 +77,8 @@ Screenshot paint readiness is bounded. A background or minimized shared Chrome m
 
 ## Chat session storage
 
+New Main and side Chat created by the stock client use `workspace-write` with normal approvals, matching the default Work policy. Chat creation and its recovery descriptor must never force `read-only` based on kind. Explicit per-session policies remain authoritative; an admin role does not bypass them. Existing sessions and pending creation retries retain their recorded policy to preserve idempotency and deliberate restrictions. Correct an affected existing session through the authenticated `POST /api/sessions/:sessionId/policy` endpoint with `{"policy":"workspace-write"}` before submitting a new prompt; do not bulk-upgrade stored policies or rewrite creation events.
+
 Chat allocates `$WORKSPACE_ROOT/sessions/<user_id>/<session_uuid_v7>` automatically; Task/Work uses the selected personal/team workspace. Keep this directory on the same persistent shared workspace disk accessible to server and workers. Chat uploads retain blob storage references and writable copies under their session's `uploads/` directory. Browser evidence continues to use the existing artifact store with bounded retrieval.
 
 Apply migration 0010 before running this version. Existing null-workspace Chat sessions acquire their immutable binding on first execution or upload through a logged transaction; no original event is rewritten. A missing binder or invalid directory prevents execution instead of falling back to the deployment root. Configured tools and permissions apply equally to Chat and Task/Work.
@@ -106,11 +108,19 @@ ZENDRIVER_CHROME_VERSION=155.0.8059.84
 
 `BROWSER_PROFILE_DIR` is required by the supervisor and must point to operator-provisioned persistent encrypted storage, writable by the browser-runtime service UID/GID. Mount it only into the browser-runtime process/container. Trinity creates private directories at `<root>/<tenant-id>/<user-id>`; Chrome stores its `Default` profile inside each directory. Profile paths come from authenticated session metadata and are never model arguments or event data. Directory permissions are set to `0700` and lock files to `0600`.
 
+With `EXECUTION_DRIVER=firecracker`, `SANDBOX_PROXY_URL` selects the host-provided HTTP proxy for the whole guest. The host egress installer reads the deployment `.env` (or `--env-file`) and installs the guest-only adapter and DNS relay; empty/unset selects direct host routing. No URL or proxy credentials enter the guest. The control plane and host default route stay unchanged. Use the maintenance release wrapper for host changes and validate a fresh assigned guest afterward; see the [host guide](../deploy/firecracker/README.md#whole-guest-egress-with-sandbox_proxy_url).
+
 Start the separate supervisor with `pnpm start:browser-runtime` (or `pnpm dev:browser-runtime` for development), then run server/worker normally. `DATABASE_URL`, `WORKSPACE_ROOT` and the configured owner's `ADMIN_EMAIL` or `BROWSER_CDP_OWNER_ID` must agree across processes. Only that owner's personal sessions can use this trusted local process mode, for both Chat and Work. Team/other-owner/closed sessions are denied. Worker subagents remain saved-only.
 
 The supervisor binds loopback by default on port 3010 and authenticates every request. A remote `BROWSER_RUNTIME_ENDPOINT` must use HTTPS; expose the supervisor only through an operator-provided authenticated TLS proxy/network policy, never directly on the public internet. No arbitrary upstream MCP endpoint is accepted. `BROWSER_RUNTIME_MAX_SESSIONS` defaults to 4 and `BROWSER_RUNTIME_IDLE_MS` to 300000. Exhausted capacity refuses new allocations. Restarting workers keeps the surviving supervisor/browser; idle expiry, session closure and normal supervisor shutdown stop owned processes while retaining durable user profiles. Only one Chrome process may use a user's profile at a time; another session for that user fails closed until the current runtime releases it. The current managed mode remains restricted to the configured owner's personal sessions and does not provide hostile-tenant isolation.
 
 `deploy/docker/Dockerfile.browser-runtime` is an opt-in build recipe: supply an HTTPS `CHROME_DEB_URL` and its independently verified `CHROME_DEB_SHA256` as build arguments. It compiles the pinned Rust binary and verifies the supplied Chrome version. This recipe requires compatible amd64 Chrome packaging and a deployment that permits Chrome's sandbox. The stock Helm chart does not provision managed-browser isolation, TLS proxying or this workload; those remain deployment gates. Use a private container network/sidecar proxy or trusted host topology and a writable shared workspace. Do not call this `enforced` mode: LocalSandbox and separate profiles do not provide hostile-tenant isolation or a network firewall. Existing Bash routes remain subject to their existing policies.
+
+### Interactive browser frames and human control
+
+Apply migration `0016_great_gressill.sql` before deploying the matching browser-runtime, server, worker and Web. In **Browser → Open browser**, choose **Start browser** or **Take control**, click the picture and type, drag or scroll; use the address field to navigate. **Return control to agent** explicitly resumes model browser access after a fresh observation. Closing/hiding the view or losing the controller lease pauses control. **Restart browser** disposes the owned browser without deleting its durable profile.
+
+The owner-only BFF `POST /api/sessions/:id/browser-interaction` forwards validated structured commands to the private runtime `/interaction`. Generation, epoch, request UUID, sequence and a recent frame fence each input. Request reservations persist before dispatch; unknown outcomes are never automatically replayed. Pixels and typed values are excluded from ACP/model history; control/effect metadata invalidates current browser evidence. Viewer cancellation discards admitted screenshot responses without killing Chrome. Sensitive frames require explicit control and are delivered only to that view. Legacy CDP remains read-only. This covers the managed browser adapter, with the existing `trusted-managed` limitations; full OS desktop control and enforced coordination with arbitrary guest processes remain pending. See [runtime behavior](runtime-implementation.md#managed-browser-交互部署与行为).
 
 ### Recovery and uncertain outcomes
 
@@ -125,3 +135,41 @@ ZENDRIVER_INTEGRATION=1 ZENDRIVER_BINARY=/absolute/path/to/zendriver-mcp pnpm ex
 ```
 
 It checks Unicode evidence, input replacement, key/click behavior, PNG capture, successful receipts and offline screenshot replay. Ordinary deterministic tests fake MCP/runtime peers. Public-site bot-defense improvements have not been measured; compare user-identified failing sites separately before changing the default driver.
+
+## Runtime latency diagnostics
+
+On one development machine, give each process a different Prometheus port. Restart the existing process with its port setting rather than starting a second queue consumer or binding the same API port twice. For example, run these in separate terminals in place of the usual server/worker commands:
+
+```bash
+OTEL_PROMETHEUS_PORT=9464 pnpm dev:server
+OTEL_PROMETHEUS_PORT=9465 pnpm dev:worker
+```
+
+For managed browsing, restart the existing Browser Runtime with `OTEL_PROMETHEUS_PORT=9466 pnpm dev:browser-runtime` to capture that process's guest RPCs as well. Keep metrics endpoints on an operator-controlled network. Prometheus exporters bind a listening port; do not expose it through public ingress. Production deployments can instead use the existing `OTEL_EXPORTER_OTLP_ENDPOINT` collector setting.
+
+Prometheus-only mode disables the SDK's implicit localhost trace exporter, so it needs no collector. An explicit OTLP endpoint uses HTTP/protobuf (`/v1/traces` and `/v1/metrics`, normally port 4318).
+
+After a representative request, inspect worker metrics:
+
+```bash
+curl --fail --silent http://127.0.0.1:9465/metrics | rg 'trinity_(llm_latency_ms|guest_rpc_duration_ms)_(sum|count)'
+```
+
+Compare counter differences across that request (sum difference divided by count difference gives the mean per phase). Metrics are cumulative per process, and a multi-step turn may contain several model calls and many RPCs. Do not add first-output/text times to full model duration: these are overlapping measurements. Exporters expose histograms for aggregate distributions; use OTLP traces when individual calls matter.
+
+- Model `preparation` measures the dispatch guards, budget reservation and context receipt persistence before provider dispatch. `first_output` includes reasoning/text/tool calls; `first_text` starts at the same dispatch boundary but requires nonempty answer text. `duration` runs through stream consumption, excluding subsequent usage persistence. Purpose distinguishes assistant/subagent/compaction calls.
+- Guest `metadata` measures the router's session/user lookup, `environment` measures assignment lookup and any lifecycle reconciliation/wake, and `transport` includes Node Agent checks, vsock, guest work and response decoding. `total` includes all RPC phases and validation. Operation labels distinguish actual file/exec/browser allocation from subprocess transport reads/writes.
+- A `processRead` with no new output intentionally long polls for up to 25 seconds; it runs concurrently with process writes and is not a browser-command latency measurement.
+- The existing tool and step spans include broader harness work. UI lag after backend completion should be investigated through event delivery rather than inferred from model timings.
+
+No guest image rebuild is required for the telemetry and Node Agent authorization changes described here. For the browser boundary change, deploy the control plane and Browser Runtime first so `browserOpen` no longer carries proxy settings, then rebuild the guest payload/rootfs to remove guest-side proxy configuration and start a fresh guest generation. Restart server, worker and Browser Runtime to load updated dependencies, and run `sudo systemctl restart trinity-node-agent.service` for the host authorization optimization. Restarting the Node Agent does not require restarting a healthy VM. Redis publication and PG-backed gap repair are applied without clearing either store. A lost final publication still requires a later event or reconnect; this is not a transactional outbox.
+
+The subsequent typed guest-file-error change additionally requires a rebuilt guest payload/rootfs and a fresh VM generation. Upgrade the control plane first; old guests remain compatible but keep returning generic errors. Follow the [development guest maintenance instructions](../deploy/firecracker/README.md#development-guest-with-actual-tools-and-zendriver); preserve per-user volumes and do not overwrite an image used by a running VMM. Explicitly denied tools are now omitted from model schemas, while tools requiring approval remain listed. Tool visibility never bypasses execution authorization.
+
+## General action controls
+
+Server and worker now use general action-economy/continuation instructions, a safe current-run policy snapshot and replayable strategy warnings for repeated tool failures or unchanged reads. Stock v2 verification checks for a committed minimal task plan before mutations/unknown-effect calls, including small edits, so a missing final-verification prerequisite is reported before changes run. Routine reads/direct answers need no plan. Existing permission and guest boundaries remain enforced; no physical-host diagnostics are exposed to personal agents.
+
+`TASK_MAX_TOOL_CALLS` optionally sets a shared per-task tool-call ceiling, including parent, children, control calls and attempted rejected waves. Configure the same value in server and worker; Helm exposes `config.taskMaxToolCalls` (default null). Omission remains unlimited. The task captures the setting at creation; changes do not raise previously recorded limits. A complete wave that cannot fit is rejected before approvals/execution, and conservative reservations survive crashes. The next model step concludes without tools if other model budgets permit it. This bounds calls, not semantic quality or the duration of an individual tool. Existing deadlines, quotas, cancellation and per-call timeouts remain separate.
+
+Deploy matching updated event readers/server/worker and rebuild the production web bundle before enabling the new `task/tool_reservation` event writer. These are control-plane changes: no guest image rebuild, Node Agent restart or VM restart is required. Existing development watch processes reload changed sources; production processes need their normal deployment/restart. See [the execution design](intent-execution-design.md#general-action-selection-and-shared-tool-allowance-2026-10-25) and [evaluation procedure](intent-evaluation.md).

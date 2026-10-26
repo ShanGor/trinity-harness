@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ $(id -u) -eq 0 && $# -eq 1 && ( "$1" == up || "$1" == docker-forwarding ) ]] || {
+  echo 'Usage: trinity-firecracker-egress <up|docker-forwarding> (root only)' >&2
+  exit 64
+}
+
+bridge=trinity-egress0
+bridge_alias=trinity-firecracker-egress
+subnet=172.29.240.0/20
+gateway=172.29.240.1
+
+for command in ip nft sysctl python3; do
+  command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
+done
+
+configure_docker_forwarding() {
+  if ! command -v iptables >/dev/null 2>&1; then return; fi
+  local rules status=0 position=1 rule
+  rules="$(iptables -w 5 -S DOCKER-USER 2>/dev/null)" || status=$?
+  if [[ "$status" == 1 ]]; then return; fi
+  [[ "$status" == 0 ]] || {
+    echo 'Could not inspect Docker forwarding rules; guest egress is not ready.' >&2
+    return 1
+  }
+  iptables -w 5 -C FORWARD -j DOCKER-USER >/dev/null 2>&1 || {
+    echo 'DOCKER-USER is not linked directly from FORWARD; preserve the custom host firewall for operator recovery.' >&2
+    return 1
+  }
+  while IFS= read -r rule; do
+    [[ "$rule" != '-A DOCKER-USER -j RETURN' ]] || break
+    if [[ "$rule" == '-A DOCKER-USER '* ]]; then position=$((position + 1)); fi
+  done <<< "$rules"
+  local outgoing=(
+    -i "$bridge" -s "$subnet" '!' -o "$bridge"
+    -m comment --comment trinity-firecracker-egress-v1 -j ACCEPT
+  )
+  local incoming=(
+    '!' -i "$bridge" -o "$bridge" -d "$subnet"
+    -m conntrack --ctstate ESTABLISHED,RELATED
+    -m comment --comment trinity-firecracker-egress-v1 -j ACCEPT
+  )
+  if ! iptables -w 5 -C DOCKER-USER "${outgoing[@]}" >/dev/null 2>&1; then
+    iptables -w 5 -I DOCKER-USER "$position" "${outgoing[@]}"
+  fi
+  if ! iptables -w 5 -C DOCKER-USER "${incoming[@]}" >/dev/null 2>&1; then
+    iptables -w 5 -I DOCKER-USER "$position" "${incoming[@]}"
+  fi
+  echo 'Configured Docker forwarding for the Firecracker bridge and established replies.'
+}
+
+if [[ "$1" == docker-forwarding ]]; then
+  detail="$(ip -d -o link show dev "$bridge")"
+  [[ "$detail" == *'bridge'* && "$detail" == *"alias $bridge_alias"* ]] || {
+    echo 'The owned Firecracker egress bridge is missing; no Docker rules were changed.' >&2
+    exit 1
+  }
+  for table in 'inet trinity_firecracker_egress' 'ip trinity_firecracker_egress_nat'; do
+    read -r family name <<< "$table"
+    current="$(nft list table "$family" "$name")"
+    [[ "$current" == *'managed-by-Trinity-Firecracker-egress-v1'* ]] || {
+      echo 'The owned Firecracker egress firewall is missing; no Docker rules were changed.' >&2
+      exit 1
+    }
+  done
+  configure_docker_forwarding
+  exit 0
+fi
+
+virtual_dns_rule=''
+if [[ -f /etc/trinity/sandbox-egress/proxy.json ]]; then
+  proxy_enabled="$(python3 -c 'import json; print(bool(json.load(open("/etc/trinity/sandbox-egress/proxy.json"))["proxyUrl"]))')"
+  if [[ "$proxy_enabled" == True ]]; then
+    virtual_dns_rule='    iifname "trinity-egress0" ip saddr 172.29.240.0/20 ip daddr 198.19.0.0/16 accept comment "trinity-sandbox-dns-map-v1"'
+  fi
+fi
+
+if ip link show dev "$bridge" >/dev/null 2>&1; then
+  detail="$(ip -d -o link show dev "$bridge")"
+  [[ "$detail" == *'bridge'* && "$detail" == *"alias $bridge_alias"* ]] || {
+    echo "Refusing to reuse unowned interface $bridge." >&2
+    exit 1
+  }
+else
+  ip -4 route show table all | python3 -c '
+import ipaddress, sys
+pool = ipaddress.ip_network(sys.argv[1])
+for line in sys.stdin:
+    token = line.split()[0]
+    if token == "default":
+        continue
+    try:
+        route = ipaddress.ip_network(token, strict=False)
+    except ValueError:
+        continue
+    if pool.overlaps(route):
+        raise SystemExit("Egress subnet overlaps an existing host route: " + str(route))
+' "$subnet"
+  ip link add name "$bridge" type bridge stp_state 0
+  ip link set dev "$bridge" alias "$bridge_alias"
+fi
+
+if ! ip -o -4 address show dev "$bridge" | grep -Eq "inet $gateway/20([[:space:]]|$)"; then
+  ip address add "$gateway/20" dev "$bridge"
+fi
+ip link set dev "$bridge" mtu 1500
+
+delete_tables=""
+queue_owned_table_delete() {
+  local family="$1" name="$2" current
+  if nft list table "$family" "$name" >/dev/null 2>&1; then
+    current="$(nft list table "$family" "$name")"
+    [[ "$current" == *'managed-by-Trinity-Firecracker-egress-v1'* ]] || {
+      echo "Refusing to replace unowned nftables table $family $name." >&2
+      exit 1
+    }
+    delete_tables+=$'delete table '"$family"' '"$name"$'\n'
+  fi
+}
+
+queue_owned_table_delete inet trinity_firecracker_egress
+queue_owned_table_delete ip trinity_firecracker_egress_nat
+
+{
+  printf '%s' "$delete_tables"
+  cat <<'NFT'
+table inet trinity_firecracker_egress {
+  comment "managed-by-Trinity-Firecracker-egress-v1"
+  chain input {
+    type filter hook input priority -10; policy accept;
+    iifname "trinity-egress0" ip daddr 172.29.240.1 udp dport 53 accept
+    iifname "trinity-egress0" ip daddr 172.29.240.1 tcp dport 53 accept
+    iifname "trinity-egress0" drop
+  }
+  chain forward {
+    type filter hook forward priority -10; policy accept;
+    iifname "trinity-egress0" meta nfproto ipv6 drop
+NFT
+  printf '%s\n' "$virtual_dns_rule"
+  cat <<'NFT'
+    iifname "trinity-egress0" ip saddr 172.29.240.0/20 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4 } drop
+    iifname "trinity-egress0" ip saddr 172.29.240.0/20 oifname != "trinity-egress0" accept
+    iifname "trinity-egress0" drop
+    oifname "trinity-egress0" meta nfproto ipv6 drop
+    oifname "trinity-egress0" ip daddr 172.29.240.0/20 ct state established,related accept
+    oifname "trinity-egress0" drop
+  }
+}
+table ip trinity_firecracker_egress_nat {
+  comment "managed-by-Trinity-Firecracker-egress-v1"
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    ip saddr 172.29.240.0/20 oifname != "trinity-egress0" masquerade
+  }
+}
+NFT
+} | nft -f -
+
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+configure_docker_forwarding
+ip link set dev "$bridge" up
+
+echo "Firecracker host NAT bridge is ready on $gateway/20."

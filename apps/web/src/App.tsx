@@ -510,14 +510,14 @@ export default function App() {
           JSON.stringify({
             operationId: creationOperation.current,
             kind: mode,
-            policy: mode === 'chat' ? 'read-only' : policy,
+            policy: mode === 'chat' ? 'workspace-write' : policy,
             ...(mode === 'work' ? { workspace } : {}),
             ...(title ? { title } : {}),
           }),
         );
       const pending = client.createSession(
         title,
-        mode === 'chat' ? 'read-only' : policy,
+        mode === 'chat' ? 'workspace-write' : policy,
         mode === 'work' ? workspace : undefined,
         {
           kind: mode,

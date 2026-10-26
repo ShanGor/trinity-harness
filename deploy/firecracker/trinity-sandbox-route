@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 1 && ( "$1" == up || "$1" == down ) ]] || {
+  echo 'Usage: trinity-sandbox-route up|down' >&2; exit 64;
+}
+existing_rule="$(ip -4 rule show | awk '$1 == "4900:" {print}')"
+[[ -z "$existing_rule" || "$existing_rule" == *'from 172.29.240.0/20 iif trinity-egress0 lookup 19013'* ]] || {
+  echo 'Routing priority 4900 belongs to another policy.' >&2; exit 1;
+}
+while IFS= read -r existing_route; do
+  case "$existing_route" in
+    ''|'unreachable default metric 32767 '|'unreachable default metric 32767'|'default dev guest-egress0 scope link metric 10 '|'default dev guest-egress0 scope link metric 10') ;;
+    *) echo 'Routing table 19013 contains an unexpected route.' >&2; exit 1 ;;
+  esac
+done < <(ip -4 route show table 19013 2>/dev/null || true)
+if [[ "$1" == up ]]; then
+  ip -4 route show table main | python3 -c '
+import ipaddress, sys
+for line in sys.stdin:
+    fields = line.split()
+    if not fields or fields[0] == "default" or "guest-egress0" in fields:
+        continue
+    try:
+        route = ipaddress.ip_network(fields[0], strict=False)
+    except ValueError:
+        continue
+    if any(ipaddress.ip_address(address) in route for address in ["192.0.2.1", "192.0.2.53"]):
+        raise SystemExit("Internal guest DNS addresses overlap another host route")
+'
+fi
+ip -4 route replace unreachable default table 19013 metric 32767
+if [[ "$1" == up ]]; then
+  # Verify the TUN through this service's fd before configuring routes.
+  main_pid="${MAINPID:?systemd did not provide the service MainPID}"
+  [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || exit 1
+  owned_tun=''
+  for attempt in {1..100}; do
+    [[ -d "/proc/$main_pid" ]] || { echo 'Guest proxy exited before opening its TUN.' >&2; exit 1; }
+    for info in /proc/"$main_pid"/fdinfo/*; do
+      [[ -r "$info" ]] || continue
+      candidate="$(awk '$1 == "iff:" {print $2}' "$info")"
+      [[ -n "$candidate" ]] || continue
+      [[ "$candidate" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || exit 1
+      [[ -z "$owned_tun" || "$owned_tun" == "$candidate" ]] || {
+        echo 'Guest proxy owns multiple TUN interfaces; refusing ambiguous routing.' >&2; exit 1;
+      }
+      owned_tun="$candidate"
+    done
+    [[ -z "$owned_tun" ]] || break
+    sleep 0.1
+  done
+  [[ -n "$owned_tun" ]] || { echo 'Guest proxy did not open a verifiable TUN interface.' >&2; exit 1; }
+  if [[ "$owned_tun" != guest-egress0 ]]; then
+    if ip link show guest-egress0 >/dev/null 2>&1; then
+      echo 'Refusing to replace an existing guest-egress0 interface.' >&2; exit 1;
+    fi
+    ip link set dev "$owned_tun" name guest-egress0
+  fi
+  ip link set guest-egress0 alias trinity-sandbox-egress-v1
+  ip address replace 192.0.2.1/32 dev guest-egress0
+  ip link set guest-egress0 up
+  ip -4 route replace 192.0.2.53/32 dev guest-egress0 src 192.0.2.1
+  ip -4 route replace default dev guest-egress0 table 19013 metric 10
+  if ! ip -4 rule show | grep -Eq '^4900:.*from 172\.29\.240\.0/20 iif trinity-egress0 lookup 19013'; then
+    ip -4 rule add priority 4900 from 172.29.240.0/20 iif trinity-egress0 lookup 19013
+  fi
+fi

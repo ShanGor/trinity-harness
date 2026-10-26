@@ -19,6 +19,30 @@ describe('PolicyToolRegistry', () => {
     return registry;
   };
 
+  it('hides explicitly denied schemas and preserves approval tools and wildcard overrides', () => {
+    const core = inner();
+    expect(
+      new PolicyToolRegistry(core, parsePermissionPolicy('read-only')).schemas().map((s) => s.name),
+    ).toEqual(['read_file', 'write_file']);
+    expect(
+      new PolicyToolRegistry(core, {
+        ...parsePermissionPolicy('workspace-write'),
+        tools: { '*': 'denied', read_file: 'ask' },
+      })
+        .schemas()
+        .map((s) => s.name),
+    ).toEqual(['read_file']);
+    expect(
+      new PolicyToolRegistry(core, {
+        ...parsePermissionPolicy('workspace-write'),
+        tools: { '*': 'ask', write_file: 'denied' },
+      })
+        .schemas()
+        .map((s) => s.name),
+    ).toEqual(['read_file']);
+    expect(core.schemas().map((s) => s.name)).toEqual(['read_file', 'write_file']);
+  });
+
   it('is transparent without a policy (M1/M2 behavior)', async () => {
     const registry = new PolicyToolRegistry(inner(), undefined);
     const result = await registry.execute(call('write_file', { path: 'a', content: 'b' }), {

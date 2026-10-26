@@ -50,6 +50,8 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
     const gateway = new AiSdkGateway();
     const sourcePaths = [
       '../src/loop/agent-loop.ts',
+      '../src/loop/progress-guidance.ts',
+      '../src/loop/task-budget.ts',
       '../src/tools/task.ts',
       '../src/loop/task-verification.ts',
       '../src/loop/to-model-messages.ts',
@@ -171,8 +173,24 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
         const usages = events.flatMap((event) =>
           event.type === 'model/usage' ? [event.usage] : [],
         );
+        const activeEvents = events.slice(startingSeq);
+        const toolCalls = activeEvents.filter((event) => event.type === 'tool/call');
+        const callsByTool: Record<string, number> = {};
+        for (const call of toolCalls) callsByTool[call.name] = (callsByTool[call.name] ?? 0) + 1;
         results.push({
           task: task.id,
+          actionMetrics: {
+            toolCalls: toolCalls.length,
+            callsByTool,
+            failedToolResults: activeEvents.filter(
+              (event) => event.type === 'tool/result' && event.isError,
+            ).length,
+            mutationCalls: toolCalls.filter((event) => event.effect?.kind === 'mutation').length,
+            unknownEffectCalls: toolCalls.filter(
+              (event) => !event.effect || event.effect.kind === 'unknown',
+            ).length,
+            guidance: activeEvents.filter((event) => event.type === 'turn/guidance'),
+          },
           repeat,
           runtime,
           startingSeq,

@@ -104,6 +104,58 @@ describe.skipIf(!reachable)('Redis adapters (integration)', () => {
     await redis.del(key);
   });
 
+  it('publishes replayed and overlapping batches without losing their new suffix', async () => {
+    const publisher = new RedisSessionEventPublisher(redis);
+    const sessionId = crypto.randomUUID();
+    const key = sessionStreamKey(sessionId);
+    const entries = [1, 2, 3, 4].map((seq) => ({ seq, event: userMsg(String(seq)) }));
+    try {
+      await publisher.publish(sessionId, entries.slice(0, 2));
+      await Promise.all([
+        publisher.publish(sessionId, entries.slice(1, 3)),
+        publisher.publish(sessionId, entries),
+      ]);
+      await publisher.publish(sessionId, entries);
+      expect((await redis.xrange(key, '-', '+')).map(([id]) => id)).toEqual([
+        '1-0',
+        '2-0',
+        '3-0',
+        '4-0',
+      ]);
+      // A stale ID is expected; a wrong Redis key type is an actual outage.
+      await redis.del(key);
+      await redis.set(key, 'wrong type');
+      await expect(publisher.publish(sessionId, entries)).rejects.toThrow('WRONGTYPE');
+    } finally {
+      await redis.del(key);
+    }
+  });
+
+  it('repairs internal distribution gaps from PG before delivering a newer event', async () => {
+    const sessionId = crypto.randomUUID();
+    const key = sessionStreamKey(sessionId);
+    const entries = [1, 2, 3].map((seq) => ({ seq, event: userMsg(String(seq)) }));
+    const publisher = new RedisSessionEventPublisher(redis);
+    await publisher.publish(sessionId, [entries[0]!, entries[2]!]);
+    await publisher.publish(sessionId, [entries[1]!]); // committed earlier, published late
+    const got: number[] = [];
+    const reader = new RedisSessionEventReader(redis, {
+      blockMs: 500,
+      store: {
+        loadRange: async (_id, { afterSeq, toSeq }) => entries.slice(afterSeq, toSeq),
+      },
+    });
+    const handle = reader.open(sessionId, 0, ({ seq }) => got.push(seq));
+    try {
+      await handle.started;
+      await expect.poll(() => got.length, { timeout: 5000 }).toBe(3);
+      expect(got).toEqual([1, 2, 3]);
+    } finally {
+      handle.dispose();
+      await redis.del(key);
+    }
+  });
+
   it('PublishingSessionStore publishes committed events with their PG seqs', async () => {
     // Minimal in-test store fake (packages must not import each other's
     // implementations, AGENTS.md §3 — so no @trinity-harness/core here).

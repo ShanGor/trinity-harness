@@ -90,6 +90,114 @@ async function budget(overrides: Parameters<typeof taskBudgetSchema.parse>[0] = 
 }
 
 describe('durable shared task budget', () => {
+  it('shares tool spending between the parent and its child and preserves both final answers', async () => {
+    const store = new MemorySessionStore();
+    const parentLLM = new FakeLLM(
+      () => toolCallThenFinish('child', 'subagent', { task: 'Read a' }),
+      (req) => {
+        expect(req.tools).toEqual([]);
+        return textChunks('Child result received.');
+      },
+    );
+    const childLLM = new FakeLLM(
+      () => toolCallThenFinish('read', 'read_file', { path: 'a' }),
+      (req) => {
+        expect(req.tools).toEqual([]);
+        return textChunks('Read result.');
+      },
+    );
+    const child = harness(childLLM);
+    child.sandbox.files.set('a', 'evidence');
+    const parent = harness(parentLLM, {
+      store,
+      execution: new EventTaskExecution(store, taskBudgetSchema.parse({ maxToolCalls: 2 })),
+    });
+    parent.tools.register(createSubagentTool({ createLoop: () => child.loop }));
+    await parent.loop.run('parent', 'Read a through a child', sink);
+    const reservations = (await store.load('parent')).filter(
+      (event) => event.type === 'task/tool_reservation',
+    );
+    expect(reservations.map((event) => event.count)).toEqual([1, 1]);
+    parentLLM.assertExhausted();
+    childLLM.assertExhausted();
+  });
+
+  it('rejects tool reservations after the inherited task deadline', async () => {
+    const { scope, advance } = await budget({ maxDurationMs: 1000, maxToolCalls: 5 });
+    advance(1001);
+    await expect(scope.reserveTools(1)).rejects.toThrow('Task deadline reached');
+  });
+
+  it('reserves concurrent tool waves in log order and preserves spending across replay', async () => {
+    const { scope, store, prompt } = await budget({ maxToolCalls: 3 });
+    const results = await Promise.all([scope.reserveTools(2), scope.reserveTools(2)]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await scope.shouldFinalize(request)).toBe(true);
+    const resumed = await new EventTaskExecution(
+      store,
+      taskBudgetSchema.parse({ maxToolCalls: 100 }),
+    ).open('parent', prompt.eventId);
+    scopes.push(resumed);
+    expect(await resumed.reserveTools(1)).toBe(false);
+    expect(await resumed.shouldFinalize(request)).toBe(true);
+    expect(
+      (await store.load('parent')).filter((event) => event.type === 'task/tool_reservation'),
+    ).toHaveLength(3);
+  });
+
+  it('retains a reservation after a crash before tool execution and isolates the next prompt', async () => {
+    const { scope, store, execution, prompt } = await budget({ maxToolCalls: 1 });
+    expect(await scope.reserveTools(1)).toBe(true);
+    const replayed = await execution.open('parent', prompt.eventId);
+    scopes.push(replayed);
+    expect(await replayed.reserveTools(1)).toBe(false);
+    const next = user();
+    await store.append('parent', [next]);
+    const fresh = await execution.open('parent', next.eventId);
+    scopes.push(fresh);
+    expect(await fresh.reserveTools(1)).toBe(true);
+  });
+
+  it('does not add tool reservations or a hidden ceiling when the limit is unset', async () => {
+    const { scope, store } = await budget();
+    expect(await scope.reserveTools(100_000)).toBe(true);
+    expect(
+      (await store.load('parent')).some((event) => event.type === 'task/tool_reservation'),
+    ).toBe(false);
+    expect(await scope.shouldFinalize(request)).toBe(false);
+  });
+
+  it('rejects an oversized tool wave before any writes or approvals and reserves the final response', async () => {
+    const llm = new FakeLLM(
+      () => [
+        ...toolCallThenFinish('one', 'write_file', { path: 'one', content: 'x' }).slice(0, -1),
+        ...toolCallThenFinish('two', 'write_file', { path: 'two', content: 'y' }),
+      ],
+      (req) => {
+        expect(req.tools).toEqual([]);
+        expect(req.system).toContain('request/tool/token/cost budget reached');
+        return textChunks('The requested writes were not executed.');
+      },
+    );
+    const store = new MemorySessionStore();
+    const { loop, sandbox } = harness(llm, {
+      store,
+      execution: new EventTaskExecution(store, taskBudgetSchema.parse({ maxToolCalls: 1 })),
+    });
+    await loop.run('s', 'Write two files', sink);
+    expect(sandbox.files.size).toBe(0);
+    const events = await store.load('s');
+    expect(events.filter((event) => event.type === 'tool/result')).toHaveLength(2);
+    for (const event of events.filter((event) => event.type === 'tool/result'))
+      expect(event).toMatchObject({
+        isError: true,
+        value: { code: 'TOOL_BUDGET_EXHAUSTED' },
+        effect: { scope: 'control' },
+      });
+    expect(events.some((event) => event.type === 'approval/requested')).toBe(false);
+    llm.assertExhausted();
+  });
+
   it('keeps default tasks unlimited across requests, tokens, elapsed time and replay', async () => {
     const store = new MemorySessionStore();
     const prompt = user();
@@ -236,6 +344,54 @@ describe('durable shared task budget', () => {
 });
 
 describe('task verification evidence', () => {
+  it('requires a committed plan before effects and permits ordinary reads without one', async () => {
+    const llm = new FakeLLM(
+      () => toolCallThenFinish('premature', 'write_file', { path: 'a', content: 'changed' }),
+      (req) => {
+        expect(JSON.stringify(req.messages)).toContain('TASK_PLAN_REQUIRED');
+        return toolCallThenFinish('observe', 'read_file', { path: 'a' });
+      },
+      () => textChunks('The attempted edit was not executed; the existing file was inspected.'),
+    );
+    const { loop, sandbox, store } = harness(llm, { verification: true });
+    sandbox.files.set('a', 'original');
+    await loop.run('s', 'Inspect a', sink);
+    expect(sandbox.files.get('a')).toBe('original');
+    const results = (await store.load('s')).filter((event) => event.type === 'tool/result');
+    expect(results[0]).toMatchObject({
+      isError: true,
+      value: { code: 'TASK_PLAN_REQUIRED' },
+      effect: { kind: 'read', scope: 'control' },
+    });
+    expect(results[1]).toMatchObject({ isError: false });
+    llm.assertExhausted();
+  });
+
+  it('allows a mutation after its minimal plan is committed', async () => {
+    const llm = new FakeLLM(
+      () =>
+        toolCallThenFinish('plan', 'task', {
+          operation: 'plan',
+          checks: [
+            { id: 'content', requirement: 'Requested content written', kind: 'observation' },
+          ],
+        }),
+      () => toolCallThenFinish('write', 'write_file', { path: 'a', content: 'changed' }),
+      () => toolCallThenFinish('read', 'read_file', { path: 'a' }),
+      () =>
+        toolCallThenFinish('verify', 'task', {
+          operation: 'verify',
+          id: 'content',
+          callId: 'read',
+        }),
+      () => textChunks('The requested file was updated and read back.'),
+    );
+    const { loop, sandbox } = harness(llm, { verification: true });
+    expect((await loop.run('s', 'Update a', sink)).reason).toBe('completed');
+    expect(sandbox.files.get('a')).toBe('changed');
+    llm.assertExhausted();
+  });
+
   it('requires current exact successful command evidence and invalidates it after edits', async () => {
     const { store, tools } = harness(new FakeLLM());
     const prompt = user();
@@ -346,10 +502,15 @@ describe('task verification evidence', () => {
   it('reports incomplete when verification cannot fit the remaining steps', async () => {
     const { loop, store } = harness(
       new FakeLLM(
+        () =>
+          toolCallThenFinish('plan', 'task', {
+            operation: 'plan',
+            checks: [{ id: 'written', requirement: 'Requested file exists', kind: 'observation' }],
+          }),
         () => toolCallThenFinish('w', 'write_file', { path: 'a', content: 'x' }),
-        () => textChunks('All done'),
+        () => textChunks('The requested implementation remains incomplete.'),
       ),
-      { verification: true, maxSteps: 2 },
+      { verification: true, maxSteps: 3 },
     );
     expect((await loop.run('s', 'implement', sink)).reason).toBe('error');
     expect((await store.load('s')).at(-1)).toMatchObject({
@@ -602,6 +763,7 @@ describe('bounded model recovery', () => {
     const scope: TaskBudgetScope = {
       signal: lifetime.signal,
       maxSteps: undefined,
+      reserveTools: async () => true,
       shouldConclude: async () => false,
       shouldFinalize: async () => false,
       admit: async () => crypto.randomUUID(),
@@ -791,7 +953,7 @@ describe('verification ordering and reserves', () => {
       () => toolCallThenFinish('first', 'write_file', { path: 'first', content: 'allowed' }),
       (request) => {
         expect(request.tools).toEqual([]);
-        expect(request.system).toContain('Task request/token/cost budget reached');
+        expect(request.system).toContain('Task request/tool/token/cost budget reached');
         return toolCallThenFinish('extra', 'write_file', { path: 'extra', content: 'refused' });
       },
     );
@@ -805,7 +967,7 @@ describe('verification ordering and reserves', () => {
     expect(await loop.run('s', 'work', sink)).toEqual({ reason: 'error', steps: 2 });
     expect((await store.load('s')).at(-1)).toMatchObject({
       type: 'turn/end',
-      detail: 'Task request/token/cost budget reached',
+      detail: 'Task request/tool/token/cost budget reached',
     });
     expect(sandbox.files.has('extra')).toBe(false);
     llm.assertExhausted();

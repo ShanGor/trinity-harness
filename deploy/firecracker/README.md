@@ -8,7 +8,7 @@ This is the opt-in host power/capacity layer for the [personal runtime proposal]
 - A root-owned filesystem at `/srv/trinity-node`, mode `0700`, with an explicit storage policy. Production requires `NODE_STORAGE_ENCRYPTION=host-managed` or `provider-managed`; both are operator attestations, not automatic encryption detection. `none` is accepted only with `NODE_DEPLOYMENT_MODE=development`.
 - Approved `images/vmlinux` and read-only `images/rootfs.ext4`. The guest image must support the supplied virtio disks/network, booting a read-only root and mounting its private data disk. No image is downloaded or manufactured automatically.
 - A per-environment `volumes/<environment-id>/data.ext4` and root-owned `runtime.json`, containing unique non-root numeric `uid` and `gid` (both at least 100000). Reserve those IDs per environment. Backing files and images must reside on the same filesystem because the launcher uses hard links. Production storage must be encrypted at the host or provider layer; explicit development mode may use unencrypted local storage and does not establish tenant isolation.
-- An operator-provisioned `/run/netns/trinity-<environment-id>` containing `tap0`, isolated from other users and with host-enforced default-deny egress plus approved proxy/DNS rules. The namespace's existence is a prerequisite, not proof that its firewall is correct.
+- An operator-provisioned `/run/netns/trinity-<environment-id>` containing `tap0`, isolated from other users. Development egress is optional and remains disabled until the host gateway is installed. The guest receives no proxy URL or credentials. The namespace's existence is a prerequisite, not proof that its firewall is correct.
 
 The node ID, endpoint and admitted CPU/memory capacity must agree with the server's `FIRECRACKER_NODES`. Never point this inventory at a user-controlled endpoint. Remote management requires an operator-authenticated TLS/mTLS proxy; the Node Agent itself listens only on loopback. Keep CDP, Firecracker API sockets and guest RPC off the public network.
 
@@ -23,6 +23,70 @@ sudo bash scripts/install-firecracker-host.sh
 The installer checks `/dev/kvm`, downloads the official x86_64 or aarch64 release over HTTPS, verifies the pinned SHA-256, and copies only the two expected regular executables. It does not enable or start any VM. It also does not encrypt storage or create guest images, per-user disks, or network namespaces. Keep the unit/launcher, images, manifests and volume metadata inaccessible to user workloads.
 
 The installed binaries are Firecracker v1.17.0, a supported upstream release as of this guide. Upgrade the pinned version and both architecture checksums together after reviewing upstream release notes. See the [official release](https://github.com/firecracker-microvm/firecracker/releases/tag/v1.17.0) and [release policy](https://github.com/firecracker-microvm/firecracker/blob/main/docs/RELEASE_POLICY.md).
+
+The optional guest egress setup also requires the host's `iproute2`, `nftables`, `dnsmasq`, and systemd tools. The installer checks for these prerequisites and fails without installing packages if one is missing.
+
+### Draining a node before release
+
+Apply the latest database migration before deploying the server and Node Agent versions that support node maintenance. Host upgrades must drain the node through the control plane before running host installers. Configure the separate `FIRECRACKER_MAINTENANCE_TOKEN` on the server and in the release environment; it must be at least 32 URL-safe characters. The server must already list the node in `FIRECRACKER_NODES`. The positional node ID selects the node to drain; if `NODE_ID` is set on the release runner, it must match that ID. The release wrapper marks the node unavailable for new starts and guest RPCs, waits for admitted guest calls to finish, asks the Node Agent to stop every assigned environment, and requires both PostgreSQL and the local systemd/process checks to confirm that no VMM remains. It runs the supplied release command only after those checks. A failed drain or release leaves the node in maintenance; a successful command clears maintenance so new environments can be assigned. Stopped environments keep their data disks and wake as fresh generations later.
+
+```bash
+FIRECRACKER_MAINTENANCE_URL=https://server.example \
+FIRECRACKER_MAINTENANCE_TOKEN="$FIRECRACKER_MAINTENANCE_TOKEN" \
+  bash scripts/release-firecracker-node.sh host-1 -- \
+  sudo bash scripts/install-firecracker-host-egress.sh
+```
+
+The wrapper runs on the Firecracker host. In a hosted release pipeline, provide the host command's required privilege non-interactively through the pipeline's existing service account. Do not call the installer directly when a node is in service; its active-VM check remains a final guard. If a release command fails after drain, fix or roll back the host and rerun the wrapper; do not manually clear maintenance while any VMM is active.
+
+### Optional host-routed guest IPv4
+
+The guest does not receive proxy settings. To give development guests IPv4 connectivity through the host, install the host bridge/NAT and DNS relay:
+
+```bash
+sudo bash scripts/install-firecracker-host-egress.sh
+```
+
+This creates `trinity-egress0` on `172.29.240.1/20`, enables host IPv4 forwarding, isolates guest bridge ports from each other, relays guest DNS through the host resolver, and NATs public IPv4 traffic through the host routing table. Guest IPv6 and private/reserved destinations are blocked. The installer refuses to run while a Trinity VM unit or Firecracker process is active; use the release wrapper above to drain the node first. It installs a fixed root-owned route helper and a restricted one-shot systemd unit for the helper's network capabilities, then clears any DNS start-limit failure and restarts the DNS relay so its updated socket restrictions take effect. DNS startup waits for dnsmasq to finish initialization before the release can succeed. If Node Agent was active, the installer restarts it after confirming the gateway services are active. On every authenticated environment start, Node Agent detects the active host gateway and starts the route unit for that PostgreSQL-assigned environment before launching its VMM, including for existing stopped environments. New provisioning continues to configure routes automatically. The helper is idempotent; if route setup fails, Node Agent refuses to start the VM. The installer uses `SANDBOX_PROXY_URL` for the whole guest when configured, otherwise direct host routing and the host resolver; it does not choose a proxy provider or change destination allow/deny lists. When Docker uses its iptables backend, gateway startup adds idempotent IPv4 rules in `DOCKER-USER` for traffic from `trinity-egress0` / `172.29.240.0/20` and established return traffic. It inserts them after existing operator rules and before the first unconditional `RETURN`, preserving earlier explicit denials. Trinity’s earlier nftables drops for private/reserved destinations, IPv6 and unsolicited inbound traffic remain authoritative. Docker’s `FORWARD DROP` policy and unrelated rules are preserved. The gateway starts after standard or Snap Docker services; an upgrade restarts the gateway so the updated helper actually runs. Other host firewall policies may still deny forwarding. See [Docker’s forwarding guidance](https://docs.docker.com/engine/network/firewall-iptables/#allow-forwarding-between-host-interfaces).
+
+If a running, already configured gateway cannot forward guest traffic because Docker has `FORWARD DROP` and an empty `DOCKER-USER`, apply only the scoped forwarding repair from the reviewed checkout:
+
+```bash
+sudo bash deploy/firecracker/trinity-firecracker-egress-up docker-forwarding
+```
+
+This repair checks the existing bridge and both Trinity-owned nftables tables, then adds only the missing Docker rules. It leaves running VMs and the existing nftables rules in place; it does not install a host release. Afterward, validate guest DNS/TCP/HTTPS and the configured browser operation. Hosts requiring a proxy must configure `SANDBOX_PROXY_URL` and apply the normal installer below. For persistence across host boot or gateway upgrades, deploy the updated helper and service through the maintenance release wrapper; retain the installer’s active-VM guard.
+
+#### Whole-guest egress with SANDBOX_PROXY_URL
+
+Set the existing host HTTP proxy once in the deployment `.env`:
+
+```dotenv
+SANDBOX_PROXY_URL=http://127.0.0.1:20112
+```
+
+The whole guest uses that egress, including commands, browsers and DNS. There is no separate browser traffic configuration. When the setting is empty/unset, the gateway uses direct host routing and the host resolver. This does not change the host default route or proxy control-plane traffic. The proxy URL stays on the host; guest processes use their ordinary network interface. Virtual DNS preserves hostnames for HTTP proxies that route by domain: only the synthetic `198.19.0.0/16` pool is admitted to the guest-only tunnel. Other literal private/reserved destinations remain blocked. The supplied proxy controls final destination resolution and policy; this development path does not establish production isolation.
+
+The normal gateway installer reads the repository `.env`; `--env-file /absolute/deployment.env` selects a different deployment file. It reads only `SANDBOX_PROXY_URL` and never evaluates shell expressions or copies other app secrets. Apply changes through the same maintenance release wrapper:
+
+```bash
+FIRECRACKER_MAINTENANCE_URL=https://server.example \
+FIRECRACKER_MAINTENANCE_TOKEN="$FIRECRACKER_MAINTENANCE_TOKEN" \
+  bash scripts/release-firecracker-node.sh host-1 -- \
+  sudo bash scripts/install-firecracker-host-egress.sh
+```
+
+The adapter uses generic [tun2proxy v0.8.6](https://github.com/tun2proxy/tun2proxy/releases/tag/v0.8.6), downloaded from the official release with pinned architecture checksums. The adapter handles proxy-side hostname resolution itself; no separate DNS service is required. No Clash core, provider configuration, GeoIP file or additional proxy JSON is required. The tested guest path supports a credential-free `http://host:port` upstream. An HTTP proxy does not provide arbitrary UDP forwarding; unsupported traffic is not sent directly. Dependency paths may be supplied as `TUN2PROXY_BINARY` for a reviewed offline install.
+
+The installer stages dependencies/configuration before changing services, installs persistent files under `/etc/trinity/sandbox-egress` and `/usr/local/libexec`, and enables `trinity-sandbox-egress.service`. It retires only the owned earlier `operator-guest-*` installation. It keeps the active-VM guard, the existing dnsmasq relay, FD-owned TUN validation and a guest-only policy table. Configured proxy failure blocks guest startup or egress rather than silently using direct routing. Removing `SANDBOX_PROXY_URL` on a subsequent release disables these services and restores direct routing; old installed settings never override the current deployment setting. No guest image rebuild is needed for this host-only change.
+
+Fresh development provisioning configures the guest TAP route automatically. Existing stopped environments are configured automatically on their next authenticated wake when the host gateway is active. The helper can also be invoked directly for operator recovery:
+
+```bash
+sudo bash scripts/configure-firecracker-guest-egress.sh <environment-id>
+```
+
+Rebuild the development guest rootfs after changing its network configuration, preserve the per-environment writable data disk, and start a fresh generation. This is a development NAT path, not a production isolation guarantee or a domain allowlist. `SANDBOX_PROXY_URL` selects whole-guest egress on the host.
 
 ### Local storage setup
 
@@ -71,7 +135,11 @@ sudo bash scripts/build-firecracker-guest.sh --restart-incomplete
 
 This preserves the marked incomplete directory and logs under a unique `.failed-<timestamp>-<pid>` sibling before rebuilding. Recovery preserves the whole existing image directory without modifying it. It rejects an unrecognized marker, a running Firecracker process or a mounted build filesystem. It never deletes a failed build. Allow at least 12 GiB free for the image build.
 
-The kernel and read-only rootfs are checksum verified. The data disk is writable and changes during use, so its initial builder hash is informational and is deliberately excluded from subsequent image verification. The runner boots Firecracker directly twice with no network interface, preserving the disposable data disk and changing the generation. Through the real vsock relay it checks file persistence, non-root execution, scrubbed process environment, bundled skill discovery and guest rejection of a stale generation. Each boot also runs patched Zendriver and Chrome against an in-guest localhost fixture and saves preview JSON and PNG files under `firecracker-guest/run`. It closes browser/fixture processes, syncs data and stops the VMM. Boot failures show the console log. A successful result validates these development guest operations; jailer, Node Agent/PG assignment, network policy and tenant isolation still require their own acceptance. Keep these host-kernel images separate from `/srv/trinity-node/images` and keep production routing disabled until those gates pass.
+The guest acceptance runner invokes Node.js and the repository-installed `tsx` directly, so it also works with a restricted operator `PATH` (for example under `runuser`) without a global `pnpm` command. It checks these dependencies before starting a VMM. The kernel and read-only rootfs are checksum verified. The data disk is writable and changes during use, so its initial builder hash is informational and is deliberately excluded from subsequent image verification. The runner boots Firecracker directly twice with no network interface, preserving the disposable data disk and changing the generation. Through the real vsock relay it checks file persistence, non-root execution, scrubbed process environment, bundled skill discovery and guest rejection of a stale generation. Each boot also runs patched Zendriver and Chrome against an in-guest localhost fixture and saves preview JSON and PNG files under `firecracker-guest/run`. It closes browser/fixture processes, syncs data and stops the VMM. Boot failures show the console log. A successful result validates these development guest operations; jailer, Node Agent/PG assignment, network policy and tenant isolation still require their own acceptance. Keep these host-kernel images separate from `/srv/trinity-node/images` and keep production routing disabled until those gates pass.
+
+The current acceptance also requires typed `FILE_NOT_FOUND` replies for missing text and binary files, followed by a healthy read of the persistence marker. This distinguishes an expected file error from broken guest transport. Control-plane readers must be upgraded before deploying the guest writer. An old guest still boots with the new control plane, but reports generic errors and fails this new acceptance check until rebuilt.
+
+Guest code is snapshotted into `guest-payload/runtime.tar` and then into the immutable rootfs. Editing the repository or restarting the Node Agent does not update a running guest. To refresh an existing development deployment, preserve the old payload under a unique backup name before rerunning preparation, preserve/rebuild the marked development image with `--restart-incomplete`, and rerun direct guest acceptance. Schedule an idle-host maintenance window before installing a changed base image: suspend affected environments through the authenticated control plane, confirm their VMM units have stopped, and preserve the old verified shared image directory for rollback. The image installer deliberately refuses replacing a different existing image set; the operator must explicitly archive that base-image directory before installing the verified replacement. Keep per-user `volumes/*/data.ext4`, runtime metadata and network namespaces intact. Wake through the control plane for a new generation after installation and validate owner routing again. The disposable acceptance data disk must never replace a user's volume.
 
 ### Jailer, systemd, and isolated network acceptance
 
@@ -89,7 +157,16 @@ To exercise the installed jailer and systemd unit with the real development gues
 sudo bash scripts/run-firecracker-jailer-test.sh
 ```
 
-The root-owned runner requires `/srv/trinity-node` to have the explicit `development-unencrypted` marker and no active Trinity VM. It accepts either an empty `images` directory or the matching verified development kernel/rootfs; temporary copies are removed after the run, while preinstalled base images are preserved. It creates a random environment, uid/gid, disposable data disk, TAP device and isolated network namespace, then installs default-drop nftables rules. It boots two generations through `jailer` and the actual `trinity-vm@` systemd unit. RPC, persistent data, stale-generation rejection, non-root tools, Zendriver screenshots, secret scrubbing and a guest outbound-connect denial are checked. It stops each unit before proceeding and removes its generated host assets after confirmed stop. Reports, PNGs and the unit journals remain in `~/.local/share/trinity/firecracker-jailer-test`. This local development acceptance has passed; it is separate from the real owner-assignment route below.
+The root-owned runner requires `/srv/trinity-node` to have the explicit `development-unencrypted` marker and no active Trinity VM. It accepts either an empty `images` directory or the matching verified development kernel/rootfs; temporary copies are removed after the run, while preinstalled base images are preserved. By default it creates a random environment, uid/gid, disposable data disk, TAP device and isolated network namespace, installs default-drop nftables rules, and confirms guest egress is denied. It boots two generations through `jailer` and the actual `trinity-vm@` systemd unit. RPC, persistent data, stale-generation rejection, non-root tools, Zendriver screenshots and secret scrubbing are checked. It stops each unit before proceeding and removes its generated host assets after confirmed stop. Reports, PNGs and the unit journals remain in `~/.local/share/trinity/firecracker-jailer-test`.
+
+To check host-routed egress too, select an operator-approved hostname and TCP port. This mode requires the host gateway above to be active:
+
+```bash
+sudo env TRINITY_EGRESS_TEST_HOST=approved-hostname.example TRINITY_EGRESS_TEST_PORT=443 \
+  bash scripts/run-firecracker-jailer-test.sh --check-network-egress
+```
+
+The guest attempts DNS resolution and a TCP connection during both generations. The default-deny test remains available with `--check-network-denied`. Both modes are development acceptance only; neither validates the owner-assignment route or production tenant isolation.
 
 Install the immutable development base images for a later owner-assignment run:
 
@@ -135,7 +212,7 @@ NODE_RUNTIME_TOKEN=<same dedicated token>
 
 This loopback endpoint is only valid when the control plane runs on the same host. A remote or K8s control plane needs an operator-managed TLS/mTLS endpoint; never expose the Node Agent port directly. Restart the local server after changing `.env`. `EXECUTION_DRIVER=firecracker` is a separate opt-in and must be set consistently on server, agent-worker, and browser-runtime before guest tools are routed.
 
-The control plane first assigns a stable environment ID. Use it to prepare the per-user data volume, `runtime.json`, and namespace before expecting a successful boot. Missing files or namespaces cause a failed unit, without creating a blank replacement user disk. The first authenticated wake currently attempts the start immediately; if assets are not ready, use the resulting operator manifest to provision them, then suspend and wake for a fresh generation:
+The control plane first assigns a stable environment ID. Use it to prepare the per-user data volume, `runtime.json`, and namespace before expecting a successful boot. Missing files or namespaces cause a failed unit, without creating a blank replacement user disk. Guest egress becomes available after the optional host gateway is installed; Node Agent configures each environment namespace automatically on authenticated start. `SANDBOX_PROXY_URL` selects the host-provided egress for the whole guest through the normal installer; provider selection and destination allow/deny lists remain operator-managed. Do not expose the host's loopback proxy as a guest endpoint. The first authenticated wake currently attempts the start immediately; if assets are not ready, use the resulting operator manifest to provision them, then suspend and wake for a fresh generation:
 
 ```bash
 sudo find /srv/trinity-node/instances -maxdepth 1 -type f -name '*.json' -printf '%f\n'
@@ -143,7 +220,23 @@ sudo bash scripts/provision-firecracker-development-environment.sh \
   /srv/trinity-node/instances/<environment-id>-<generation>.json
 ```
 
-This provisioning script is limited to `development-unencrypted` storage. It creates a fresh per-environment data disk and a default-deny network namespace with no external guest egress; it refuses existing volumes/namespaces. Per-user volume/network provisioning is still an operator step, not an automatic user-computer provisioner. Guest supervisor, vsock bridge and execution configuration are described in [runtime implementation](../../docs/runtime-implementation.md#实验性-guest-执行面).
+This provisioning script is limited to `development-unencrypted` storage. It creates a fresh per-environment data disk and isolated namespace; when the optional host gateway is active, it adds the host-routed IPv4 path. It refuses existing volumes/namespaces. Per-user volume/network provisioning is still an operator step, not an automatic user-computer provisioner. Guest supervisor, vsock bridge and execution configuration are described in [runtime implementation](../../docs/runtime-implementation.md#实验性-guest-执行面).
+
+## Public browser acceptance on an assigned guest
+
+Docker is not a Firecracker dependency. The `DOCKER-USER` rules above are only needed when a separately installed Docker daemon changes this host’s forwarding firewall. A working NAT route still does not make a host application proxy apply to guest packets.
+
+The forwarding unit tests fake firewall commands; the local Zendriver fixtures use localhost. Neither establishes public browsing or Google Search availability. To check the current assigned guest without running disposable image/jailer acceptance, select an idle personal session owned by the configured browser owner:
+
+```bash
+FIRECRACKER_BROWSER_INTEGRATION=1 \
+FIRECRACKER_BROWSER_TEST_SESSION_ID=<existing-personal-session-uuid> \
+pnpm exec vitest run apps/browser-runtime/test/firecracker-browser-integration.test.ts
+```
+
+This explicit opt-in loads the configured Firecracker deployment, resolves the authenticated owner and running assignment from PostgreSQL, and executes the typed browser tool through Node Agent, vsock and guest Chrome. It checks public HTTPS text/receipts and `web_search` separately. It never substitutes local browser execution or passes host proxy credentials into the guest. Existing profile leases remain enforced. Its evidence/artifacts stay in a temporary test store, so it does not append a synthetic user turn to the selected production session. A separate case covers human return, browser disposal/recreation and both model-card searches through private HTTP and isolated PostgreSQL runtime/control journals. Test events and artifacts stay outside the production session history; the test journal schema is removed after cleanup. This does not validate ACP dispatch, real-model research interpretation or production isolation.
+
+These are live acceptance checks, skipped by default CI. A public-page pass and a Google Search failure means the selected search destination still needs network/DNS/proxy investigation; the first pass is not sufficient to declare browser research working. A search redirect to an access/challenge page also fails the search check. Ordinary unit tests remain deterministic and offline.
 
 ## Operation and recovery
 

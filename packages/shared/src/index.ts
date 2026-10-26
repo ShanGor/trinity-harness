@@ -6,6 +6,17 @@ export * from './workspace.js';
 export { browserPreviewSchema } from '@trinity-harness/contracts';
 export type { BrowserPreview } from '@trinity-harness/contracts';
 export {
+  browserInteractionRequestSchema,
+  browserInteractionResultSchema,
+} from '@trinity-harness/contracts';
+export type {
+  BrowserInteractionRequest,
+  BrowserInteractionResult,
+  BrowserHumanAction,
+  BrowserInteractionFrame,
+  BrowserControlState,
+} from '@trinity-harness/contracts';
+export {
   scheduleDefinitionSchema,
   scheduleListSchema,
   inboxListSchema,

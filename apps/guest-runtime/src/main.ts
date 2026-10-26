@@ -16,11 +16,6 @@ async function main(): Promise<void> {
   const userId = z.uuid().parse(cmdline.match(/(?:^|\s)trinity.user=(\S+)/)?.[1]);
   const binary = z.string().refine(path.isAbsolute).parse(process.env['ZENDRIVER_BINARY']);
   const profileRoot = z.string().refine(path.isAbsolute).parse(process.env['BROWSER_PROFILE_DIR']);
-  const proxy = z
-    .url()
-    .refine((value) => ['http:', 'https:'].includes(new URL(value).protocol))
-    .optional()
-    .parse(process.env['BROWSER_PROXY_URL']);
   const workspaceRoot = z.string().refine(path.isAbsolute).parse(process.env['WORKSPACE_ROOT']);
   const rootFor = (workspace: string): string =>
     path.join(workspaceRoot, guestEnvelopeSchema.shape.workspace.parse(workspace));
@@ -54,7 +49,12 @@ async function main(): Promise<void> {
     (sessionId, signal) =>
       openGuestBrowser(
         new LocalSandbox(workspaceRoot, { envMode: 'minimal' }),
-        { binary, profileRoot, tenantId, userId, ...(proxy ? { proxy } : {}) },
+        {
+          binary,
+          profileRoot,
+          tenantId,
+          userId,
+        },
         sessionId,
         signal,
       ),

@@ -46,6 +46,7 @@ const workerEnvSchema = z.object({
   MODEL_CONTEXT_TOKENS: z.coerce.number().int().min(4096).default(200_000),
   MODEL_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8192),
   COMPACTION_CONTEXT_TOKENS: z.coerce.number().int().min(4096).optional(),
+  TASK_MAX_TOOL_CALLS: z.coerce.number().int().positive().max(100_000).optional(),
   TASK_MAX_REQUESTS: z.coerce.number().int().min(4).max(4096).optional(),
   TASK_MAX_TOKENS: z.coerce.number().int().min(32768).optional(),
   TASK_MAX_DURATION_MS: z.coerce.number().int().positive().max(86_400_000).optional(),

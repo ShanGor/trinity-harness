@@ -122,17 +122,10 @@ created_namespace=true
 ip -n "$namespace" link set lo up
 ip netns exec "$namespace" ip tuntap add name tap0 mode tap user "$uid" group "$gid"
 ip -n "$namespace" link set tap0 up
-ip netns exec "$namespace" nft -f - <<'NFT'
-table inet trinity_development {
-  chain input { type filter hook input priority 0; policy drop; iifname "lo" accept; }
-  chain output { type filter hook output priority 0; policy drop; oifname "lo" accept; }
-  chain forward { type filter hook forward priority 0; policy drop; }
-}
-NFT
-ip netns exec "$namespace" nft list table inet trinity_development >/dev/null
+bash "$repo_root/scripts/configure-firecracker-guest-egress.sh" "$id"
 
 completed=true
 echo "Provisioned development environment $id from generation $generation."
 echo "Data volume: $volume/data.ext4 (fresh, writable, development-only)"
-echo "Network namespace: $namespace (default-deny; guest has no external egress)"
+echo "Network namespace: $namespace (host-routed IPv4 egress; private/LAN destinations remain blocked)"
 echo 'Next, use the authenticated suspend operation to reconcile the failed first start, then wake for a fresh generation.'

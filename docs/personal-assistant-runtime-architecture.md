@@ -4,7 +4,7 @@
 > 状态：架构提案，待评审；不代表已实现或已具备生产隔离。  
 > 范围：Browser 可视化、BFF / 用户路由、Firecracker 用户环境、资源调度、定时与批量任务、主动沟通。
 
-2026-10-24 实现进展：控制面继续使用 K8s。只读 Browser 观看、初步持久 Scheduled / Inbox 和实验性 Node Agent 生命周期代码已交付；其余能力仍按本文分阶段推进。精确实现边界与部署入口见 [首批实现](runtime-implementation.md)，不以本文目标描述代替已实现状态。
+2026-10-26 实现进展：控制面继续使用 K8s。Browser 观看、configured-owner managed browser 的结构化输入 / 独占控制 epoch、初步持久 Scheduled / Inbox 和实验性 Node Agent 生命周期代码已交付；完整 OS 桌面和任意 guest 输入通道协调仍未实现。其余能力仍按本文分阶段推进。精确实现边界与部署入口见 [首批实现](runtime-implementation.md)，不以本文目标描述代替已实现状态。
 
 ## 1. 建议采用的整体方向
 
@@ -33,7 +33,7 @@ Meta 的官方架构说明描述了用户专属云电脑、浏览器与后台任
 | 能力           | 当前状态                                                                                          | 本提案目标                                                         |
 | -------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | 浏览器执行记录 | typed browser、命令 journal、immutable observations、Sources / View evidence 已存在               | 在会话中持续显示 Browser 状态和画面，可打开大视图                  |
-| 用户观看与接管 | 证据截图可查看；缺少持续观看和跨输入通道的控制权协调                                              | Watching / Agent controlling / You controlling / Paused 有明确状态 |
+| 用户观看与接管 | managed browser 支持截图、owner 输入与控制 epoch；完整桌面及任意 guest 输入通道协调待实现         | Watching / Agent controlling / You controlling / Paused 有明确状态 |
 | 用户环境       | Chat 自动 workspace；Work 绑定个人或团队 workspace；managed browser 为 configured-owner 的 opt-in | 用户独立 microVM、持久盘、浏览器 profile 和可恢复环境              |
 | 计算资源       | 共享 agent-worker，浏览器 supervisor 有容量与空闲回收                                             | 用户环境按需启动、资源准入、空闲回收、跨用户公平调度               |
 | 后台执行       | 独立 Work、队列、取消和恢复已存在                                                                 | 支持周期执行、batch、授权事件触发与持久等待                        |

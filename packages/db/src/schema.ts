@@ -57,6 +57,12 @@ export const assistantEnvironments = pgTable(
   (t) => [uniqueIndex('assistant_environment_owner').on(t.tenantId, t.userId)],
 );
 
+export const firecrackerNodeMaintenance = pgTable('firecracker_node_maintenance', {
+  nodeId: text('node_id').primaryKey(),
+  state: text('state').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+});
+
 export const environmentEvents = pgTable(
   'environment_events',
   {
@@ -119,6 +125,20 @@ export const browserRuntimes = pgTable('browser_runtimes', {
   owner: uuid('owner').notNull(),
   status: text('status').notNull(),
 });
+export const browserControls = pgTable('browser_controls', {
+  sessionId: uuid('session_id').primaryKey(),
+  record: jsonb('record').notNull(),
+});
+export const browserUserInputs = pgTable(
+  'browser_user_inputs',
+  {
+    sessionId: uuid('session_id').notNull(),
+    requestId: uuid('request_id').notNull(),
+    record: jsonb('record').notNull(),
+    effect: text('effect'),
+  },
+  (t) => [primaryKey({ columns: [t.sessionId, t.requestId] })],
+);
 export const browserCommands = pgTable(
   'browser_commands',
   {

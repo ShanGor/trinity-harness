@@ -225,6 +225,21 @@ export const discardedPromptEventSchema = z.object({
 export const sessionEventSchema = z.discriminatedUnion('type', [
   z.object({
     ...baseFields,
+    type: z.literal('browser/control_changed'),
+    generation: z.uuid(),
+    epoch: z.number().int().nonnegative(),
+    mode: z.enum(['agent', 'human', 'paused', 'quarantined']),
+  }),
+  z.object({
+    ...baseFields,
+    type: z.literal('browser/user_input'),
+    generation: z.uuid(),
+    epoch: z.number().int().nonnegative(),
+    requestId: z.uuid(),
+    effect: z.enum(['applied', 'unknown']),
+  }),
+  z.object({
+    ...baseFields,
     type: z.literal('browser/runtime_bound'),
     generation: z.uuid(),
     engine: z.literal('zendriver'),

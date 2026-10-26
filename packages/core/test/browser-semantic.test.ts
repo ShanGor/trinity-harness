@@ -28,6 +28,44 @@ describe('visible semantic capture', () => {
       { title: 'Source', url: 'https://example.com/source' },
     ]);
   });
+  it('preserves destinations on anchors wrapping result headings and block containers', () => {
+    const result = extract(
+      '<body><main><a href="https://example.com/source"><h3>Primary <span>result</span></h3><div>Visible snippet</div></a><a style="display:block" href="https://example.com/second"><span>Second result</span></a></main></body>',
+    );
+    expect(result.blocks.map((block) => ({ text: block.text, links: block.links }))).toEqual([
+      {
+        text: 'Primary result',
+        links: [{ title: 'Primary result', url: 'https://example.com/source' }],
+      },
+      {
+        text: 'Visible snippet',
+        links: [{ title: 'Visible snippet', url: 'https://example.com/source' }],
+      },
+      {
+        text: 'Second result',
+        links: [{ title: 'Second result', url: 'https://example.com/second' }],
+      },
+    ]);
+  });
+  it('does not copy hidden ancestor label text or unsafe enclosing destinations into blocks', () => {
+    const result = extract(
+      '<body><main><a href="https://example.com/source"><span hidden>PRIVATE</span><h3>Visible heading</h3></a><a href="javascript:bad()"><h3>Unsafe destination</h3></a><a href="https://user:secret@example.com/"><h3>Credential URL</h3></a><a hidden href="https://example.com/hidden"><h3>Hidden heading</h3></a></main></body>',
+    );
+    expect(result.blocks.map((block) => block.text)).toEqual([
+      'Visible heading',
+      'Unsafe destination',
+      'Credential URL',
+    ]);
+    expect(result.blocks.flatMap((block) => block.links)).toEqual([
+      { title: 'Visible heading', url: 'https://example.com/source' },
+    ]);
+  });
+  it('keeps enclosing and descendant destinations within the existing per-block limit', () => {
+    const result = extract(
+      `<body><main><p>${Array.from({ length: 30 }, (_, i) => `<a href="https://example.com/${i}">Source ${i}</a>`).join(' ')}</p></main></body>`,
+    );
+    expect(result.blocks[0]!.links).toHaveLength(20);
+  });
   it('reports an empty app shell as partial rather than ready', () => {
     const result = extract('<body><div id="app"></div></body>');
     expect(result.blocks).toEqual([]);

@@ -128,6 +128,64 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
       expect(Buffer.from(png).subarray(1, 4).toString()).toBe('PNG');
       expect(png.byteLength).toBeLessThanOrEqual(2 * 1024 * 1024);
     });
+    it('captures private user frames and applies native human coordinates and focused typing', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(20_000) };
+      await driver.navigate(
+        await driver.authorize(sessionId, 'navigate', url, ctx.signal),
+        url,
+        ctx,
+      );
+      const live = await driver.authorize(sessionId, 'read_page', undefined, ctx.signal);
+      const surface = await driver.surface(live, 'interactive', undefined, ctx);
+      const input = surface.targets.find((target) => target.role === 'textbox')!;
+      const button = surface.targets.find((target) => target.role === 'button')!;
+      const frame = async () => {
+        const captured = await driver.humanFrame(true, ctx, () => new Date());
+        expect(captured.preview.state).toBe('frame');
+        if (!captured.target) throw new Error('No human frame target');
+        return { ...captured.target, frameId: randomUUID() };
+      };
+      const point = (target: typeof input) => ({
+        x: target.box.x + target.box.width / 2,
+        y: target.box.y + target.box.height / 2,
+      });
+      await driver.humanInput(
+        { type: 'click', point: point(input), button: 'left', count: 1, modifiers: [] },
+        await frame(),
+        ctx,
+      );
+      await driver.humanInput({ type: 'key', key: 'a', modifiers: ['ctrl'] }, await frame(), ctx);
+      await driver.humanInput({ type: 'text', text: 'Human 世界' }, await frame(), ctx);
+      expect(
+        (
+          await connection.call(
+            'browser_evaluate',
+            { expression: 'document.querySelector("input").value' },
+            ctx.signal,
+          )
+        ).structuredContent,
+      ).toEqual({ value: 'Human 世界' });
+      await driver.humanInput(
+        { type: 'click', point: point(button), button: 'left', count: 1, modifiers: [] },
+        await frame(),
+        ctx,
+      );
+      expect(await driver.readiness(live, 'Clicked', 1000, ctx)).toBe('ready');
+      await connection.call(
+        'browser_evaluate',
+        { expression: 'document.querySelector("input").type = "password"' },
+        ctx.signal,
+      );
+      expect((await driver.humanFrame(false, ctx, () => new Date())).preview.state).toBe(
+        'privacy_blocked',
+      );
+      expect((await driver.humanFrame(true, ctx, () => new Date())).preview.state).toBe('frame');
+      await connection.call(
+        'browser_evaluate',
+        { expression: 'document.querySelector("input").type = "text"' },
+        ctx.signal,
+      );
+    });
     it('runs the evidence pipeline and replays saved images offline', async () => {
       const store = new MemorySessionStore();
       const blobs = new LocalBlobStore(path.join(root, 'blobs'));

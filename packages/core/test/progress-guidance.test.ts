@@ -52,7 +52,7 @@ describe('progress guidance', () => {
     const next = [...events, user()];
     expect(progressGuidance(next, next.length, 1, 64)).toBeNull();
   });
-  it('warns on consecutive failures or empty reads, but ignores unrelated shell work', () => {
+  it('warns on browser failures and gives distinct advice for unrelated tool failures', () => {
     const events = [
       user(),
       ...pair('1', snapshot, '', true),
@@ -67,7 +67,7 @@ describe('progress guidance', () => {
         5,
         64,
       ),
-    ).toBeNull();
+    ).toContain('Repeated tool failures: bash');
     expect(progressGuidance([...events, ...pair('4', snapshot, 'useful')], 1, 5, 64)).toBeNull();
   });
   it('warns in the final quarter without taking away available steps', () => {
@@ -145,7 +145,7 @@ describe('progress guidance', () => {
     const unrelated = events.map((event): SessionEvent =>
       event.type === 'tool/call' ? { ...event, name: 'other' } : event,
     );
-    expect(progressGuidance(unrelated, 1, 3, 64, true)).toBeNull();
+    expect(progressGuidance(unrelated, 1, 3, 64, true)).not.toContain('Research citations');
   });
   it('projects only the latest active guidance and drops it after completion', () => {
     const events: SessionEvent[] = [
@@ -429,4 +429,74 @@ it('does not mistake genuinely new saved pages for stalled research regardless o
     ...Array.from({ length: 12 }, (_, i) => evidencePair(`page${i}`, [`New evidence ${i}`])).flat(),
   ];
   expect(progressGuidance(events, 1, 100, Infinity)).toBeNull();
+});
+
+describe('general action guidance', () => {
+  function read(id: string, path: string, text = 'do-not-copy-result'): SessionEvent[] {
+    return [
+      { ...meta(), type: 'tool/call', callId: id, name: 'read_file', args: { path } },
+      { ...meta(), type: 'tool/result', callId: id, value: { text }, isError: false },
+    ];
+  }
+  it('detects identical reads across other successful work without exposing arguments or contents', () => {
+    const events = [
+      user(),
+      ...read('a', 'private-name'),
+      ...read('other', 'other', 'new'),
+      ...read('b', 'private-name'),
+      ...read('c', 'private-name'),
+    ];
+    const advice = progressGuidance(events, 1, 5, Infinity);
+    expect(advice).toContain('Repeated unchanged observations: read_file');
+    expect(advice).not.toContain('private-name');
+    expect(advice).not.toContain('do-not-copy-result');
+    expect(
+      progressGuidance([...events, ...read('changed', 'private-name', 'changed')], 1, 6, Infinity),
+    ).toBeNull();
+  });
+  it('invalidates repetition after workspace changes and resets at the next prompt', () => {
+    const events = [user(), ...read('a', 'a'), ...read('b', 'a'), ...read('c', 'a')];
+    const effect: SessionEvent[] = [
+      {
+        ...meta(),
+        type: 'tool/call',
+        callId: 'edit',
+        name: 'write_file',
+        args: {},
+        effect: { kind: 'mutation', scope: 'workspace' },
+      },
+      { ...meta(), type: 'tool/result', callId: 'edit', value: {}, isError: false },
+    ];
+    expect(
+      progressGuidance([...events, ...effect, ...read('new', 'a')], 1, 6, Infinity),
+    ).toBeNull();
+    const next = [...events, user()];
+    expect(progressGuidance(next, next.length, 1, Infinity)).toBeNull();
+  });
+  it('warns after two failing browser operations despite unrelated shell success', () => {
+    const failure = (id: string, operation: string): SessionEvent[] => [
+      { ...meta(), type: 'tool/call', callId: id, name: 'browser', args: { operation } },
+      {
+        ...meta(),
+        type: 'tool/result',
+        callId: id,
+        value: { code: 'DRIVER_FAILED' },
+        isError: true,
+      },
+    ];
+    const events = [
+      user(),
+      ...failure('a', 'navigate'),
+      ...pair('shell', 'uname -a', 'guest kernel'),
+      ...failure('b', 'web_search'),
+    ];
+    expect(progressGuidance(events, 1, 4, Infinity)).toContain('Repeated tool failures: browser');
+    expect(progressGuidance(events, 1, 4, Infinity)).toContain('unknown effect');
+  });
+  it('replays the same guidance from a serialized event log', () => {
+    const events = [user(), ...pair('a', 'pytest', '', true), ...pair('b', 'pytest', '', true)];
+    expect(progressGuidance(JSON.parse(JSON.stringify(events)), 1, 3, Infinity)).toBe(
+      progressGuidance(events, 1, 3, Infinity),
+    );
+  });
 });

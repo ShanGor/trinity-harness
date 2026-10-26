@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
   sessionEventSchema,
   taskToolInputSchema,
+  taskStatusSchema,
   type SessionEvent,
+  type LLMRequest,
 } from '@trinity-harness/contracts';
 import {
   CoreAgentLoop,
   CoreToolRegistry,
   MemorySessionStore,
   createTaskTool,
+  bashTool,
   readFileTool,
   toModelMessages,
 } from '../src/index.js';
@@ -60,6 +63,321 @@ async function setup(store = new MemorySessionStore()) {
 }
 
 describe('revisable agent plans', () => {
+  it('adds adjacent references only for currently eligible successful results and leaves stored values unchanged', async () => {
+    const { store, execute, read } = await setup();
+    await execute('plan', { operation: 'plan', checks: [{ ...check, dependency: 'workspace' }] });
+    await read('read');
+    const events = await store.load('s');
+    const seq = events.length;
+    const projected = toModelMessages(events).find((message) => message.toolCallId === 'read');
+    expect(projected?.content).toContain(`Runtime verification reference: resultSeq=${seq}`);
+    expect(JSON.stringify(events.at(-1))).not.toContain('Runtime verification reference');
+    await store.append('s', [
+      {
+        ...meta(),
+        type: 'tool/call',
+        name: 'write_file',
+        callId: 'effect',
+        args: {},
+        effect: { kind: 'mutation', scope: 'workspace' },
+      },
+      {
+        ...meta(),
+        type: 'tool/result',
+        callId: 'effect',
+        isError: false,
+        value: {},
+        effect: { kind: 'mutation', scope: 'workspace' },
+      },
+      { ...meta(), type: 'tool/call', name: 'read_file', callId: 'failed', args: {} },
+      { ...meta(), type: 'tool/result', callId: 'failed', isError: true, value: {} },
+    ]);
+    const after = toModelMessages(await store.load('s'));
+    expect(after.find((message) => message.toolCallId === 'read')?.content).not.toContain(
+      'Runtime verification reference',
+    );
+    expect(after.find((message) => message.toolCallId === 'failed')?.content).not.toContain(
+      'Runtime verification reference',
+    );
+  });
+
+  it('explains command mismatches and keeps diagnostics separate from eligible evidence on replay', async () => {
+    const { store, execute } = await setup();
+    const command = 'uname -a; cat /etc/os-release';
+    const planned = { id: 'os', kind: 'command', requirement: 'Capture OS', command };
+    await execute('plan', { operation: 'plan', checks: [planned] });
+    await store.append('s', [
+      {
+        ...meta(),
+        type: 'tool/call',
+        name: 'bash',
+        callId: 'formatted',
+        args: { command: `${command}; hostname` },
+      },
+      {
+        ...meta(),
+        type: 'tool/result',
+        callId: 'formatted',
+        isError: false,
+        value: { exitCode: 0, stdout: 'Linux' },
+      },
+    ]);
+    const status = await execute('status', { operation: 'status' });
+    expect(taskStatusSchema.parse(status.value)).toMatchObject({
+      status: 'incomplete',
+      evidence: [],
+      commandRepairs: [{ checkId: 'os', command, reason: 'exact_command_required' }],
+    });
+    expect(
+      await execute('wrong-proof', { operation: 'verify', id: 'os', callId: 'formatted' }),
+    ).toMatchObject({
+      isError: true,
+      value: { message: expect.stringContaining('does not exactly match') },
+    });
+    const replay = new MemorySessionStore();
+    await replay.append(
+      's',
+      (await store.load('s')).map((event) => sessionEventSchema.parse(event)),
+    );
+    expect(taskState(await replay.load('s'), prompt.eventId)).toEqual(status.value);
+    const messages = toModelMessages(await replay.load('s'));
+    const control = messages.find((message) => message.content.startsWith('[Agent working plan'))!;
+    expect(control.content).toContain('exact_command_required');
+    expect(control.content).toContain('extra formatting');
+    expect(messages.find((message) => message.toolCallId === 'formatted')?.content).not.toContain(
+      'Runtime verification reference',
+    );
+  });
+
+  it('distinguishes stale exact results from evidence that only needs verification', async () => {
+    const { store, execute } = await setup();
+    const command = 'uname -a';
+    await execute('plan', {
+      operation: 'plan',
+      checks: [{ id: 'os', kind: 'command', requirement: 'Capture OS', command }],
+    });
+    const run = async (callId: string, exitCode = 0) => {
+      await store.append('s', [
+        { ...meta(), type: 'tool/call', name: 'bash', callId, args: { command } },
+        { ...meta(), type: 'tool/result', callId, isError: false, value: { exitCode } },
+      ]);
+      return (await store.load('s')).length;
+    };
+    await run('failed', 1);
+    expect(taskState(await store.load('s'), prompt.eventId).commandRepairs?.[0]?.reason).toBe(
+      'exact_command_required',
+    );
+    const resultSeq = await run('exact');
+    expect(taskState(await store.load('s'), prompt.eventId).commandRepairs).toEqual([
+      { checkId: 'os', command, reason: 'verification_required', resultSeq },
+    ]);
+    await execute('verify', { operation: 'verify', id: 'os', resultSeq });
+    expect(taskState(await store.load('s'), prompt.eventId).commandRepairs).toBeUndefined();
+    await store.append('s', [
+      { ...meta(), type: 'tool/call', name: 'write_file', callId: 'mutation', args: {} },
+      { ...meta(), type: 'tool/result', callId: 'mutation', isError: false, value: {} },
+    ]);
+    expect(taskState(await store.load('s'), prompt.eventId).commandRepairs).toEqual([
+      { checkId: 'os', command, reason: 'fresh_evidence_required' },
+    ]);
+    expect((await execute('stale', { operation: 'verify', id: 'os', resultSeq })).isError).toBe(
+      true,
+    );
+    const nextPrompt = { ...prompt, ...meta() };
+    await store.append('s', [nextPrompt]);
+    await execute('next-plan', {
+      operation: 'plan',
+      checks: [{ id: 'os', kind: 'command', requirement: 'Capture OS', command }],
+    });
+    expect(taskState(await store.load('s'), nextPrompt.eventId).commandRepairs?.[0]?.reason).toBe(
+      'exact_command_required',
+    );
+  });
+
+  it('recovers the system-info command mismatch and completes after exact commands are verified', async () => {
+    const store = new MemorySessionStore();
+    const sandbox = new FakeSandbox();
+    const executed: string[] = [];
+    sandbox.execHandler = (command) => {
+      executed.push(command);
+      return { stdout: 'fixture system info', stderr: '', exitCode: 0 };
+    };
+    const tools = new CoreToolRegistry(sandbox);
+    tools.register(createTaskTool(store));
+    tools.register(bashTool);
+    const checks = [
+      {
+        id: 'os',
+        kind: 'command',
+        requirement: 'Capture OS',
+        command: 'uname -a; cat /etc/os-release',
+      },
+      {
+        id: 'resources',
+        kind: 'command',
+        requirement: 'Capture resources',
+        command: 'lscpu; free -h; df -h /',
+      },
+    ];
+    const llm = new FakeLLM(
+      () => toolCallThenFinish('plan', 'task', { operation: 'plan', checks }),
+      () =>
+        toolCallThenFinish('formatted-os', 'bash', { command: `${checks[0]!.command}; hostname` }),
+      () =>
+        toolCallThenFinish('formatted-resources', 'bash', { command: `${checks[1]!.command}; id` }),
+      () => textChunks('The system information was collected.'),
+      ...checks.flatMap((check, index) => [
+        (request: LLMRequest) => {
+          const control = request.messages.find((message) =>
+            message.content.startsWith('[Agent working plan'),
+          )!;
+          expect(control.content).toContain('exact_command_required');
+          expect(control.content).toContain(check.command);
+          return toolCallThenFinish(`exact-${index}`, 'bash', { command: check.command });
+        },
+        (request: LLMRequest) => {
+          const control = request.messages.find((message) =>
+            message.content.startsWith('[Agent working plan'),
+          )!;
+          const status = taskStatusSchema.parse(
+            JSON.parse(control.content.split('\n').slice(1).join('\n')),
+          );
+          const repair = status.commandRepairs!.find((item) => item.checkId === check.id)!;
+          expect(repair.reason).toBe('verification_required');
+          return toolCallThenFinish(`verify-${index}`, 'task', {
+            operation: 'verify',
+            id: repair.checkId,
+            resultSeq: repair.resultSeq,
+          });
+        },
+      ]),
+      () => textChunks('Here is the system information from the guest.'),
+    );
+    const loop = new CoreAgentLoop({
+      llm,
+      model: 'fake/model',
+      workspaceRoot: '/ws',
+      tools,
+      store,
+      verification: true,
+    });
+    expect((await loop.run('s', 'show me the system info', { emit: () => undefined })).reason).toBe(
+      'completed',
+    );
+    const events = await store.load('s');
+    expect(events.filter((event) => event.type === 'task/recovery')).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'task/check')).toHaveLength(2);
+    expect(events.findLast((event) => event.type === 'task/assessment')).toMatchObject({
+      status: 'verified',
+      pending: [],
+    });
+    expect(executed).toEqual([
+      `${checks[0]!.command}; hostname`,
+      `${checks[1]!.command}; id`,
+      ...checks.map((check) => check.command),
+    ]);
+    llm.assertExhausted();
+  });
+
+  it('verifies using an exact event sequence and retains callId compatibility', async () => {
+    const { store, execute, read } = await setup();
+    await execute('plan', { operation: 'plan', checks: [check] });
+    await read('opaque-engine-owned-id');
+    const resultSeq = (await store.load('s')).length;
+    expect(
+      (await execute('verify-seq', { operation: 'verify', id: check.id, resultSeq })).isError,
+    ).toBe(false);
+    const recorded = (await store.load('s')).findLast((event) => event.type === 'task/check');
+    expect(recorded).toMatchObject({ callId: 'opaque-engine-owned-id', resultSeq });
+    expect(
+      (
+        await execute('verify-id', {
+          operation: 'verify',
+          id: check.id,
+          callId: 'opaque-engine-owned-id',
+        })
+      ).isError,
+    ).toBe(false);
+  });
+
+  it('rejects mismatched selectors and failed, stale or non-result sequences', async () => {
+    const { store, execute, read } = await setup();
+    await execute('plan', { operation: 'plan', checks: [{ ...check, dependency: 'workspace' }] });
+    await read('observed');
+    const observedSeq = (await store.load('s')).length;
+    expect(
+      (
+        await execute('mismatch', {
+          operation: 'verify',
+          id: check.id,
+          resultSeq: observedSeq,
+          callId: 'different-id',
+        })
+      ).isError,
+    ).toBe(true);
+    expect(
+      (await execute('not-result', { operation: 'verify', id: check.id, resultSeq: 1 })).isError,
+    ).toBe(true);
+    await store.append('s', [
+      { ...meta(), type: 'tool/call', callId: 'failed', name: 'read_file', args: {} },
+      { ...meta(), type: 'tool/result', callId: 'failed', isError: true, value: {} },
+    ]);
+    expect(
+      (
+        await execute('failed-receipt', {
+          operation: 'verify',
+          id: check.id,
+          resultSeq: (await store.load('s')).length,
+        })
+      ).isError,
+    ).toBe(true);
+    await store.append('s', [
+      {
+        ...meta(),
+        type: 'tool/call',
+        callId: 'effect',
+        name: 'write_file',
+        args: {},
+        effect: { kind: 'mutation', scope: 'workspace' },
+      },
+      {
+        ...meta(),
+        type: 'tool/result',
+        callId: 'effect',
+        isError: false,
+        value: {},
+        effect: { kind: 'mutation', scope: 'workspace' },
+      },
+    ]);
+    expect(
+      (await execute('stale', { operation: 'verify', id: check.id, resultSeq: observedSeq }))
+        .isError,
+    ).toBe(true);
+    const next = { ...prompt, ...meta() };
+    await store.append('s', [next]);
+    await execute('next-plan', { operation: 'plan', checks: [check] });
+    expect(
+      (
+        await execute('previous-prompt', {
+          operation: 'verify',
+          id: check.id,
+          resultSeq: observedSeq,
+        })
+      ).isError,
+    ).toBe(true);
+    expect((await store.load('s')).some((event) => event.type === 'task/check')).toBe(false);
+  });
+
+  it('requires an exact evidence selector in the shared verify schema', () => {
+    expect(taskToolInputSchema.safeParse({ operation: 'verify', id: 'x' }).success).toBe(false);
+    expect(
+      taskToolInputSchema.safeParse({ operation: 'verify', id: 'x', resultSeq: 0 }).success,
+    ).toBe(false);
+    expect(
+      taskToolInputSchema.safeParse({ operation: 'verify', id: 'x', resultSeq: 4 }).success,
+    ).toBe(true);
+  });
+
   it('exposes bounded exact evidence IDs, never failed, stale, interrupted or internal calls', async () => {
     const { store, execute, read } = await setup();
     await read('before-plan');

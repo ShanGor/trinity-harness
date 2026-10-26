@@ -117,16 +117,14 @@ describe('subagent tool (docs/design.md §8)', () => {
         command: 'agent-browser --session test --cdp 9222 --pin-tab snapshot -i',
       });
     const childLLM = new FakeLLM(read('a'), read('b'), read('c'), read('d'), (request) => {
-      expect(request.system).toContain(
-        'Context compaction and available budget are capacity controls',
-      );
+      expect(request.system).toContain('Available budget and compaction are capacity controls');
       expect(JSON.stringify(request.messages)).toContain('last three browser reads');
       return textChunks('Qualified child report');
     });
     const parentLLM = new FakeLLM(
       () => toolCallThenFinish('delegate', 'subagent', { task: 'Answer one focused question' }),
       (request) => {
-        expect(request.system).toContain('focused question with a useful stopping condition');
+        expect(request.system).toContain('Delegate focused questions with stopping conditions');
         expect(JSON.stringify(request.messages)).not.toContain('Subagent ');
         return textChunks('Parent answer');
       },

@@ -56,11 +56,11 @@ export class ZendriverMcpConnection implements ZendriverClient {
       () => this.fail(),
     );
   }
-  private fail(): void {
+  private fail(error = new BrowserDriverError('DRIVER_FAILED')): void {
     if (this.failed) return;
     this.failed = true;
     this.buffer = Buffer.alloc(0);
-    this.pending?.reject(new BrowserDriverError('DRIVER_FAILED'));
+    this.pending?.reject(error);
     this.pending = undefined;
     this.process.kill();
   }
@@ -87,7 +87,15 @@ export class ZendriverMcpConnection implements ZendriverClient {
             params: { requestId: id, reason: 'cancelled' },
           });
         } finally {
-          this.fail();
+          this.fail(
+            signal?.aborted
+              ? undefined
+              : new BrowserDriverError(
+                  'DRIVER_FAILED',
+                  'The browser driver did not respond within 30 seconds. Its process was stopped; the operation may have taken effect. Check the browser runtime and host-managed guest egress before retrying.',
+                  'conclude',
+                ),
+          );
         }
       };
       this.pending = {

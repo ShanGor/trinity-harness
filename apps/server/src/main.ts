@@ -315,6 +315,7 @@ async function main(): Promise<void> {
       {
         maxSteps: env.MAX_TURN_STEPS,
         maxRequests: env.TASK_MAX_REQUESTS,
+        maxToolCalls: env.TASK_MAX_TOOL_CALLS,
         maxTokens: env.TASK_MAX_TOKENS,
         maxDurationMs: env.TASK_MAX_DURATION_MS,
         reserveRequests: 3,
@@ -423,7 +424,7 @@ async function main(): Promise<void> {
       const bus = new RedisEventBus(redis);
       store = new PublishingSessionStore(store, new RedisSessionEventPublisher(redis));
       queue = new RedisTurnQueue({ url: env.REDIS_URL });
-      eventReader = new RedisSessionEventReader(redis);
+      eventReader = new RedisSessionEventReader(redis, { store });
       liveEvents = new RedisLiveEventSubscriber(redis);
       audit = new BusAuditEmitter(bus);
       auditQuery = new PgAuditStore(db);
@@ -515,6 +516,7 @@ async function main(): Promise<void> {
       workspaceSandbox: guestRouter
         ? (sessionId, root) => assemblyFor(root, sessionId).sandbox
         : undefined,
+      browserInteraction: browserRuntime ?? undefined,
       browserPreview:
         browserRuntime ??
         (env.BROWSER_CDP_ENDPOINT && auth
@@ -556,6 +558,8 @@ async function main(): Promise<void> {
           : undefined),
       schedules,
       environments,
+      environmentMaintenance: environments,
+      firecrackerMaintenanceToken: env.FIRECRACKER_MAINTENANCE_TOKEN,
       usage,
       quotaAdmin: usage,
     },

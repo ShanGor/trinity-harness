@@ -3,6 +3,11 @@ import { browserArgumentsSchema, browserResultSchema, browserErrorSchema } from 
 import type { BrowserBinding, BrowserCapture, BrowserSurface } from './browser.js';
 import type { ToolContext, ToolResult } from './tools.js';
 import type { BrowserPreview } from './browser-preview.js';
+import type {
+  BrowserHumanCapture,
+  BrowserHumanAction,
+  BrowserFrameTarget,
+} from './browser-interaction.js';
 
 const path = z.array(z.number().int().nonnegative()).max(80);
 export const browserDriverActionSchema = z.discriminatedUnion('operation', [
@@ -136,5 +141,11 @@ export interface ManagedBrowserSession {
   generation: string;
   execute(request: BrowserRuntimeRequest, signal: AbortSignal): Promise<ToolResult>;
   preview?(signal: AbortSignal): Promise<BrowserPreview>;
+  humanFrame?(privateView: boolean, signal: AbortSignal): Promise<BrowserHumanCapture>;
+  humanInput?(
+    action: BrowserHumanAction,
+    target: BrowserFrameTarget,
+    signal: AbortSignal,
+  ): Promise<void>;
   dispose(): Promise<void>;
 }

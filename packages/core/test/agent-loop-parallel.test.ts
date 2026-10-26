@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { StreamChunk, ToolDefinition, ToolResult } from '@trinity-harness/contracts';
+import { BROWSER_LIMITS } from '@trinity-harness/contracts';
 import { z } from 'zod';
 
 import { CoreAgentLoop, CoreToolRegistry } from '../src/index.js';
@@ -217,10 +218,55 @@ it.each(['execution', 'denied', 'rejected'])(
     expect(results.map((e) => e.callId)).toEqual(['b1', 'other', 'b2']);
     expect(results[2]).toMatchObject({
       isError: true,
-      value: { code: 'NOT_EXECUTED', effect: 'none' },
+      value: {
+        code: 'NOT_EXECUTED',
+        effect: 'none',
+        message:
+          'An earlier browser operation failed in this model step. This call was not executed; inspect that failure before proceeding.',
+      },
     });
   },
 );
+
+it('reports the browser call limit only after successful calls exhaust the step allowance', async () => {
+  const store = new MemorySessionStore();
+  const registry = new CoreToolRegistry(new FakeSandbox());
+  let executed = 0;
+  registry.register({
+    name: 'browser',
+    description: 'browser',
+    parameters: z.object({}),
+    concurrency: 'exclusive',
+    execute: async () => {
+      executed++;
+      return { isError: false, value: 'observed' };
+    },
+  });
+  const loop = makeLoop(
+    [
+      () => [
+        ...Array.from({ length: BROWSER_LIMITS.callsPerStep + 1 }, (_, index) =>
+          toolCallChunk(`b${index}`, 'browser', {}),
+        ),
+        finish,
+      ],
+      () => [{ kind: 'text-delta', text: 'done' }, finish],
+    ],
+    store,
+    registry,
+  );
+  await loop.run('s', 'go', { emit: () => {} });
+  expect(executed).toBe(BROWSER_LIMITS.callsPerStep);
+  expect((await store.load('s')).findLast((event) => event.type === 'tool/result')).toMatchObject({
+    isError: true,
+    value: {
+      code: 'NOT_EXECUTED',
+      effect: 'none',
+      message:
+        'The browser call limit for this model step was reached. This call was not executed; inspect existing results before proceeding.',
+    },
+  });
+});
 
 it('resets browser failure ordering between model steps and avoids browser spill', async () => {
   const store = new MemorySessionStore();

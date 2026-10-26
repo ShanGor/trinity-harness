@@ -23,8 +23,8 @@ it('requires storage/credentials and defaults to a bounded loopback-only supervi
     { BROWSER_RUNTIME_MAX_SESSIONS: 0 },
     { BROWSER_RUNTIME_IDLE_MS: 0 },
     { ZENDRIVER_CHROME_VERSION: 'latest' },
-    { BROWSER_PROXY_URL: 'socks5://127.0.0.1:1080' },
-    { BROWSER_PROXY_URL: 'not a url' },
+    { SANDBOX_PROXY_URL: 'socks5://127.0.0.1:1080' },
+    { SANDBOX_PROXY_URL: 'not a url' },
   ])
     expect(browserRuntimeEnvSchema.safeParse({ ...minimal, ...extra }).success).toBe(false);
 });
@@ -32,10 +32,16 @@ it('requires storage/credentials and defaults to a bounded loopback-only supervi
 it('accepts an explicit operator-configured proxy for managed Chrome', () => {
   const parsed = browserRuntimeEnvSchema.parse({
     ...minimal,
-    BROWSER_PROXY_URL: 'http://127.0.0.1:7890',
+    SANDBOX_PROXY_URL: 'http://127.0.0.1:7890',
   });
-  expect(parsed.BROWSER_PROXY_URL).toBe('http://127.0.0.1:7890');
+  expect(parsed.SANDBOX_PROXY_URL).toBe('http://127.0.0.1:7890');
   expect(parsed.BROWSER_NO_PROXY).toContain('localhost');
+  expect(
+    browserRuntimeEnvSchema.safeParse({
+      ...minimal,
+      SANDBOX_PROXY_URL: 'http://user:password@proxy:7890',
+    }).success,
+  ).toBe(true);
 });
 
 it('requires local profiles only for local execution, leaving guest profile storage inside the VM', () => {
@@ -47,5 +53,26 @@ it('requires local profiles only for local execution, leaving guest profile stor
   expect(browserRuntimeEnvSchema.safeParse(base).success).toBe(false);
   expect(
     browserRuntimeEnvSchema.safeParse({ ...base, EXECUTION_DRIVER: 'firecracker' }).success,
+  ).toBe(true);
+  expect(
+    browserRuntimeEnvSchema.safeParse({
+      ...base,
+      EXECUTION_DRIVER: 'firecracker',
+      SANDBOX_PROXY_URL: 'http://127.0.0.1:7890',
+    }).success,
+  ).toBe(true);
+  expect(
+    browserRuntimeEnvSchema.safeParse({
+      ...base,
+      EXECUTION_DRIVER: 'firecracker',
+      SANDBOX_PROXY_URL: 'http://user:password@192.0.2.20:7890',
+    }).success,
+  ).toBe(true);
+  expect(
+    browserRuntimeEnvSchema.safeParse({
+      ...base,
+      EXECUTION_DRIVER: 'firecracker',
+      SANDBOX_PROXY_URL: 'http://192.0.2.20:7890',
+    }).success,
   ).toBe(true);
 });

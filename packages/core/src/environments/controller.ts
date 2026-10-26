@@ -3,6 +3,8 @@ import {
   nodeRuntimeResultSchema,
   type EnvironmentNode,
   type EnvironmentPort,
+  type EnvironmentMaintenancePort,
+  type EnvironmentNodeDrainResult,
   type EnvironmentRecord,
   type EnvironmentStore,
   type Identity,
@@ -59,7 +61,7 @@ export class HttpNodeRuntime implements NodeRuntimePort {
   }
 }
 
-export class EnvironmentController implements EnvironmentPort {
+export class EnvironmentController implements EnvironmentPort, EnvironmentMaintenancePort {
   constructor(
     private readonly store: EnvironmentStore,
     private readonly nodes: readonly EnvironmentNode[],
@@ -90,6 +92,8 @@ export class EnvironmentController implements EnvironmentPort {
     if (!runtime) throw new Error('Assigned node is unavailable; automatic takeover is disabled');
     try {
       const result = await runtime.command(operation, record, signal);
+      if (operation === 'stop' && result.state !== 'stopped')
+        throw new Error('Node did not confirm the environment stopped');
       return await this.store.transition(record, result.state);
     } catch (error) {
       // Timeout/transport loss never establishes that a host or VM stopped.
@@ -103,6 +107,10 @@ export class EnvironmentController implements EnvironmentPort {
       identity,
       async (active) => {
         const record = await this.store.reserve(identity, this.nodes);
+        if (await this.store.isNodeDraining(record.nodeId))
+          throw Object.assign(new Error('Environment node is in maintenance'), {
+            code: 'NODE_DRAINING',
+          });
         if (record.state === 'quarantined') throw new Error('Environment requires host recovery');
         if (record.state === 'running') return record;
         return this.command('start', record, active);
@@ -121,5 +129,56 @@ export class EnvironmentController implements EnvironmentPort {
       },
       signal,
     );
+  }
+  async drainNode(nodeId: string, signal?: AbortSignal): Promise<EnvironmentNodeDrainResult> {
+    if (!this.nodes.some((node) => node.id === nodeId))
+      throw Object.assign(new Error('Unknown Firecracker node'), { code: 'UNKNOWN_NODE' });
+    await this.store.beginNodeDrain(nodeId);
+    signal?.throwIfAborted();
+    const active = (await this.store.listNodeEnvironments(nodeId)).filter(
+      (record) => record.state !== 'stopped',
+    );
+    let cursor = 0;
+    let failed = 0;
+    const concurrency = Math.min(4, active.length);
+    await Promise.all(
+      Array.from({ length: concurrency }, async () => {
+        for (;;) {
+          signal?.throwIfAborted();
+          const index = cursor++;
+          const record = active[index];
+          if (!record) return;
+          try {
+            await this.suspend(
+              { tenantId: record.tenantId, userId: record.userId, role: 'developer' },
+              signal,
+            );
+          } catch {
+            // Keep draining the other owners; the final state check gates release.
+            failed += 1;
+          }
+        }
+      }),
+    );
+    const remaining = (await this.store.listNodeEnvironments(nodeId)).filter(
+      (record) => record.state !== 'stopped',
+    ).length;
+    return {
+      nodeId,
+      state: 'draining',
+      stopped: active.length - remaining,
+      remaining,
+      failed,
+    };
+  }
+  async resumeNode(nodeId: string): Promise<void> {
+    if (!this.nodes.some((node) => node.id === nodeId))
+      throw Object.assign(new Error('Unknown Firecracker node'), { code: 'UNKNOWN_NODE' });
+    const active = (await this.store.listNodeEnvironments(nodeId)).some(
+      (record) => record.state !== 'stopped',
+    );
+    if (active)
+      throw Object.assign(new Error('Node still has active environments'), { code: 'NODE_ACTIVE' });
+    await this.store.endNodeDrain(nodeId);
   }
 }

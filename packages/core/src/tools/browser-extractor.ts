@@ -35,7 +35,7 @@ export function browserExtractor(mode: 'article' | 'documentation', scopePath?: 
     const blocks = []; let sectionId = null, bytes = 0, nodes = 0;
     const encoder = new TextEncoder();
     const semantic = tag => /^H[1-6]$/.test(tag) || ['P','LI','PRE','TABLE'].includes(tag);
-    const emit = (clone, tag) => {
+    const emit = (clone, tag, enclosingHref) => {
         if (blocks.length >= 1000) { truncated = true; return; }
         if (tag === 'LI') clone.querySelectorAll('ul,ol').forEach(list => list.remove());
         const raw = tag === 'PRE' ? clone.textContent : clone.textContent.replace(/\\s+/g, ' ').trim();
@@ -45,7 +45,14 @@ export function browserExtractor(mode: 'article' | 'documentation', scopePath?: 
         const id = 'b' + blocks.length;
         const kind = /^H/.test(tag) ? 'heading' : tag === 'LI' ? 'list_item' : tag === 'PRE' ? 'code' : tag === 'TABLE' ? 'table' : 'paragraph';
         if (kind === 'heading') sectionId = id;
-        const links = Array.from(clone.querySelectorAll('a[href]')).slice(0,20).flatMap(a => { const url = http(a.getAttribute('href')); return url ? [{title: Array.from(a.textContent).slice(0,100).join(''),url}] : []; });
+        const enclosingUrl = enclosingHref == null ? null : http(enclosingHref);
+        const anchors = [...(clone.matches('a[href]') ? [clone] : []), ...clone.querySelectorAll('a[href]')];
+        const links = enclosingUrl ? [{title: Array.from(text).slice(0,100).join(''), url: enclosingUrl}] : [];
+        for (const a of anchors.slice(0,20)) {
+          const url = http(a.getAttribute('href'));
+          if (url && !links.some(link => link.url === url) && links.length < 20)
+            links.push({title: Array.from(a.textContent).slice(0,100).join(''), url});
+        }
         const block = {id,kind,text,sectionId,links};
         if (tag === 'TABLE') {
           block.rows = Array.from(clone.querySelectorAll('tr')).slice(0,100).map(row => Array.from(row.children).filter(c => ['TD','TH'].includes(c.tagName)).slice(0,40).map(c => ({text: Array.from(c.textContent.trim()).slice(0,2000).join(''), header: c.tagName === 'TH'})));
@@ -61,14 +68,14 @@ export function browserExtractor(mode: 'article' | 'documentation', scopePath?: 
       const tag = node.tagName;
       if (semantic(tag)) {
         const clone = clean(node); if (!clone) return;
-        emit(clone, tag);
+        emit(clone, tag, node.closest('a[href]')?.getAttribute('href'));
         if (tag === 'LI') for (const child of node.children) if (['UL','OL'].includes(child.tagName)) walk(child);
         return;
       }
       // Preserve text between block containers, including SPA div/span content.
       // Inline runs share one block so links and adjacent text keep their order.
       let run = document.createElement('div');
-      const flush = () => { if (run.childNodes.length) emit(run, 'DIV'); run = document.createElement('div'); };
+      const flush = () => { if (run.childNodes.length) emit(run, 'DIV', node.closest('a[href]')?.getAttribute('href')); run = document.createElement('div'); };
       for (const child of node.childNodes) {
         if (++nodes > 20000) { truncated = true; break; }
         if (child.nodeType === 3) { const copied = clean(child); if (copied) run.appendChild(copied); }

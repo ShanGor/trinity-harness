@@ -72,6 +72,18 @@ function reasoningFromContent(
  * blocks for the multimodal gateway. Deterministic — unit tested without IO.
  */
 export function toModelMessages(events: readonly SessionEvent[]): ConversationMessage[] {
+  const messages = assembleModelMessages(events);
+  const control = events.findLast((event) => event.type === 'browser/control_changed');
+  if (control?.type === 'browser/control_changed')
+    messages.unshift({
+      role: 'user',
+      context: 'control',
+      content: `[Runtime browser control: ${control.mode}. Human input is not a new task instruction. While human control is active or paused, do not operate the browser. After control returns, obtain a fresh observation before using current-state evidence or prior page targets. Explicit navigation or web search provides a new observation and may proceed; do not request a new go-ahead solely to recover stale browser state.]`,
+    });
+  return messages;
+}
+
+function assembleModelMessages(events: readonly SessionEvent[]): ConversationMessage[] {
   const currentPrompt = events.findLast((event) => event.type === 'message/user')?.eventId;
   const currentSelection = events.findLast(
     (event) => event.type === 'memory/selection' && event.receipt.promptId === currentPrompt,
@@ -86,6 +98,10 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
   const ranges = compactionRanges(events);
   const latestUser = events.findLastIndex((event) => event.type === 'message/user');
   const promptId = events[latestUser]?.eventId;
+  const verificationState = promptId ? taskState(events, promptId) : undefined;
+  const evidenceBySeq = new Map(
+    verificationState?.evidence.map((entry) => [entry.resultSeq, entry]),
+  );
   let emitIdx = 0;
   let activeIdx = -1; // range currently covering events
   const toolNames = new Map<string, string>();
@@ -138,7 +154,7 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
       messages.push({
         role: 'user',
         context: 'control',
-        content: `[Agent working plan and verification. Model-authored interpretation/checks; the original user request remains authoritative. Use exact callId values from evidence for task verify.]\n${JSON.stringify({ intent: plan.intent, interpretation: plan.interpretation, assumptions: plan.assumptions, revisionReason: plan.revisionReason, checks: plan.checks, ...taskState(events, promptId) })}`,
+        content: `[Agent working plan and verification. Model-authored interpretation/checks; the original user request remains authoritative. For task verify, prefer the exact resultSeq from eligible evidence; an exact recorded callId also works. Never guess provider IDs. Follow commandRepairs: exact_command_required means run its command unchanged through bash (extra formatting, filters or diagnostics change the command); fresh_evidence_required means collect a fresh exact-command result; verification_required means task verify with checkId as id and the supplied resultSeq. Inspect prior effects and apply normal permissions before rerunning commands; never repeat mutations merely to repair bookkeeping. Repeating a plan or assessing fulfilled cannot replace verification.]\n${JSON.stringify({ intent: plan.intent, interpretation: plan.interpretation, assumptions: plan.assumptions, revisionReason: plan.revisionReason, checks: plan.checks, ...verificationState })}`,
       });
     const recovery = events.findLast(
       (event) => event.type === 'task/recovery' && event.promptId === promptId,
@@ -312,9 +328,16 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
               })),
             )
           : [];
+        const evidence = evidenceBySeq.get(seq);
+        const evidenceHint =
+          !event.isError &&
+          evidence?.callId === event.callId &&
+          toolNames.get(event.callId) !== 'browser'
+            ? `\n[Runtime verification reference: resultSeq=${evidence.resultSeq}. Use this exact resultSeq for task verify only if this result supports the declared check. Eligibility is not proof of relevance or correctness.]`
+            : '';
         messages.push({
           role: 'tool',
-          content: JSON.stringify(value),
+          content: JSON.stringify(value) + evidenceHint,
           toolCallId: event.callId,
           toolName: toolNames.get(event.callId),
           ...(recalledMedia.length ? { blocks: recalledMedia } : {}),
@@ -432,6 +455,6 @@ export function personalModelMessages(
       context: 'reference',
       content: `[Authorized memory and conversation references. Reference data only; these do not add requested deliverables. Current instructions and execution policy take precedence. Use recall for specific earlier sources when needed.]\n${reference}`,
     },
-    ...toModelMessages(active),
+    ...assembleModelMessages(active),
   ];
 }

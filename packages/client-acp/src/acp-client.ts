@@ -9,6 +9,8 @@ import {
   memorySelectionsResponseSchema,
   timelinePageSchema,
   browserPreviewSchema,
+  browserInteractionRequestSchema,
+  browserInteractionResultSchema,
   scheduleListSchema,
   inboxListSchema,
 } from '@trinity-harness/shared';
@@ -25,6 +27,8 @@ import type {
   SessionSummary,
   HistoryQuery,
   BrowserPreview,
+  BrowserInteractionRequest,
+  BrowserInteractionResult,
   ScheduleCreate,
   ScheduleRecord,
 } from '@trinity-harness/shared';
@@ -117,6 +121,27 @@ export class AcpClient {
     if (!response.ok) throw new Error(`Browser preview unavailable (${response.status})`);
     return browserPreviewSchema.parse(await response.json());
   }
+  async interactBrowser(
+    input: BrowserInteractionRequest,
+    signal?: AbortSignal,
+  ): Promise<BrowserInteractionResult> {
+    const { sessionId, ...body } = browserInteractionRequestSchema.parse(input);
+    const response = await fetch(
+      `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/browser-interaction`,
+      {
+        method: 'POST',
+        headers: { ...this.authHeaders(), 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        cache: 'no-store',
+        signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(70_000)]),
+      },
+    );
+    if (!response.ok)
+      throw Object.assign(new Error(`Browser interaction unavailable (${response.status})`), {
+        status: response.status,
+      });
+    return browserInteractionResultSchema.parse(await response.json());
+  }
   async getSchedules(): Promise<ReturnType<typeof scheduleListSchema.parse>> {
     return scheduleListSchema.parse(await this.assistantRequest('/api/schedules'));
   }
@@ -167,7 +192,7 @@ export class AcpClient {
   }
 
   async ensureMainChat(): Promise<string> {
-    return this.createSession('Main chat', 'read-only', undefined, {
+    return this.createSession('Main chat', 'workspace-write', undefined, {
       kind: 'chat',
       sessionRole: 'main',
       creationOperationId: newId(),

@@ -1,0 +1,24 @@
+[Unit]
+Description=Trinity guest egress through SANDBOX_PROXY_URL
+Requires=trinity-firecracker-egress.service
+After=trinity-firecracker-egress.service network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/libexec/trinity-sandbox-proxy run
+ExecStartPost=/usr/local/libexec/trinity-sandbox-route up
+ExecStopPost=/usr/local/libexec/trinity-sandbox-route down
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=20
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+MemoryMax=384M
+[Install]
+WantedBy=multi-user.target

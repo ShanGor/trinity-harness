@@ -348,6 +348,7 @@ async function main(): Promise<void> {
           {
             maxSteps: env.MAX_TURN_STEPS,
             maxRequests: env.TASK_MAX_REQUESTS,
+            maxToolCalls: env.TASK_MAX_TOOL_CALLS,
             maxTokens: env.TASK_MAX_TOKENS,
             maxDurationMs: env.TASK_MAX_DURATION_MS,
             reserveRequests: 3,

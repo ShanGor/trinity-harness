@@ -18,7 +18,7 @@ import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 export interface TelemetryOptions {
   /** OTel service name (default: TRINITY_SERVICE_NAME || 'trinity-harness'). */
   serviceName?: string | undefined;
-  /** OTLP/gRPC endpoint for traces + metrics (e.g. http://otel-collector:4317). */
+  /** OTLP/HTTP endpoint for traces + metrics (e.g. http://otel-collector:4318). */
   otlpEndpoint?: string | undefined;
   /**
    * When set, exposes a Prometheus /metrics endpoint on this port
@@ -55,6 +55,9 @@ export function startTelemetry(opts: TelemetryOptions): Telemetry | null {
     traceExporter: otlpEndpoint
       ? new OTLPTraceExporter({ url: `${otlpEndpoint}/v1/traces` })
       : undefined,
+    // NodeSDK otherwise creates its default localhost OTLP trace exporter,
+    // even when only a Prometheus metrics listener was requested.
+    ...(!otlpEndpoint ? { spanProcessors: [] } : {}),
     metricReader:
       prometheusPort !== undefined
         ? new PrometheusExporter({ port: prometheusPort })

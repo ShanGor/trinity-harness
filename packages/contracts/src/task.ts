@@ -6,6 +6,7 @@ import { effectScopeSchema } from './execution-context.js';
 export const taskBudgetSchema = z.object({
   /** An omitted ceiling is unlimited; persisted ceilings remain effective on replay. */
   maxSteps: z.number().int().positive().max(1024).optional(),
+  maxToolCalls: z.number().int().positive().max(100_000).optional(),
   maxRequests: z.number().int().positive().max(4096).optional(),
   maxTokens: z.number().int().positive().optional(),
   maxDurationMs: z.number().int().positive().max(86_400_000).optional(),
@@ -63,11 +64,28 @@ export const taskPlanSchema = taskPlanDetailsSchema
   });
 export const taskToolInputSchema = z.discriminatedUnion('operation', [
   taskPlanSchema,
-  z.object({
-    operation: z.literal('verify'),
-    id: z.string().min(1).max(80),
-    callId: z.string().min(1).max(200),
-  }),
+  z
+    .object({
+      operation: z.literal('verify'),
+      id: z.string().min(1).max(80),
+      resultSeq: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe('Preferred: exact resultSeq from the current eligible evidence list.'),
+      callId: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe(
+          'Alternative: exact recorded callId from eligible evidence, never a guessed provider ID. If both fields are supplied they must match.',
+        ),
+    })
+    .refine((value) => value.resultSeq !== undefined || value.callId !== undefined, {
+      message: 'Select evidence with resultSeq or callId',
+    }),
   z.object({ operation: z.literal('status') }),
   z.object({
     operation: z.literal('candidate'),
@@ -94,6 +112,21 @@ export const taskStatusSchema = z.object({
   pending: z.array(z.string()).max(32),
   evidence: z.array(taskEvidenceSchema).max(32),
   evidenceTruncated: z.boolean(),
+  commandRepairs: z
+    .array(
+      z.object({
+        checkId: z.string().max(80),
+        command: z.string().max(4000),
+        reason: z.enum([
+          'exact_command_required',
+          'fresh_evidence_required',
+          'verification_required',
+        ]),
+        resultSeq: z.number().int().positive().optional(),
+      }),
+    )
+    .max(32)
+    .optional(),
 });
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
 
@@ -123,6 +156,12 @@ export const taskEventSchemas = [
     lane: z.enum(['work', 'verification', 'final']),
   }),
   z.object({ type: z.literal('task/request_denied'), promptId: z.uuid(), requestId: z.uuid() }),
+  z.object({
+    type: z.literal('task/tool_reservation'),
+    promptId: z.uuid(),
+    reservationId: z.uuid(),
+    count: z.number().int().positive().max(100_000),
+  }),
   z.object({ type: z.literal('task/step'), promptId: z.uuid() }),
   z.object({
     type: z.literal('task/recovery'),
@@ -171,6 +210,8 @@ export const taskEventSchemas = [
 export interface TaskBudgetScope {
   readonly signal: AbortSignal;
   readonly maxSteps: number | undefined;
+  /** Reserve a complete tool wave before approvals/execution; shared with children. */
+  reserveTools(count: number): Promise<boolean>;
   shouldConclude(request: LLMRequest): Promise<boolean>;
   shouldFinalize(request: LLMRequest): Promise<boolean>;
   admit(

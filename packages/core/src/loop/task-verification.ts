@@ -58,6 +58,11 @@ function legacyTaskEvidence(events: readonly SessionEvent[], promptId: string): 
   const planIndex = events.findIndex((event) => event.eventId === plan.eventId);
   let lastEffect = promptIndex;
   events.forEach((event, index) => {
+    if (
+      index > promptIndex &&
+      (event.type === 'browser/user_input' || event.type === 'browser/control_changed')
+    )
+      lastEffect = Math.max(lastEffect, index);
     if (index <= promptIndex || event.type !== 'tool/call' || readTools.has(event.name)) return;
     const args = event.args as { command?: unknown; operation?: unknown } | null;
     if (
@@ -219,6 +224,19 @@ export function taskEvidence(events: readonly SessionEvent[], promptId: string):
     plan.checks.map((check) => [check.id, revisionBoundary(events, promptId, check.id)]),
   );
   const effects = new Map<ToolEffect['scope'], { end: number; callId: string }[]>();
+  events.forEach((event, index) => {
+    if (
+      index > start &&
+      index < limit &&
+      (event.type === 'browser/user_input' || event.type === 'browser/control_changed')
+    )
+      effects.set(
+        'browser',
+        [...(effects.get('browser') ?? []), { end: index, callId: event.eventId }]
+          .sort((a, b) => b.end - a.end)
+          .slice(0, 2),
+      );
+  });
   const commands = new Set(
     plan.checks.flatMap((check) =>
       check.kind === 'command' && check.command ? [check.command] : [],
@@ -316,6 +334,19 @@ export function evidenceRejection(
   if (call <= prompt) return 'Evidence does not belong to the active request.';
   if (result?.type !== 'tool/result' || result.isError)
     return 'The tool result is missing or failed.';
+  const plan = events.findLast(
+    (event) => event.type === 'task/plan' && event.promptId === promptId,
+  );
+  const check =
+    plan?.type === 'task/plan' ? plan.checks.find((item) => item.id === checkId) : undefined;
+  const selectedCall = events[call];
+  if (
+    check?.kind === 'command' &&
+    selectedCall?.type === 'tool/call' &&
+    (selectedCall.name !== 'bash' ||
+      (selectedCall.args as { command?: unknown } | null)?.command !== check.command)
+  )
+    return 'The executed command does not exactly match this check. Run the command in commandRepairs unchanged, then verify its eligible resultSeq. Extra formatting, redirections, filters or diagnostics change the command; a successful different command cannot verify this check.';
   if (call <= revisionBoundary(events, promptId, checkId))
     return 'The check or its interpretation changed after this observation; collect evidence for the current revision.';
   return 'Evidence does not match the check method/dependency, or a later relevant or unknown effect invalidated it. Inspect current eligible evidence and verify the affected state.';
@@ -360,9 +391,59 @@ export function taskVerification(
 /** Model-visible receipts are bounded; validation still searches all eligible evidence. */
 export function taskState(events: readonly SessionEvent[], promptId: string): TaskStatus {
   const evidence = taskEvidence(events, promptId);
+  const assessment = taskVerification(events, promptId);
+  const plan = events.findLast(
+    (event) => event.type === 'task/plan' && event.promptId === promptId,
+  );
+  const start = events.findIndex((event) => event.eventId === promptId);
+  const next = events.findIndex((event, index) => index > start && event.type === 'message/user');
+  const turn = start < 0 ? [] : events.slice(start + 1, next < 0 ? undefined : next);
+  const successfulCalls = new Set(
+    turn.flatMap((event) =>
+      event.type === 'tool/result' &&
+      !event.isError &&
+      (event.value as { exitCode?: unknown } | null)?.exitCode === 0
+        ? [event.callId]
+        : [],
+    ),
+  );
+  const successfulCommands = new Set(
+    turn.flatMap((event) =>
+      event.type === 'tool/call' && event.name === 'bash' && successfulCalls.has(event.callId)
+        ? [(event.args as { command?: unknown } | null)?.command]
+        : [],
+    ),
+  );
+  const commandRepairs: NonNullable<TaskStatus['commandRepairs']> = [];
+  if (plan?.type === 'task/plan')
+    for (const check of plan.checks) {
+      if (
+        check.kind !== 'command' ||
+        !check.command ||
+        !assessment.pending.includes(`${check.id}: ${check.requirement}`)
+      )
+        continue;
+      const receipt = evidence.findLast(
+        (item) =>
+          item.kind === 'command' &&
+          item.command === check.command &&
+          (!item.checkIds || item.checkIds.includes(check.id)),
+      );
+      commandRepairs.push({
+        checkId: check.id,
+        command: check.command,
+        reason: receipt
+          ? 'verification_required'
+          : successfulCommands.has(check.command)
+            ? 'fresh_evidence_required'
+            : 'exact_command_required',
+        ...(receipt ? { resultSeq: receipt.resultSeq } : {}),
+      });
+    }
   return {
-    ...taskVerification(events, promptId),
+    ...assessment,
     evidence: evidence.slice(-32),
     evidenceTruncated: evidence.length > 32,
+    ...(commandRepairs.length ? { commandRepairs } : {}),
   };
 }

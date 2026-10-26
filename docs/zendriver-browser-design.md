@@ -149,6 +149,8 @@ The managed browser's network boundary belongs in its sandbox: explicitly allowe
 
 Logs contain command IDs, bounded error codes, timing and versions. Avoid upstream debug CDP logging in normal deployment because it can contain scripts, page values or credentials. Metrics compare navigation/readiness failures, block/challenge observations, action outcomes, latency and runtime restarts without storing page bodies.
 
+The private MCP command deadline remains 30 seconds. An expired deadline cancels the command, terminates the owned process and preserves a fixed safe timeout explanation in the existing `DRIVER_FAILED` result; caller cancellation remains distinct. The message does not expose upstream arguments or responses, establish a network cause, authorize retrying unknown effects, or change browser availability.
+
 ## 8. Implementation sequence and acceptance
 
 1. **Compatibility spike.** Select an exact upstream revision and binary/Chrome matrix. With a disposable sandbox, verify MCP initialization, structured outputs, isolated-world extraction, exact fill/key/click semantics, screenshots, disconnect and shutdown. Verify security overrides, process cleanup, MCP cancellation and recovery behavior. Confirm whether attachment is supported before proposing it; this design does not depend on it.
@@ -166,3 +168,9 @@ The first deliverable is a browser that passes evidence/action parity and improv
 ## Guest process integration (2026-10-24)
 
 With matching `EXECUTION_DRIVER=firecracker`, the supervisor retains canonical evidence and PG command journaling while its private MCP stdio process runs inside the personal VM through authenticated Node Agent/vsock routing. `apps/guest-runtime` selects the fixed patched executable and tenant/user profile from host-issued boot metadata, never model arguments. Existing profile lease and stale-lock reclamation code is shared infrastructure in `core/sandbox`; local supervisor behavior is preserved. The guest does not receive PG/provider/host secrets. The real-Chrome opt-in fixture covers MCP transport across the guest RPC channel and PNG preview, while actual Firecracker image, networking and isolation remain unvalidated rollout gates. Trusted-owner restrictions and the `trusted-managed` label remain unchanged.
+
+## Managed browser 用户交互（2026-10-26）
+
+用户通过 owner-only BFF `browser-interaction` 取得临时 PNG 帧并发送经过 Zod 校验的点击、拖动、滚动、文本、按键和 HTTP(S) 导航。内部 MCP / CDP 地址不返回客户端。`BrowserInteractionPort` / `BrowserInteractionStore` 分离输入与模型工具；PG controls / input reservations 通过原执行锁协调 human / agent / paused / quarantined 状态。generation、epoch、view、sequence、request UUID 和最近帧共同约束输入；驱动在执行前复核 owned tab、document revision、fingerprint 与尺寸。具体部署与恢复见 [runtime implementation](runtime-implementation.md#managed-browser-交互部署与行为)。
+
+截图轮询一次只允许一个未完成请求，控制中以 250ms 间隔请求，实际频率受捕获延迟限制；没有视频流或刷新率保证。明确接管后的私有截图只交付该控制视图，普通观看继续隐藏敏感页面。输入 journal 只存去重及 effect metadata，不存输入内容；图片不成为模型证据。返回 Agent 后，使用旧页面目标的交互强制新观察；显式 navigate / web_search 自身产生新观察，不被 handoff flag 阻止。断开截图请求仅丢弃响应，操作超时与显式取消输入仍保留失败 / unknown 语义。legacy CDP 保持只读，`trusted-managed` 不扩大为网络或租户隔离保证。

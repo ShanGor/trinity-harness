@@ -1,9 +1,11 @@
-import { memo, useEffect, useState, type ReactElement } from 'react';
+import { memo, useCallback, useEffect, useState, type ReactElement } from 'react';
 import { Button, Modal } from 'antd';
 import type { AcpClient } from '@trinity-harness/client-acp';
 import type { BrowserPreview } from '@trinity-harness/shared';
+import { InteractiveBrowserView } from './browser-interaction.js';
 
-type PreviewClient = Pick<AcpClient, 'getBrowserPreview'>;
+type PreviewClient = Pick<AcpClient, 'getBrowserPreview'> &
+  Partial<Pick<AcpClient, 'interactBrowser'>>;
 type ViewState = BrowserPreview | { state: 'connecting' | 'disconnected' };
 
 /** Cancellable cadence; every request finishes before the next one begins. */
@@ -25,6 +27,8 @@ export const BrowserActivity = memo(function BrowserActivity({
   running: boolean;
 }): ReactElement {
   const [open, setOpen] = useState(false);
+  const [interactive, setInteractive] = useState(Boolean(client.interactBrowser));
+  const unsupported = useCallback(() => setInteractive(false), []);
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
   const [view, setView] = useState<ViewState>({ state: 'connecting' });
   useEffect(() => {
@@ -33,7 +37,7 @@ export const BrowserActivity = memo(function BrowserActivity({
     return () => document.removeEventListener('visibilitychange', update);
   }, []);
   useEffect(() => {
-    if (!open || !visible) return;
+    if (interactive || !open || !visible) return;
     const controller = new AbortController();
     setView({ state: 'connecting' });
     const watch = async (): Promise<void> => {
@@ -49,7 +53,7 @@ export const BrowserActivity = memo(function BrowserActivity({
     };
     void watch();
     return () => controller.abort();
-  }, [client, sessionId, open, visible]);
+  }, [client, sessionId, open, visible, interactive]);
   const status = !visible
     ? 'Viewing paused while this tab is hidden'
     : {
@@ -71,41 +75,51 @@ export const BrowserActivity = memo(function BrowserActivity({
       <Button size="small" onClick={() => setOpen(true)}>
         Open browser
       </Button>
-      <Modal
-        title="Browser · read-only"
-        open={open}
-        onCancel={() => setOpen(false)}
-        footer={null}
-        width={960}
-        destroyOnHidden
-      >
-        <p role="status">{status}</p>
-        {visible && view.state === 'frame' && (
-          <>
-            <p className="browser-preview-meta">
-              Captured{' '}
-              <time dateTime={view.capturedAt}>
-                {new Date(view.capturedAt).toLocaleTimeString()}
-              </time>
-              {' · '}
-              {view.securityMode === 'trusted-managed'
-                ? 'Trusted managed browser'
-                : 'Trusted shared browser'}
-            </p>
-            <img
-              className="browser-preview-image"
-              alt="Current read-only browser preview"
-              width={view.width}
-              height={view.height}
-              src={`data:image/png;base64,${view.png}`}
-            />
-          </>
-        )}
-        <p className="browser-preview-meta">
-          Closing this view lets the task continue. Task progress and Stop remain in the
-          conversation.
-        </p>
-      </Modal>
+      {open && interactive && client.interactBrowser ? (
+        <InteractiveBrowserView
+          key={sessionId}
+          client={client as Pick<AcpClient, 'interactBrowser'>}
+          sessionId={sessionId}
+          onClose={() => setOpen(false)}
+          onUnsupported={unsupported}
+        />
+      ) : (
+        <Modal
+          title="Browser · read-only"
+          open={open}
+          onCancel={() => setOpen(false)}
+          footer={null}
+          width={960}
+          destroyOnHidden
+        >
+          <p role="status">{status}</p>
+          {visible && view.state === 'frame' && (
+            <>
+              <p className="browser-preview-meta">
+                Captured{' '}
+                <time dateTime={view.capturedAt}>
+                  {new Date(view.capturedAt).toLocaleTimeString()}
+                </time>
+                {' · '}
+                {view.securityMode === 'trusted-managed'
+                  ? 'Trusted managed browser'
+                  : 'Trusted shared browser'}
+              </p>
+              <img
+                className="browser-preview-image"
+                alt="Current read-only browser preview"
+                width={view.width}
+                height={view.height}
+                src={`data:image/png;base64,${view.png}`}
+              />
+            </>
+          )}
+          <p className="browser-preview-meta">
+            Closing this view lets the task continue. Task progress and Stop remain in the
+            conversation.
+          </p>
+        </Modal>
+      )}
     </section>
   );
 });

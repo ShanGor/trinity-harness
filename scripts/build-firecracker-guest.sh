@@ -67,7 +67,7 @@ chroot "$rootfs" /usr/bin/env DEBIAN_FRONTEND=noninteractive \
   apt-get -o Acquire::Retries=3 update
 chroot "$rootfs" /usr/bin/env DEBIAN_FRONTEND=noninteractive \
   apt-get -o Acquire::Retries=3 --yes --no-install-recommends install \
-  dbus-user-session libstdc++6 libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 \
+  dbus-user-session systemd-resolved libstdc++6 libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 \
   libcups2t64 libdbus-1-3 libdrm2 libgbm1 libgtk-3-0t64 libnspr4 libnss3 \
   libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 \
   libxfixes3 libxkbcommon0 libxrandr2 fonts-liberation udev
@@ -116,10 +116,30 @@ StandardError=journal+console
 UNIT
 ln -s ../trinity-guest.service "$rootfs/etc/systemd/system/multi-user.target.wants/trinity-guest.service"
 ln -s ../trinity-guest-vsock.socket "$rootfs/etc/systemd/system/sockets.target.wants/trinity-guest-vsock.socket"
+ln -s /lib/systemd/system/systemd-networkd.service \
+  "$rootfs/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+ln -s /lib/systemd/system/systemd-resolved.service \
+  "$rootfs/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
+cat > "$rootfs/etc/systemd/network/10-trinity-guest.network" <<'NETWORK'
+[Match]
+Name=eth0
+
+[Network]
+Address=172.16.0.2/30
+Gateway=172.16.0.1
+DNS=172.29.240.1
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+NETWORK
+rm -f "$rootfs/etc/resolv.conf"
+ln -s ../run/systemd/resolve/stub-resolv.conf "$rootfs/etc/resolv.conf"
 # Validate binaries against the guest's libraries before making the filesystem.
 chroot "$rootfs" /usr/bin/node --version
 chroot "$rootfs" /usr/local/bin/zendriver-mcp --version
 chroot "$rootfs" /opt/google/chrome/chrome --version
+[[ -x "$rootfs/lib/systemd/systemd-networkd" && -e "$rootfs/lib/systemd/system/systemd-resolved.service" ]] || {
+  echo 'Guest systemd network services are missing from the rootfs.' >&2; exit 1;
+}
 install -d "$base/data/workspace" "$base/data/browser"
 chown -R 1000:1000 "$base/data/workspace" "$base/data/browser"
 cp "/boot/vmlinuz-$kernel_version" "$base/images/vmlinux"
