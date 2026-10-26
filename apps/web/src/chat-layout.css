@@ -567,6 +567,9 @@
 .session-settings .ant-select {
   width: 100% !important;
 }
+.session-settings .ant-descriptions-item-content {
+  overflow-wrap: anywhere;
+}
 .scheduled-page,
 .personal-computer-page,
 .audit-page {

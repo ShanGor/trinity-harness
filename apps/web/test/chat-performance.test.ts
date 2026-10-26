@@ -17,6 +17,17 @@ const fake = vi.hoisted(() => ({
   cancelTurn: vi.fn(async () => ({ ok: true as const, alreadyStopped: false })),
   getBrowserPreview: vi.fn(async () => ({ state: 'unavailable' as const })),
   getEnvironment: vi.fn(async () => ({ available: false, environment: null })),
+  getSessionSettings: vi.fn(async (sessionId: string) => ({
+    sessionId,
+    title: 'Conversation 0',
+    kind: 'work' as const,
+    workspaceUri: '/workspace/user',
+    scope: 'personal' as const,
+    policy: 'workspace-write',
+    canChangePolicy: true,
+    userId: 'user',
+    createdAt: '2026-10-08T00:00:00Z',
+  })),
 }));
 
 vi.mock('react-markdown', () => ({
@@ -44,6 +55,7 @@ vi.mock('@trinity-harness/client-acp', () => ({
     getInbox = async () => ({ available: false, items: [] });
     getBrowserPreview = fake.getBrowserPreview;
     getEnvironment = fake.getEnvironment;
+    getSessionSettings = fake.getSessionSettings;
     createSession = fake.createSession;
     ensureMainChat = async () => 'main-session';
     getTimeline = fake.getTimeline;
@@ -118,6 +130,7 @@ beforeEach(async () => {
   fake.cancelTurn.mockClear();
   fake.getBrowserPreview.mockClear();
   fake.getEnvironment.mockClear();
+  fake.getSessionSettings.mockClear();
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -570,7 +583,7 @@ describe('chat typing and streaming performance', () => {
     expect(title.tagName).toBe('BUTTON');
     expect(title.textContent).toBe('Conversation 0');
     expect(container.querySelector('[aria-label="Actions for Conversation 0"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="Session settings"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Session settings"]')).toBeNull();
     expect(
       container.querySelector('[aria-label="Account menu for user@example.com"]'),
     ).not.toBeNull();
@@ -580,11 +593,23 @@ describe('chat typing and streaming performance', () => {
     expect(title.getAttribute('aria-current')).toBe('true');
     expect(container.querySelectorAll('.history-title[aria-current="true"]')).toHaveLength(1);
     expect(fake.onEvent).toBeTypeOf('function');
+    const composer = container.querySelector('textarea')!;
+    await type(composer, 'Keep my unfinished settings follow-up');
     await click(container.querySelector('[aria-label="Session settings"]'));
-    expect(document.body.textContent).toContain('Chat gets its own workspace automatically.');
+    expect(fake.getSessionSettings).toHaveBeenCalledWith('s0', expect.any(AbortSignal));
+    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain(
+      '/workspace/user',
+    );
+    expect(document.body.querySelector('[aria-label="Tool permissions"]')).not.toBeNull();
     expect(
       document.body.querySelector('[aria-label="Tool permissions for the next session"]'),
     ).toBeNull();
+    await click(document.querySelector('.ant-modal-close'));
+    expect(container.querySelector('textarea')).toBe(composer);
+    expect(composer.value).toBe('Keep my unfinished settings follow-up');
+    await click(container.querySelector('[aria-label="Session settings"]'));
+    await click(container.querySelectorAll('.history-title')[1]!);
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it('starts with history collapsed on phones and lets the user restore it', async () => {

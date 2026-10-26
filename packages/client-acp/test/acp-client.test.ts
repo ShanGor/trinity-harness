@@ -39,6 +39,54 @@ function fakeFetch(routes: Record<string, (init?: RequestInit) => Response>) {
 }
 
 describe('AcpClient', () => {
+  it('loads validated settings with cancellation and saves permissions once with authentication', async () => {
+    const settings = {
+      sessionId: crypto.randomUUID(),
+      userId: crypto.randomUUID(),
+      title: 'Research',
+      createdAt: new Date().toISOString(),
+      workspaceUri: '/workspace/research',
+      scope: 'personal',
+      policy: 'workspace-write',
+      canChangePolicy: true,
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(settings))
+      .mockResolvedValueOnce(Response.json({ ok: true }))
+      .mockResolvedValueOnce(Response.json({ policy: 'read-only' }))
+      .mockResolvedValueOnce(Response.json({ ok: false }))
+      .mockRejectedValueOnce(new Error('connection lost'));
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      const client = new AcpClient({ token: 'private-token' });
+      const controller = new AbortController();
+      expect(await client.getSessionSettings(settings.sessionId, controller.signal)).toEqual(
+        settings,
+      );
+      controller.abort();
+      expect(fetcher.mock.calls[0]![1]!.signal!.aborted).toBe(true);
+      await client.setSessionPolicy('session/with space', 'read-only');
+      expect(fetcher.mock.calls[1]).toEqual([
+        '/api/sessions/session%2Fwith%20space/policy',
+        expect.objectContaining({
+          method: 'POST',
+          body: '{"policy":"read-only"}',
+          headers: { 'content-type': 'application/json', authorization: 'Bearer private-token' },
+        }),
+      ]);
+      await expect(client.getSessionSettings(settings.sessionId)).rejects.toThrow();
+      await expect(client.setSessionPolicy(settings.sessionId, 'read-only')).rejects.toThrow();
+      await expect(client.setSessionPolicy(settings.sessionId, 'read-only')).rejects.toThrow(
+        'connection lost',
+      );
+      expect(fetcher).toHaveBeenCalledTimes(5);
+      await expect(client.setSessionPolicy(settings.sessionId, 'x'.repeat(4001))).rejects.toThrow();
+      expect(fetcher).toHaveBeenCalledTimes(5);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it('uses authenticated identity-owned VM routes and validates their public response', async () => {
     const fetcher = vi.fn<typeof fetch>(async () =>
       Response.json({ available: true, environment: null }),

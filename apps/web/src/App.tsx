@@ -59,6 +59,7 @@ import { BrowserActivity } from './browser-activity';
 import { ScheduledTasks } from './scheduled-tasks';
 import { InboxIndicator } from './inbox-indicator';
 import { PersonalComputer } from './personal-computer';
+import { SessionSettingsModal } from './session-settings';
 import { loadTimelineWithPrompt } from './conversation-history';
 
 import {
@@ -199,6 +200,10 @@ export default function App() {
   currentView.current = { items, usage: usageRecords, busy, approval, staged };
   const sessionRef = useRef<string | null>(null);
   const streamRef = useRef<{ close(): void } | null>(null);
+
+  useEffect(() => {
+    setSettingsOpen(false);
+  }, [sessionId, page]);
 
   useEffect(() => {
     if (!folderPickerOpen) return;
@@ -1352,38 +1357,27 @@ export default function App() {
                   unrecordedTurns={unrecordedTurns}
                 />
               )}
-              <Button
-                type="text"
-                onClick={() => setSettingsOpen(true)}
-                aria-label="Session settings"
-              >
-                <span aria-hidden="true">⚙</span>
-                <span className="settings-button-label"> Session settings</span>
-              </Button>
+              {sessionId && page === 'conversation' && (
+                <Button
+                  type="text"
+                  onClick={() => setSettingsOpen(true)}
+                  aria-label="Session settings"
+                >
+                  <span aria-hidden="true">⚙</span>
+                  <span className="settings-button-label"> Session settings</span>
+                </Button>
+              )}
             </Flex>
           </Flex>
-          <Modal
-            open={settingsOpen}
-            title="Session settings"
-            footer={null}
-            onCancel={() => setSettingsOpen(false)}
-          >
-            <div className="session-settings">
-              {sessionId ? (
-                <Typography.Paragraph type="secondary">
-                  Chat gets its own workspace automatically. Work uses the workspace selected at
-                  creation. Both can use files, browser research and commands under the session
-                  permissions.
-                </Typography.Paragraph>
-              ) : null}
-              {!sessionId && (
-                <Typography.Paragraph>
-                  Chat creates an automatic session workspace for ad-hoc work. Work setup lets you
-                  select an existing workspace and permissions before Start.
-                </Typography.Paragraph>
-              )}
-            </div>
-          </Modal>
+          {settingsOpen && sessionId && page === 'conversation' && (
+            <SessionSettingsModal
+              key={sessionId}
+              client={client}
+              sessionId={sessionId}
+              teams={teams}
+              onClose={() => setSettingsOpen(false)}
+            />
+          )}
           <ApprovalModal
             approval={approval}
             onApprove={() => void onApprove('allowed')}

@@ -74,6 +74,15 @@ export const sessionSummarySchema = sessionMetaSchema
 export type SessionSummary = z.infer<typeof sessionSummarySchema>;
 export const sessionSummaryListSchema = z.object({ sessions: z.array(sessionSummarySchema) });
 
+/** Authenticated current session details; editing authority is resolved by the server. */
+export const sessionSettingsSchema = sessionSummarySchema.extend({
+  policy: z.string().min(1),
+  canChangePolicy: z.boolean(),
+});
+export type SessionSettings = z.infer<typeof sessionSettingsSchema>;
+export const sessionPolicyUpdateSchema = z.object({ policy: z.string().min(1).max(4000) });
+export const sessionPolicyUpdateResponseSchema = z.object({ ok: z.literal(true) });
+
 /** Password hashing is a port so stores stay dumb and hasher stays swappable. */
 export interface PasswordHasher {
   hash(password: string): Promise<string>;

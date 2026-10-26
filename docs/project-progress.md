@@ -5,6 +5,12 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Session settings (2026-10-26)
+
+- Replaced the explanatory placeholder with current session type, workspace, personal/team visibility and editable Read only / Workspace write permissions. Kind and workspace remain fixed; the settings button appears only for an existing conversation.
+- Added an authenticated, non-cached settings read through client-acp. Policy saves retain server authorization and audit; missing durable authenticated metadata fails closed. Existing custom/full-access policies remain intact until a preset is explicitly selected. Running/queued requests retain their captured policy.
+- Added deterministic coverage for access boundaries, persistence failures, loading/retry, uncertain-save reconciliation, custom policies, viewers, session switching and composer preservation. Focused UI/client/server tests, lint, typecheck and the production web build passed; an isolated frontend browser fixture exercises the panel without changing a real session.
+
 ## M5 — Production (complete)
 
 | Date       | Item                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Status | Notes                                                                                                                                           |

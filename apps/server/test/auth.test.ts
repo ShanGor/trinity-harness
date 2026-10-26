@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -467,5 +467,188 @@ describe('M2 auth / tenants / RBAC', () => {
     expect(
       bundle.audit.records.filter((r) => r.result === 'ok').every((r) => r.tenantId === 't1'),
     ).toBe(true);
+  });
+});
+
+describe('authenticated session settings', () => {
+  let bundle: AppBundle;
+  let baseUrl: string;
+  const passwordOf = (): string => 'password123';
+  beforeAll(async () => {
+    bundle = await makeApp();
+    baseUrl = await bundle.app.listen({ port: 0, host: '127.0.0.1' });
+  });
+  afterAll(async () => {
+    await bundle.app.close();
+    rmSync(WS_DIR, { recursive: true, force: true });
+  });
+  it('reads and persists authenticated settings without changing identity, workspace, or history', async () => {
+    const tenantId = crypto.randomUUID();
+    const owner = await bundle.users.createUser({
+      tenantId,
+      email: 'settings-owner@example.com',
+      passwordHash: 'h:password123',
+      role: 'developer',
+    });
+    const token = (await login(baseUrl, owner.email, passwordOf())).token!;
+    const created = await authed(baseUrl, token, '/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'Settings test', policy: 'workspace-write' }),
+    });
+    const { sessionId } = (await created.json()) as { sessionId: string };
+    const before = await bundle.metas.get(sessionId);
+    const events = await bundle.store.load(sessionId);
+    const response = await authed(baseUrl, token, `/api/sessions/${sessionId}/settings`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toMatchObject({
+      sessionId,
+      title: 'Settings test',
+      policy: 'workspace-write',
+      canChangePolicy: true,
+      scope: 'personal',
+      workspaceUri: before!.workspaceUri,
+    });
+    const save = await authed(baseUrl, token, `/api/sessions/${sessionId}/policy`, {
+      method: 'POST',
+      body: JSON.stringify({ policy: 'read-only' }),
+    });
+    expect(save.status).toBe(200);
+    expect(await bundle.metas.get(sessionId)).toEqual({ ...before, policy: 'read-only' });
+    expect(await bundle.store.load(sessionId)).toEqual(events);
+    expect(
+      await (await authed(baseUrl, token, `/api/sessions/${sessionId}/settings`)).json(),
+    ).toMatchObject({ policy: 'read-only' });
+    expect(bundle.audit.records).toContainEqual(
+      expect.objectContaining({
+        action: 'session/policy',
+        sessionId,
+        userId: owner.id,
+        result: 'ok',
+      }),
+    );
+    for (const policy of ['', 'unknown-policy', 'x'.repeat(4001)]) {
+      expect(
+        (
+          await authed(baseUrl, token, `/api/sessions/${sessionId}/policy`, {
+            method: 'POST',
+            body: JSON.stringify({ policy }),
+          })
+        ).status,
+      ).toBe(400);
+    }
+    const failWrite = vi
+      .spyOn(bundle.metas, 'setPolicy')
+      .mockRejectedValueOnce(new Error('storage unavailable'));
+    try {
+      expect(
+        (
+          await authed(baseUrl, token, `/api/sessions/${sessionId}/policy`, {
+            method: 'POST',
+            body: JSON.stringify({ policy: 'workspace-write' }),
+          })
+        ).status,
+      ).toBe(500);
+      expect((await bundle.metas.get(sessionId))!.policy).toBe('read-only');
+    } finally {
+      failWrite.mockRestore();
+    }
+  });
+
+  it('fences settings by owner, tenant, team membership, viewer role, and closed state', async () => {
+    const tenantId = crypto.randomUUID();
+    const principals = await Promise.all(
+      [
+        ['viewer', tenantId, 'viewer'],
+        ['other', tenantId, 'developer'],
+        ['foreign', crypto.randomUUID(), 'admin'],
+      ].map(async ([name, tenant, role]) => {
+        const user = await bundle.users.createUser({
+          tenantId: tenant!,
+          email: `settings-${name}@example.com`,
+          passwordHash: 'h:password123',
+          role: role as Role,
+        });
+        return { user, token: (await login(baseUrl, user.email, passwordOf())).token! };
+      }),
+    );
+    const viewer = principals[0]!;
+    const sessionId = crypto.randomUUID();
+    await bundle.metas.create({
+      id: sessionId,
+      tenantId,
+      userId: viewer.user.id,
+      title: 'Viewer settings',
+      workspaceUri: null,
+      kind: 'chat',
+    });
+    const path = `/api/sessions/${sessionId}`;
+    const read = await authed(baseUrl, viewer.token, `${path}/settings`);
+    expect(read.status).toBe(200);
+    expect(await read.json()).toMatchObject({
+      canChangePolicy: false,
+      workspaceUri: null,
+      policy: expect.any(String),
+    });
+    expect(
+      (
+        await authed(baseUrl, viewer.token, `${path}/policy`, {
+          method: 'POST',
+          body: JSON.stringify({ policy: 'workspace-write' }),
+        })
+      ).status,
+    ).toBe(403);
+    expect((await fetch(`${baseUrl}${path}/settings`)).status).toBe(401);
+    for (const principal of principals.slice(1)) {
+      expect((await authed(baseUrl, principal.token, `${path}/settings`)).status).toBe(404);
+      expect(
+        (
+          await authed(baseUrl, principal.token, `${path}/policy`, {
+            method: 'POST',
+            body: JSON.stringify({ policy: 'workspace-write' }),
+          })
+        ).status,
+      ).toBe(404);
+    }
+    const teamSession = crypto.randomUUID();
+    await bundle.metas.create({
+      id: teamSession,
+      tenantId,
+      userId: viewer.user.id,
+      title: 'Team',
+      workspaceUri: '/workspace/team',
+      scope: 'team',
+      scopeId: crypto.randomUUID(),
+    });
+    expect(
+      (await authed(baseUrl, viewer.token, `/api/sessions/${teamSession}/settings`)).status,
+    ).toBe(404);
+    await bundle.metas.close(sessionId);
+    expect((await authed(baseUrl, viewer.token, `${path}/settings`)).status).toBe(404);
+  });
+
+  it('refuses settings writes without durable authenticated metadata', async () => {
+    const app = await buildServer(
+      { store: new MemorySessionStore(), workspaceRoot: WS_DIR },
+      { logger: false },
+    );
+    try {
+      const sessionId = crypto.randomUUID();
+      expect(
+        (await app.inject({ method: 'GET', url: `/api/sessions/${sessionId}/settings` }))
+          .statusCode,
+      ).toBe(503);
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: `/api/sessions/${sessionId}/policy`,
+            payload: { policy: 'read-only' },
+          })
+        ).statusCode,
+      ).toBe(503);
+    } finally {
+      await app.close();
+    }
   });
 });

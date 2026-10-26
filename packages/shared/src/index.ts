@@ -49,11 +49,15 @@ export type {
 export {
   sessionSummarySchema,
   sessionSummaryListSchema,
+  sessionSettingsSchema,
+  sessionPolicyUpdateSchema,
+  sessionPolicyUpdateResponseSchema,
   historyPageSchema,
   memorySelectionsResponseSchema,
 } from '@trinity-harness/contracts';
 export type {
   SessionSummary,
+  SessionSettings,
   HistoryPage,
   MemorySelectionsResponse,
 } from '@trinity-harness/contracts';

@@ -5,6 +5,9 @@ import {
   turnCancelResponseSchema,
   memorySnapshotSchema,
   sessionSummaryListSchema,
+  sessionSettingsSchema,
+  sessionPolicyUpdateSchema,
+  sessionPolicyUpdateResponseSchema,
   historyPageSchema,
   memorySelectionsResponseSchema,
   timelinePageSchema,
@@ -26,6 +29,7 @@ import type {
   MemorySelectionsResponse,
   TimelinePage,
   SessionSummary,
+  SessionSettings,
   HistoryQuery,
   BrowserPreview,
   BrowserInteractionRequest,
@@ -266,6 +270,29 @@ export class AcpClient {
     }
     const body = sessionSummaryListSchema.parse(await res.json());
     return body.sessions;
+  }
+
+  async getSessionSettings(sessionId: string, signal?: AbortSignal): Promise<SessionSettings> {
+    return sessionSettingsSchema.parse(
+      await this.assistantRequest(
+        `/api/sessions/${encodeURIComponent(sessionId)}/settings`,
+        'GET',
+        undefined,
+        AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(15_000)]),
+      ),
+    );
+  }
+
+  /** Save once; a failed transport may have committed and must not be retried automatically. */
+  async setSessionPolicy(sessionId: string, policy: string): Promise<void> {
+    sessionPolicyUpdateResponseSchema.parse(
+      await this.assistantRequest(
+        `/api/sessions/${encodeURIComponent(sessionId)}/policy`,
+        'POST',
+        sessionPolicyUpdateSchema.parse({ policy }),
+        AbortSignal.timeout(15_000),
+      ),
+    );
   }
 
   /** Immediate child folders below the authenticated user's personal root. */

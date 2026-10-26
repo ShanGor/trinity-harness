@@ -65,6 +65,8 @@ import {
   personalFoldersQuerySchema,
   serverEventSchema,
   workspaceSelectionSchema,
+  sessionSettingsSchema,
+  sessionPolicyUpdateSchema,
 } from '@trinity-harness/shared';
 import type { ServerEvent } from '@trinity-harness/shared';
 import Fastify from 'fastify';
@@ -117,9 +119,7 @@ const postMessageSchema = z.object({
     .optional(),
 });
 
-const setPolicySchema = z.object({
-  policy: z.string().min(1).max(4000),
-});
+const setPolicySchema = sessionPolicyUpdateSchema;
 
 const approvalRespondSchema = approvalResponseSchema;
 
@@ -2208,13 +2208,35 @@ export async function buildServer(
     return { approvals: records };
   });
 
+  app.get('/api/sessions/:sessionId/settings', async (req, reply) => {
+    const sessionId = await sessionIdOf(req, reply);
+    if (!sessionId) return;
+    const granted = await authorizeSession(sessionId, req.identity, reply);
+    if (!granted) return;
+    if (!auth || !req.identity || !granted.meta)
+      return reply.code(503).send({ error: 'Session settings unavailable' });
+    const meta = granted.meta;
+    return reply.header('cache-control', 'no-store').send(
+      sessionSettingsSchema.parse({
+        ...meta,
+        sessionId,
+        policy:
+          meta.policy ??
+          (deps.defaultPolicy ? JSON.stringify(deps.defaultPolicy) : 'workspace-write'),
+        canChangePolicy: req.identity.role !== 'viewer',
+      }),
+    );
+  });
+
   app.post('/api/sessions/:sessionId/policy', async (req, reply) => {
     const sessionId = await sessionIdOf(req, reply);
     if (!sessionId) return;
     const granted = await authorizeSession(sessionId, req.identity, reply);
     if (!granted) return;
+    if (!auth || !req.identity || !granted.meta)
+      return reply.code(503).send({ error: 'Session settings unavailable' });
     const identity = req.identity;
-    if (identity?.role === 'viewer') {
+    if (identity.role === 'viewer') {
       return reply.code(403).send({ error: 'viewer role is read-only' });
     }
     const body = setPolicySchema.safeParse(req.body);
@@ -2227,9 +2249,7 @@ export async function buildServer(
     } catch {
       return reply.code(400).send({ error: 'invalid permission policy' });
     }
-    if (auth) {
-      await auth.metas.setPolicy(granted.sessionId, body.data.policy);
-    }
+    await auth.metas.setPolicy(granted.sessionId, body.data.policy);
     emitAudit({
       id: newId(),
       at: new Date().toISOString(),
