@@ -56,6 +56,22 @@ export const browserHumanActionSchema = z.discriminatedUnion('type', [
     })
     .strict(),
   z.object({ type: z.literal('navigate'), url: browserUrlSchema }).strict(),
+  z.object({ type: z.literal('back') }).strict(),
+  z.object({ type: z.literal('forward') }).strict(),
+  z.object({ type: z.literal('reload') }).strict(),
+  z.object({ type: z.literal('new_tab') }).strict(),
+  z
+    .object({
+      type: z.literal('switch_tab'),
+      tabId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('close_tab'),
+      tabId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/),
+    })
+    .strict(),
 ]);
 export type BrowserHumanAction = z.infer<typeof browserHumanActionSchema>;
 const base = { sessionId: z.uuid(), viewId: z.uuid() };
@@ -94,9 +110,28 @@ export const browserControlStateSchema = z
   })
   .strict();
 export type BrowserControlState = z.infer<typeof browserControlStateSchema>;
+/** Private viewer chrome; never a model observation or event payload. */
+export const browserViewerChromeSchema = z
+  .object({
+    tabs: z
+      .array(
+        z
+          .object({
+            id: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/),
+            title: z.string().max(300),
+            url: z.string().max(8192),
+            active: z.boolean(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(64),
+  })
+  .strict();
 export const browserInteractionFrameSchema = browserPreviewSchema.options[0].extend({
   frameId: z.uuid(),
   epoch: z.number().int().nonnegative(),
+  browser: browserViewerChromeSchema.optional(),
 });
 export type BrowserInteractionFrame = z.infer<typeof browserInteractionFrameSchema>;
 export const browserInteractionResultSchema = z
@@ -207,6 +242,7 @@ export const browserHumanCaptureSchema = z
   .object({
     preview: browserPreviewSchema,
     target: browserFrameTargetSchema.omit({ frameId: true }).optional(),
+    browser: browserViewerChromeSchema.optional(),
   })
   .strict();
 export type BrowserHumanCapture = z.infer<typeof browserHumanCaptureSchema>;

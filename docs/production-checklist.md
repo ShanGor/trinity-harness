@@ -103,3 +103,8 @@ node scripts/load-test.mjs 50
 ## Browser deployment
 
 Existing owner-controlled CDP is the supported live-reading mode; see [deployment-guide.md](./deployment-guide.md) for endpoint/owner configuration and the opt-in local fixture check. Managed Chrome provisioning and enforced browser-network/privacy isolation remain deployment TODOs; they are not automatic fallbacks or current guarantees.
+
+- [ ] Remote viewer rollout: build both pinned Zendriver patches into the guest image and Browser Runtime release, drain through the maintenance API, preserve user data volumes, and wake a fresh generation. Verify trusted HTML drag/drop, native slider dragging and immediate human clicks through the authenticated owner route. Record actual input/refresh latency on the deployed VM; command-count reductions and local Chrome fixtures do not establish a remote latency target.
+- [ ] Viewer navigation/precision rollout: deploy matching action/frame DTO readers, Web and resident Browser Runtime adapter. Verify history (including empty history), new/switch/close tabs, blank-tab handoff, stale-target rejection after switching, and private tab metadata exclusion for other views/journals. Check Fit/50–400% magnification, local pan versus remote drag, mobile overflow and gesture cancellation. Existing patched MCP binaries suffice; full desktop capture/input remains undelivered.
+
+  Local development evidence (2026-10-26): both disposable guest generations and authenticated owner-route native input checks passed after a drained-node image release. Five frame requests measured 179ms median; clicks with capture measured 225–234ms. Production rollout and its latency/isolation gates remain unchecked.

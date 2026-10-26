@@ -4,6 +4,7 @@ FROM rust:1.95-slim-bookworm AS zendriver
 RUN apt-get update && apt-get install -y --no-install-recommends patch \
     && rm -rf /var/lib/apt/lists/*
 COPY apps/browser-runtime/patches/zendriver-mcp-user-data-dir.patch /tmp/zendriver-mcp-user-data-dir.patch
+COPY apps/browser-runtime/patches/zendriver-mcp-human-input.patch /tmp/zendriver-mcp-human-input.patch
 COPY scripts/build-zendriver-mcp.sh /tmp/build-zendriver-mcp.sh
 RUN bash /tmp/build-zendriver-mcp.sh /opt/zendriver
 

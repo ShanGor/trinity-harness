@@ -39,10 +39,12 @@ fi
 patched_source="$fetch_root/zendriver-mcp"
 cp -a "$source_dir" "$patched_source"
 chmod -R u+w "$patched_source"
-patch_file="$repo_root/apps/browser-runtime/patches/zendriver-mcp-user-data-dir.patch"
-if [[ ! -f "$patch_file" ]]; then
-  patch_file="$(dirname "$0")/zendriver-mcp-user-data-dir.patch"
-fi
-patch --batch --forward -p1 -d "$patched_source" < "$patch_file"
+for patch_name in zendriver-mcp-user-data-dir.patch zendriver-mcp-human-input.patch; do
+  patch_file="$repo_root/apps/browser-runtime/patches/$patch_name"
+  if [[ ! -f "$patch_file" ]]; then
+    patch_file="$(dirname "$0")/$patch_name"
+  fi
+  patch --batch --forward -p1 -d "$patched_source" < "$patch_file"
+done
 
 cargo install --path "$patched_source" --locked --no-default-features --root "$install_root" --force

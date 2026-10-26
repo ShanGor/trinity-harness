@@ -85,13 +85,13 @@ Apply migration 0010 before running this version. Existing null-workspace Chat s
 
 ## Managed Zendriver (opt-in)
 
-This mode uses the Rust `zendriver-mcp` from TurtIeSocks/zendriver-rs, pinned to **0.16.37** with its published lockfile and default optional features disabled. Trinity applies a small tracked patch adding the private process-level `--user-data-dir` argument; the model-facing MCP schema remains unchanged. Build the patched executable at setup time, never during a turn:
+This mode uses the Rust `zendriver-mcp` from TurtIeSocks/zendriver-rs, pinned to **0.16.37** with its published lockfile and default optional features disabled. Trinity applies tracked patches for the private process-level `--user-data-dir` argument and native human input. The latter fixes held-button drag events and adds an optional private `immediate` mouse flag for human clicks. The model-facing Trinity tool schema remains unchanged. Build the patched executable at setup time, never during a turn:
 
 ```bash
 ./scripts/build-zendriver-mcp.sh /opt/zendriver
 ```
 
-The script applies `apps/browser-runtime/patches/zendriver-mcp-user-data-dir.patch` to the pinned crate source and installs the executable under `/opt/zendriver/bin`. `deploy/docker/Dockerfile.browser-runtime` performs this build automatically. An unpatched binary rejects the runtime's `--user-data-dir` argument and fails closed.
+The script applies `apps/browser-runtime/patches/zendriver-mcp-user-data-dir.patch` and `zendriver-mcp-human-input.patch` to the pinned crate source and installs the executable under `/opt/zendriver/bin`. `deploy/docker/Dockerfile.browser-runtime` performs this build automatically. An unpatched binary rejects the runtime's `--user-data-dir` argument and fails closed. The updated human-input adapter also requires the new `immediate` flag: rebuild the executable before restarting Browser Runtime. For Firecracker, rebuild the guest rootfs with this binary, then use the [maintenance release procedure](../deploy/firecracker/README.md#draining-a-node-before-release), preserve user data disks and wake a fresh generation. Restarting the control plane alone does not update the guest executable.
 
 The tested Chrome build is **155.0.8059.84**. Runtime startup verifies the binary version; each launch verifies the Chrome product version, native profile and requested isolation/CSP overrides. `ZENDRIVER_CHROME_VERSION` explicitly selects another administrator-validated build. Upstream reports RMCP 2.2.0 in its MCP handshake; this is checked separately from executable identity. Chrome must run with its sandbox available as a non-root user. The child environment is minimal and does not inherit CI's automatic no-sandbox switch, runtime credentials or provider keys.
 

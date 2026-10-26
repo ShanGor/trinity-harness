@@ -28,8 +28,8 @@ async function mount(initialStatus?: number) {
   const container = document.createElement('div');
   document.body.append(container);
   const root = createRoot(container);
-  const sessionId = randomUUID(),
-    generation = randomUUID();
+  const sessionId = randomUUID();
+  let generation = randomUUID();
   let seq = 1,
     epoch = 2,
     controllerId: string | null = null;
@@ -54,6 +54,12 @@ async function mount(initialStatus?: number) {
     width: 800,
     height: 400,
     png: 'aW1hZ2U=',
+    browser: {
+      tabs: [
+        { id: 'tab', title: 'Example', url: 'https://example.com/', active: true },
+        { id: 'other-tab', title: 'Other', url: 'https://other.example/', active: false },
+      ],
+    },
   });
   const keyboardId = randomUUID();
   const interactBrowser = vi.fn(
@@ -68,6 +74,15 @@ async function mount(initialStatus?: number) {
         mode = 'human';
         controllerId = request.viewId;
         return { state: state(), frame: frame() };
+      }
+      if (request.operation === 'reset') {
+        available = false;
+        mode = 'paused';
+        controllerId = null;
+        generation = randomUUID();
+        epoch++;
+        seq = 1;
+        return { state: state() };
       }
       if (request.operation === 'input') {
         seq++;
@@ -268,7 +283,9 @@ it('does not retry failed takeover or input when the connection recovers', async
   try {
     f.interactBrowser.mockRejectedValueOnce(Object.assign(new Error('outage'), { status: 503 }));
     await act(async () => f.button('Start browser').click());
+    expect(f.button('Start browser').disabled).toBe(true);
     await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(f.button('Start browser').disabled).toBe(false);
     expect(f.interactBrowser.mock.calls.filter(([r]) => r.operation === 'take')).toHaveLength(1);
     expect(f.interactBrowser.mock.calls.at(-1)![0].operation).toBe('state');
     expect(f.onUnsupported).not.toHaveBeenCalled();
@@ -276,6 +293,92 @@ it('does not retry failed takeover or input when the connection recovers', async
     await f.close();
   }
 });
+it('waits for durable state after a lost takeover response before allowing another start', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    const original = f.interactBrowser.getMockImplementation()!;
+    f.interactBrowser.mockImplementationOnce(async (request) => {
+      await original(request);
+      throw Object.assign(new Error('lost takeover response'), { status: 503 });
+    });
+    await act(async () => f.button('Start browser').click());
+    expect(f.button('Start browser').disabled).toBe(true);
+    await act(async () => f.button('Start browser').click());
+    expect(f.interactBrowser.mock.calls.filter(([r]) => r.operation === 'take')).toHaveLength(1);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(f.button('Start browser')).toBeUndefined();
+    expect(f.button('Take control').disabled).toBe(true);
+    expect(f.button('Restart browser').disabled).toBe(false);
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(document.querySelector('.browser-preview-image')).not.toBeNull();
+  } finally {
+    await f.close();
+  }
+});
+it('recovers state after picture failures and permits an explicit restart without repeating takeover', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    expect(f.button('Take control').disabled).toBe(true);
+    await act(async () => f.button('Take control').click());
+    const original = f.interactBrowser.getMockImplementation()!;
+    f.interactBrowser.mockImplementation(async (request) => {
+      if (request.operation === 'frame')
+        throw Object.assign(new Error('picture failed'), { status: 503 });
+      return original(request);
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(document.querySelector('.browser-preview-image')).toBeNull();
+    expect(f.button('Take control').disabled).toBe(true);
+    expect(f.button('Restart browser').disabled).toBe(false);
+    await act(async () => vi.advanceTimersByTimeAsync(5250));
+    expect(f.interactBrowser.mock.calls.filter(([r]) => r.operation === 'take')).toHaveLength(1);
+    expect(f.button('Start browser')).toBeUndefined();
+    await act(async () => f.button('Restart browser').click());
+    expect(f.button('Start browser').disabled).toBe(false);
+    f.interactBrowser.mockImplementation(original);
+    await act(async () => f.button('Start browser').click());
+    await act(async () => f.button('New tab').click());
+    expect(inputs(f).at(-1)?.action).toEqual({ type: 'new_tab' });
+    expect(f.interactBrowser.mock.calls.filter(([r]) => r.operation === 'take')).toHaveLength(2);
+    expect(f.interactBrowser.mock.calls.filter(([r]) => r.operation === 'reset')).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
+it('clears unavailable pictures and backs off reads while preserving control and the local draft', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const draft = document.querySelector<HTMLTextAreaElement>(
+      '[aria-label="Text to insert into browser"]',
+    )!;
+    await act(async () => inputValue(draft, 'Keep this draft'));
+    const original = f.interactBrowser.getMockImplementation()!;
+    f.interactBrowser.mockImplementationOnce(async (request) => ({
+      state: (await original(request)).state,
+      error: { code: 'UNAVAILABLE', message: 'A fresh browser picture is unavailable.' },
+    }));
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(document.querySelector('.browser-preview-image')).toBeNull();
+    expect(f.button('Take control').disabled).toBe(true);
+    expect(draft.value).toBe('Keep this draft');
+    const calls = f.interactBrowser.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(4999));
+    expect(f.interactBrowser).toHaveBeenCalledTimes(calls);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(document.querySelector('.browser-preview-image')).not.toBeNull();
+    expect(draft.value).toBe('Keep this draft');
+    expect(f.interactBrowser.mock.calls.filter(([r]) => r.operation === 'take')).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
 function inputValue(node: HTMLTextAreaElement, value: string): void {
   Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(node, value);
   node.dispatchEvent(
@@ -319,6 +422,114 @@ function pointerImage() {
     },
   };
 }
+it('sends history and tab controls through ordered human input and keeps an edited address', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const address = document.querySelector<HTMLInputElement>('[aria-label="Browser address"]')!;
+    expect(address.value).toBe('https://example.com/');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+        address,
+        'https://draft.example/',
+      );
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(address.value).toBe('https://draft.example/');
+    for (const label of ['Go back', 'Go forward', 'Reload page']) {
+      await act(async () =>
+        document.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click(),
+      );
+    }
+    await act(async () => f.button('New tab').click());
+    await act(async () => f.button('Other').click());
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('[aria-label="Close tab Other"]')!.click(),
+    );
+    expect(inputs(f).map((request) => request.action)).toEqual([
+      { type: 'back' },
+      { type: 'forward' },
+      { type: 'reload' },
+      { type: 'new_tab' },
+      { type: 'switch_tab', tabId: 'other-tab' },
+      { type: 'close_tab', tabId: 'other-tab' },
+    ]);
+    expect(inputs(f).map((request) => request.sequence)).toEqual([1, 2, 3, 4, 5, 6]);
+  } finally {
+    await f.close();
+  }
+});
+it('magnifies for a two-pixel remote drag, pans locally, and preserves the keyboard node', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const keyboard = keyboardInput();
+    const zoom = document.querySelector<HTMLSelectElement>('[aria-label="View zoom"]')!;
+    await act(async () => {
+      zoom.value = '4';
+      zoom.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(document.querySelector<HTMLElement>('.browser-picture')!.style.width).toBe('3200px');
+    const p = pointerImage();
+    p.img.getBoundingClientRect = () => new DOMRect(10, 20, 3200, 1600);
+    await act(async () => {
+      p.dispatch('pointerdown');
+      p.dispatch('pointermove', 118, 70);
+      p.dispatch('pointerup', 118, 70);
+    });
+    expect(inputs(f)[0]?.action).toMatchObject({
+      type: 'drag',
+      from: { x: 25, y: 12.5 },
+      to: { x: 27, y: 12.5 },
+    });
+    const before = inputs(f).length;
+    await act(async () => f.button('Pan view').click());
+    const viewport = document.querySelector<HTMLElement>('.browser-interactive-viewport')!;
+    await act(async () => {
+      p.dispatch('pointerdown', 300, 200);
+      p.dispatch('pointermove', 100, 100);
+      p.dispatch('pointerup', 100, 100);
+    });
+    expect(viewport.scrollLeft).toBe(200);
+    expect(viewport.scrollTop).toBe(100);
+    expect(inputs(f)).toHaveLength(before);
+    expect(keyboardInput()).toBe(keyboard);
+    await act(async () => {
+      zoom.value = 'fit';
+      zoom.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(viewport.classList.contains('is-zoomed')).toBe(false);
+    expect(f.button('Pan view').disabled).toBe(true);
+  } finally {
+    await f.close();
+  }
+});
+it('cancels a gesture on zoom and keeps Ctrl-wheel magnification local', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const p = pointerImage();
+    await act(async () => p.dispatch('pointerdown'));
+    await act(async () =>
+      document
+        .querySelector('.browser-interactive-viewport')!
+        .dispatchEvent(
+          new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -20 }),
+        ),
+    );
+    await act(async () => p.dispatch('pointerup', 310, 170));
+    expect(inputs(f)).toHaveLength(0);
+    expect(document.querySelector<HTMLSelectElement>('[aria-label="View zoom"]')!.value).toBe(
+      '1.25',
+    );
+  } finally {
+    await f.close();
+  }
+});
 it('captures a drag across polling intervals and sends one action bound to the starting frame', async () => {
   fakeClock();
   const f = await mount();
@@ -614,6 +825,68 @@ it('drops queued typing after an uncertain input and never resends it', async ()
     await act(async () => fail());
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     expect(inputs(f).map((r) => r.action)).toEqual([{ type: 'text', text: 'first' }]);
+  } finally {
+    await f.close();
+  }
+});
+
+it('coalesces wheel bursts behind an in-flight action and converts line deltas to pixels', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const original = f.interactBrowser.getMockImplementation()!;
+    let complete!: () => void;
+    f.interactBrowser.mockImplementationOnce(async (request) => {
+      await new Promise<void>((resolve) => {
+        complete = resolve;
+      });
+      return original(request);
+    });
+    const viewport = document.querySelector('.browser-interactive-viewport')!;
+    const wheel = (): void => {
+      viewport.dispatchEvent(
+        new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 2, deltaMode: 1 }),
+      );
+    };
+    await act(async () => wheel());
+    await act(async () => {
+      for (let i = 0; i < 20; i++) wheel();
+    });
+    expect(inputs(f)).toHaveLength(1);
+    await act(async () => complete());
+    expect(inputs(f).map((request) => request.action)).toEqual([
+      { type: 'scroll', dx: 0, dy: 32 },
+      { type: 'scroll', dx: 0, dy: 640 },
+    ]);
+    expect(inputs(f).map((request) => request.sequence)).toEqual([1, 2]);
+  } finally {
+    await f.close();
+  }
+});
+it('shows drag feedback and cancels the gesture when expanding without replacing the text draft', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const draft = document.querySelector<HTMLTextAreaElement>(
+      '[aria-label="Text to insert into browser"]',
+    )!;
+    await act(async () => inputValue(draft, 'Keep this draft'));
+    const p = pointerImage();
+    await act(async () => {
+      p.dispatch('pointerdown');
+      p.dispatch('pointermove', 310, 170);
+    });
+    expect(document.querySelector('.browser-drag-preview')).not.toBeNull();
+    expect(document.body.textContent).toContain('Release to drop');
+    await act(async () => f.button('Expand view').click());
+    await act(async () => p.dispatch('pointerup', 310, 170));
+    expect(inputs(f)).toHaveLength(0);
+    expect(document.querySelector('.browser-drag-preview')).toBeNull();
+    expect(document.querySelector('[aria-label="Text to insert into browser"]')).toBe(draft);
+    expect(draft.value).toBe('Keep this draft');
+    expect(f.button('Restore view').getAttribute('aria-pressed')).toBe('true');
   } finally {
     await f.close();
   }

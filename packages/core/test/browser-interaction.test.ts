@@ -160,6 +160,11 @@ function setup() {
             height: 80,
             capturedAt: new Date(time).toISOString(),
           },
+          browser: {
+            tabs: [
+              { id: 'tab', title: 'Private title', url: 'https://private.example/', active: true },
+            ],
+          },
         },
   );
   const create = vi.fn(async () => ({
@@ -236,6 +241,39 @@ function setup() {
     },
   };
 }
+it('delivers tab metadata only to the controlling view and excludes it from durable journals', async () => {
+  const f = setup();
+  const taken = await f.take();
+  expect(taken.frame?.browser?.tabs[0]?.title).toBe('Private title');
+  const other = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: randomUUID(),
+    operation: 'frame',
+  });
+  expect(other.frame?.browser).toBeUndefined();
+  const input = { ...f.input(taken), action: { type: 'new_tab' as const } };
+  const applied = await f.supervisor.interact(input);
+  expect(applied.input?.effect).toBe('applied');
+  expect(applied.frame?.browser?.tabs[0]?.title).toBe('Private title');
+  const persisted = JSON.stringify({
+    controls: [...f.controls.records.values()],
+    inputs: [...f.controls.inputs.values()],
+    events: await f.events.load(f.sessionId),
+  });
+  expect(persisted).not.toContain('Private title');
+  expect(persisted).not.toContain('private.example');
+  await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'release',
+    generation: taken.state.generation!,
+    epoch: taken.state.epoch,
+  });
+  expect(
+    (await f.supervisor.interact({ sessionId: f.sessionId, viewId: f.viewId, operation: 'frame' }))
+      .frame?.browser,
+  ).toBeUndefined();
+});
 it('does not allocate a browser for viewing, denies nonowners and permits one controlling view', async () => {
   const f = setup();
   expect(
@@ -475,6 +513,72 @@ it('resets only the owned browser and permits an explicit fresh allocation', asy
   expect(f.dispose).toHaveBeenCalledTimes(1);
   expect((await f.take()).state.mode).toBe('human');
   expect(f.create).toHaveBeenCalledTimes(2);
+});
+
+it.each(['take', 'frame', 'release'] as const)(
+  'does not report an inactive browser when %s fails after taking control',
+  async (operation) => {
+    const f = setup();
+    const taken = operation === 'take' ? undefined : await f.take();
+    f.capture.mockRejectedValueOnce(new Error('private driver failure'));
+    await expect(
+      f.supervisor.interact({
+        sessionId: f.sessionId,
+        viewId: f.viewId,
+        ...(operation === 'release'
+          ? { operation, generation: f.generation, epoch: taken!.state.epoch }
+          : { operation }),
+      }),
+    ).rejects.toMatchObject({
+      code: 'DRIVER_FAILED',
+      message: 'Managed browser interaction is unavailable.',
+    });
+    const recovered = await f.supervisor.interact({
+      sessionId: f.sessionId,
+      viewId: f.viewId,
+      operation: 'state',
+    });
+    expect(recovered.state).toMatchObject({
+      available: true,
+      mode: 'human',
+      generation: f.generation,
+      controllerId: f.viewId,
+    });
+    expect(f.create).toHaveBeenCalledTimes(1);
+    expect(f.dispose).not.toHaveBeenCalled();
+    await f.supervisor.interact({ sessionId: f.sessionId, viewId: f.viewId, operation: 'reset' });
+    expect((await f.take()).frame).toBeDefined();
+    expect(f.create).toHaveBeenCalledTimes(2);
+  },
+);
+
+it('does not invent an inactive browser when its durable state cannot be read', async () => {
+  const f = setup();
+  await f.take();
+  vi.spyOn(f.controls, 'get').mockRejectedValueOnce(new Error('database unavailable'));
+  await expect(
+    f.supervisor.interact({ sessionId: f.sessionId, viewId: f.viewId, operation: 'state' }),
+  ).rejects.toMatchObject({ code: 'DRIVER_FAILED' });
+  expect(
+    (await f.supervisor.interact({ sessionId: f.sessionId, viewId: f.viewId, operation: 'state' }))
+      .state.mode,
+  ).toBe('human');
+});
+
+it('retains an applied input receipt when its subsequent picture fails', async () => {
+  const f = setup();
+  const input = f.input(await f.take());
+  f.capture.mockRejectedValueOnce(new Error('capture failed after input'));
+  await expect(f.supervisor.interact(input)).rejects.toMatchObject({ code: 'DRIVER_FAILED' });
+  expect((await f.controls.input(f.sessionId, input.requestId))?.effect).toBe('applied');
+  const recovered = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'state',
+  });
+  expect(recovered.state).toMatchObject({ available: true, mode: 'human', nextSequence: 2 });
+  expect((await f.supervisor.interact(input)).input?.effect).toBe('applied');
+  expect(f.humanInput).toHaveBeenCalledTimes(1);
 });
 
 it('finishes an admitted frame read on view disconnect without killing Chrome and pauses its controller', async () => {

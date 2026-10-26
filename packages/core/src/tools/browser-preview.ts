@@ -56,7 +56,11 @@ export async function captureBrowserPreview(
   try {
     const binding = await access.authorize(ctx.sessionId, 'screenshot', undefined, ctx.signal);
     await driver.verify(binding, ctx);
-    const url = browserUrlSchema.parse(binding.observedUrl);
+    // An empty managed tab can be viewed/handed back without becoming source evidence.
+    const url =
+      binding.securityMode === 'trusted-managed' && binding.observedUrl === 'about:blank'
+        ? 'about:blank'
+        : browserUrlSchema.parse(binding.observedUrl);
     if (
       Array.from(new URL(url).searchParams.keys()).some((key) =>
         /token|secret|password|api[-_]?key|authorization|^code$/i.test(key),

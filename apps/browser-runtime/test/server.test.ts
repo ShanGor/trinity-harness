@@ -136,6 +136,15 @@ it('authenticates and bounds human interaction separately without exposing raw t
     expect(response.statusCode).toBe(200);
     expect(response.headers['cache-control']).toBe('private, no-store');
     expect(interact).toHaveBeenCalledOnce();
+    interact.mockRejectedValueOnce(new Error('private driver details'));
+    const failed = await app.inject({
+      method: 'POST',
+      url: '/interaction',
+      headers,
+      payload: { sessionId, viewId, operation: 'frame' },
+    });
+    expect(failed.statusCode).toBe(500);
+    expect(failed.json()).toEqual({ error: 'browser runtime unavailable' });
   } finally {
     await app.close();
   }

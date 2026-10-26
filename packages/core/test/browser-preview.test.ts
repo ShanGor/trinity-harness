@@ -115,6 +115,19 @@ describe('ephemeral browser preview', () => {
     expect(await f.run()).toEqual({ state: 'privacy_blocked' });
     expect(f.driver.screenshot).not.toHaveBeenCalled();
   });
+  it('allows an empty managed tab to be handed back while denying arbitrary internal pages', async () => {
+    const f = fixture();
+    f.binding.observedUrl = 'about:blank';
+    expect(await f.run()).toMatchObject({ state: 'frame' });
+    expect(f.driver.capture).not.toHaveBeenCalled();
+    f.binding.securityMode = 'trusted-cdp';
+    expect(await f.run()).toEqual({ state: 'unavailable' });
+    f.binding.securityMode = 'trusted-managed';
+    for (const url of ['chrome://settings/', 'file:///etc/passwd', 'about:config']) {
+      f.binding.observedUrl = url;
+      expect(await f.run()).toEqual({ state: 'unavailable' });
+    }
+  });
   it('discards pixels when a private control appears during capture', async () => {
     const f = fixture();
     vi.mocked(f.driver.screenshot).mockImplementation(async () => {

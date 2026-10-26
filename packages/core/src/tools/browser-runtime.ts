@@ -25,6 +25,7 @@ import {
   type BrowserControlState,
 } from '@trinity-harness/contracts';
 import { canonicalBrowserJson } from './browser-artifacts.js';
+import { BrowserDriverError } from './browser-driver-error.js';
 
 /** The authenticated internal caller must also identify a matching active log call. */
 export async function authorizeManagedBrowserCommand(
@@ -798,7 +799,12 @@ export class ManagedBrowserSupervisor
               return failure('NOT_AUTHORIZED', 'Browser ownership changed.');
             return {
               state: this.controlState(record, request.viewId),
-              frame: { ...captured.preview, frameId, epoch: record.epoch },
+              frame: {
+                ...captured.preview,
+                frameId,
+                epoch: record.epoch,
+                ...(privateView && captured.browser ? { browser: captured.browser } : {}),
+              },
               ...(privateView && record.keyboard ? { keyboardId: record.keyboard.id } : {}),
               ...(request.operation === 'input'
                 ? { input: { requestId: request.requestId, effect: 'applied' as const } }
@@ -810,7 +816,10 @@ export class ManagedBrowserSupervisor
         active,
       );
     } catch {
-      return failure('UNAVAILABLE', 'Managed browser interaction is unavailable.');
+      // A failed read/operation does not prove Chrome stopped or control was released.
+      // Let the HTTP boundary report an outage so the viewer refreshes state instead
+      // of alternating between a fabricated inactive state and the durable lease.
+      throw new BrowserDriverError('DRIVER_FAILED', 'Managed browser interaction is unavailable.');
     } finally {
       signal?.removeEventListener('abort', disconnect);
     }

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   LocalSandbox,
   LocalBlobStore,
@@ -18,6 +18,7 @@ import {
   type ToolContext,
   type BrowserBinding,
   type BrowserArguments,
+  type BrowserHumanAction,
 } from '@trinity-harness/contracts';
 
 describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
@@ -31,8 +32,25 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
     let url: string;
     const generation = randomUUID();
     const sessionId = randomUUID();
-    const server = createServer((_request, response) => {
+    const server = createServer((request, response) => {
       response.setHeader('content-type', 'text/html; charset=utf-8');
+      if (request.url === '/drag') {
+        response.end(`<!doctype html><style>
+          #source,#drop,#slider {position:absolute;top:40px;width:120px;height:100px}
+          #source {left:20px;background:coral} #drop {left:300px;background:lightblue}
+          #slider {top:200px;left:20px;width:400px}
+        </style><div id="source" draggable="true">Move me</div><div id="drop">Drop here</div>
+        <input id="slider" type="range" min="0" max="100" value="0">
+        <button id="nativeclick" style="position:absolute;top:350px;left:20px;width:120px;height:60px"
+          onclick="this.dataset.clicks=String(Number(this.dataset.clicks||0)+1);this.dataset.shift=String(event.shiftKey)"
+          ondblclick="this.dataset.double='true'">Click</button>
+        <script>
+          source.ondragstart=e=>e.dataTransfer.setData('text/plain','item');
+          drop.ondragover=e=>e.preventDefault();
+          drop.ondrop=e=>{e.preventDefault();drop.textContent=e.dataTransfer.getData('text/plain');drop.dataset.trusted=String(e.isTrusted)};
+        </script>`);
+        return;
+      }
       response.end(
         '<!doctype html><main><h1>Evidence 😀</h1><p>Exact “quote”：世界.</p><input aria-label="Search" value="old"><button onclick="document.querySelector(\'p\').textContent=\'Clicked\'">Apply</button></main>',
       );
@@ -198,6 +216,148 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
         ctx.signal,
       );
     });
+    it('moves a native HTML draggable into its drop target and drags a slider', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(20_000) };
+      await driver.navigate(binding, `${url}drag`, ctx);
+      const drag = async (from: { x: number; y: number }, to: { x: number; y: number }) => {
+        const captured = await driver.humanFrame(true, ctx);
+        if (!captured.target) throw new Error('Missing drag frame');
+        expect(
+          await driver.humanInput(
+            { type: 'drag', from, to },
+            { ...captured.target, frameId: randomUUID() },
+            ctx,
+          ),
+        ).toMatchObject({ effect: 'applied' });
+      };
+      await drag({ x: 80, y: 90 }, { x: 360, y: 90 });
+      expect(
+        (
+          await connection.call(
+            'browser_evaluate',
+            {
+              expression:
+                '({text:document.querySelector("#drop").textContent,trusted:document.querySelector("#drop").dataset.trusted})',
+            },
+            ctx.signal,
+          )
+        ).structuredContent,
+      ).toEqual({ value: { text: 'item', trusted: 'true' } });
+      await drag({ x: 30, y: 250 }, { x: 400, y: 250 });
+      const slider = await connection.call(
+        'browser_evaluate',
+        {
+          expression: 'Number(document.querySelector("#slider").value)>90',
+        },
+        ctx.signal,
+      );
+      expect(slider.structuredContent).toEqual({ value: true });
+      const click = async (count: 1 | 2, shift = false): Promise<void> => {
+        const captured = await driver.humanFrame(true, ctx);
+        if (!captured.target) throw new Error('Missing click frame');
+        expect(
+          await driver.humanInput(
+            {
+              type: 'click',
+              point: { x: 80, y: 380 },
+              button: 'left',
+              count,
+              modifiers: shift ? ['shift'] : [],
+            },
+            { ...captured.target, frameId: randomUUID() },
+            ctx,
+          ),
+        ).toMatchObject({ effect: 'applied' });
+      };
+      await click(1);
+      await click(2);
+      expect(
+        (
+          await connection.call(
+            'browser_evaluate',
+            {
+              expression: '({...document.querySelector("#nativeclick").dataset})',
+            },
+            ctx.signal,
+          )
+        ).structuredContent,
+      ).toEqual({ value: { clicks: '2', double: 'true', shift: 'false' } });
+      await click(1, true);
+      expect(
+        (
+          await connection.call(
+            'browser_evaluate',
+            {
+              expression: 'document.querySelector("#nativeclick").dataset.shift',
+            },
+            ctx.signal,
+          )
+        ).structuredContent,
+      ).toEqual({ value: 'true' });
+      await driver.navigate(binding, url, ctx);
+    });
+    it('captures a private frame with bounded viewer tab metadata', async () => {
+      const calls = vi.spyOn(connection, 'call');
+      try {
+        expect(
+          (await driver.humanFrame(true, { ...context, signal: AbortSignal.timeout(20_000) }))
+            .preview.state,
+        ).toBe('frame');
+        expect(calls.mock.calls.map(([name]) => name)).toEqual([
+          'browser_status',
+          'browser_evaluate',
+          'browser_evaluate',
+          'browser_screenshot',
+          'browser_status',
+          'browser_evaluate',
+          'browser_tab_list',
+        ]);
+      } finally {
+        calls.mockRestore();
+      }
+    });
+    it('navigates history and manages tabs while fencing stale targets', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(30_000) };
+      const frame = async () => {
+        const captured = await driver.humanFrame(true, ctx);
+        if (!captured.target || !captured.browser) throw new Error('Missing browser frame');
+        return { ...captured, target: { ...captured.target, frameId: randomUUID() } };
+      };
+      const input = async (action: BrowserHumanAction) => {
+        expect(await driver.humanInput(action, (await frame()).target, ctx)).toEqual({
+          effect: 'applied',
+        });
+      };
+      const original = await frame();
+      const originalId = original.target.tabId;
+      await input({ type: 'navigate', url: `${url}?second` });
+      await input({ type: 'back' });
+      expect((await frame()).browser!.tabs.find((tab) => tab.active)?.url).toBe(url);
+      await input({ type: 'forward' });
+      expect((await frame()).browser!.tabs.find((tab) => tab.active)?.url).toBe(`${url}?second`);
+      await input({ type: 'reload' });
+      await input({ type: 'new_tab' });
+      const created = await frame();
+      expect(created.browser!.tabs).toHaveLength(2);
+      const newId = created.target.tabId;
+      expect(newId).not.toBe(originalId);
+      expect(
+        (await captureBrowserPreview(driver, driver, ctx, generation, () => new Date())).state,
+      ).toBe('frame');
+      await input({ type: 'back' });
+      await input({ type: 'forward' });
+      expect(await driver.humanInput({ type: 'reload' }, original.target, ctx)).toEqual({
+        effect: 'none',
+      });
+      await input({ type: 'switch_tab', tabId: originalId });
+      expect((await frame()).target.tabId).toBe(originalId);
+      await input({ type: 'switch_tab', tabId: newId });
+      await input({ type: 'close_tab', tabId: newId });
+      const closed = await frame();
+      expect(closed.target.tabId).toBe(originalId);
+      expect(closed.browser!.tabs).toHaveLength(1);
+      await input({ type: 'navigate', url });
+    }, 35_000);
     it('runs the evidence pipeline and replays saved images offline', async () => {
       const store = new MemorySessionStore();
       const blobs = new LocalBlobStore(path.join(root, 'blobs'));

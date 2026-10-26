@@ -77,6 +77,15 @@ export function InteractiveBrowserView({
   const [frame, setFrame] = useState<BrowserInteractionFrame | null>(null);
   const [message, setMessage] = useState('Connecting to browser…');
   const [pending, setPending] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [zoom, setZoom] = useState<number | null>(null);
+  const [panView, setPanView] = useState(false);
+  const [refreshMs, setRefreshMs] = useState<number | null>(null);
+  const [dragPreview, setDragPreview] = useState<{
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+  } | null>(null);
   const [address, setAddress] = useState('https://www.google.com/');
   const [textDraft, setTextDraft] = useState('');
   const [insertingText, setInsertingText] = useState(false);
@@ -89,6 +98,14 @@ export function InteractiveBrowserView({
   const viewport = useRef<HTMLDivElement>(null);
   const keyboard = useRef<HTMLTextAreaElement>(null);
   const addressInput = useRef<InputRef>(null);
+  const addressDirty = useRef(false);
+  const localPan = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    left: number;
+    top: number;
+  } | null>(null);
   const composing = useRef(false);
   const keyboardId = useRef<string | undefined>(undefined);
   const lastClick = useRef<{
@@ -102,6 +119,8 @@ export function InteractiveBrowserView({
     x: number;
     y: number;
     pointerId: number;
+    clientX: number;
+    clientY: number;
     button: number;
     width: number;
     height: number;
@@ -111,8 +130,10 @@ export function InteractiveBrowserView({
     epoch: number;
   } | null>(null);
   const cancelPointer = useCallback((): void => {
-    const active = pointer.current;
+    const active = pointer.current ?? localPan.current;
     pointer.current = null;
+    localPan.current = null;
+    setDragPreview(null);
     if (active && image.current?.hasPointerCapture?.(active.pointerId))
       image.current.releasePointerCapture(active.pointerId);
     wake.current.dispatchEvent(new Event('change'));
@@ -129,6 +150,23 @@ export function InteractiveBrowserView({
           epoch: item.epoch ?? control.epoch,
         };
         const last = queue.current.at(-1);
+        if (
+          item.action.type === 'scroll' &&
+          last &&
+          'action' in last &&
+          last.action.type === 'scroll' &&
+          last.generation === item.generation &&
+          last.epoch === item.epoch &&
+          Math.abs(last.action.dx + item.action.dx) <= 2000 &&
+          Math.abs(last.action.dy + item.action.dy) <= 2000
+        ) {
+          last.action = {
+            type: 'scroll',
+            dx: last.action.dx + item.action.dx,
+            dy: last.action.dy + item.action.dy,
+          };
+          return true;
+        }
         if (
           item.action.type === 'text' &&
           last &&
@@ -157,6 +195,7 @@ export function InteractiveBrowserView({
   useEffect(() => {
     const controller = new AbortController();
     const apply = (result: BrowserInteractionResult, item?: Queued): void => {
+      setConnected(true);
       if (item && 'action' in item && item.composerVersion !== undefined) {
         setInsertingText(false);
         if (result.input?.effect === 'applied' && draftVersion.current === item.composerVersion)
@@ -193,12 +232,16 @@ export function InteractiveBrowserView({
       if (result.frame && !pointer.current) {
         picture.current = result.frame;
         setFrame(result.frame);
+        const activeTab = result.frame.browser?.tabs.find((tab) => tab.active);
+        if (activeTab && !addressDirty.current) setAddress(activeTab.url);
       } else if (
+        result.error?.code === 'UNAVAILABLE' ||
         result.error?.code === 'PRIVACY_BLOCKED' ||
         result.error?.code === 'NOT_AUTHORIZED'
       ) {
         picture.current = null;
         setFrame(null);
+        keyboardId.current = undefined;
         if (result.error?.code === 'NOT_AUTHORIZED') setTextDraft('');
       }
       setMessage(
@@ -223,6 +266,7 @@ export function InteractiveBrowserView({
       let initialized = false;
       while (!controller.signal.aborted) {
         let retryDelay = 0;
+        const cycleStarted = performance.now();
         if (document.visibilityState === 'hidden' && !queue.current.length) {
           await wait(controller.signal, wake.current, 60_000);
           continue;
@@ -296,12 +340,17 @@ export function InteractiveBrowserView({
                     operation: initialized && control.available ? 'frame' : 'state',
                   };
           if (item) setPending(true);
+          const started = performance.now();
           const result = await client.interactBrowser(request, controller.signal);
+          if (!controller.signal.aborted && result.frame)
+            setRefreshMs(Math.round(performance.now() - started));
           if (controller.signal.aborted) break;
           apply(result, item);
           initialized = true;
+          if (result.error?.code === 'UNAVAILABLE') retryDelay = 5000;
         } catch (error) {
           if (controller.signal.aborted) break;
+          setConnected(false);
           const status = error instanceof Error && 'status' in error ? error.status : undefined;
           if (status === 501) {
             onUnsupported();
@@ -336,7 +385,10 @@ export function InteractiveBrowserView({
           await wait(
             controller.signal,
             wake.current,
-            retryDelay || (current.current.mode === 'human' && !pointer.current ? 250 : 1000),
+            retryDelay ||
+              (current.current.mode === 'human' && !pointer.current
+                ? Math.max(16, Math.round(250 - (performance.now() - cycleStarted)))
+                : 1000),
           );
       }
     };
@@ -367,17 +419,66 @@ export function InteractiveBrowserView({
       )
         return;
       event.preventDefault();
+      if (event.ctrlKey || event.metaKey) {
+        cancelPointer();
+        setZoom((value) =>
+          Math.max(0.5, Math.min(4, (value ?? 1) + (event.deltaY < 0 ? 0.25 : -0.25))),
+        );
+        return;
+      }
+      if (panView && zoom !== null) {
+        cancelPointer();
+        node?.scrollBy({ left: event.deltaX, top: event.deltaY });
+        return;
+      }
+      if (pointer.current) return;
       enqueue({
         action: {
           type: 'scroll',
-          dx: Math.max(-2000, Math.min(2000, Math.round(event.deltaX))),
-          dy: Math.max(-2000, Math.min(2000, Math.round(event.deltaY))),
+          dx: Math.max(
+            -2000,
+            Math.min(
+              2000,
+              Math.round(
+                event.deltaX *
+                  (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? picture.current.width : 1),
+              ),
+            ),
+          ),
+          dy: Math.max(
+            -2000,
+            Math.min(
+              2000,
+              Math.round(
+                event.deltaY *
+                  (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? picture.current.height : 1),
+              ),
+            ),
+          ),
         },
       });
     };
     node?.addEventListener('wheel', wheel, { passive: false });
     return () => node?.removeEventListener('wheel', wheel);
-  }, [enqueue, viewId]);
+  }, [enqueue, viewId, zoom, panView, cancelPointer]);
+  useEffect(() => {
+    window.addEventListener('resize', cancelPointer);
+    window.addEventListener('blur', cancelPointer);
+    return () => {
+      window.removeEventListener('resize', cancelPointer);
+      window.removeEventListener('blur', cancelPointer);
+    };
+  }, [cancelPointer]);
+  const browserAction = (action: BrowserHumanAction): void => {
+    cancelPointer();
+    addressDirty.current = false;
+    enqueue({ action });
+  };
+  const changeZoom = (value: number | null): void => {
+    cancelPointer();
+    setZoom(value);
+    if (value === null) setPanView(false);
+  };
   const text = (value: string, composerVersion?: number): boolean => {
     if (!value || current.current.mode !== 'human' || current.current.controllerId !== viewId)
       return false;
@@ -396,154 +497,380 @@ export function InteractiveBrowserView({
     return true;
   };
   return (
-    <Modal title="Browser" open onCancel={onClose} footer={null} width={1120} destroyOnHidden>
-      <Space wrap className="browser-control-toolbar">
-        <Button disabled={pending} onClick={() => enqueue({ operation: 'state' })}>
-          Retry connection
-        </Button>
+    <Modal
+      title={
+        <div className="browser-view-heading">
+          <span>Browser</span>
+          <span className={`browser-control-badge${owns ? ' is-controlled' : ''}`}>
+            {owns
+              ? 'You have control'
+              : state.mode === 'agent' && state.available
+                ? 'Agent has control'
+                : 'View only'}
+          </span>
+        </div>
+      }
+      className={`browser-view-modal${expanded ? ' browser-view-expanded' : ''}`}
+      open
+      onCancel={onClose}
+      footer={null}
+      width={expanded ? 'calc(100vw - 32px)' : 1120}
+      destroyOnHidden
+    >
+      <div className="browser-view-actions">
+        <Space wrap className="browser-control-toolbar">
+          <Button
+            type={owns ? 'default' : 'primary'}
+            disabled={!connected || pending || owns || (state.mode === 'human' && !owns)}
+            onClick={() => enqueue({ operation: 'take' })}
+          >
+            {state.available ? 'Take control' : 'Start browser'}
+          </Button>
+          <Button
+            type={owns ? 'primary' : 'default'}
+            disabled={pending || !state.available || (state.mode === 'human' && !owns)}
+            onClick={() => enqueue({ operation: 'release' })}
+          >
+            Return control to agent
+          </Button>
+        </Space>
         <Button
-          type={owns ? 'default' : 'primary'}
-          disabled={pending || (state.mode === 'human' && !owns)}
-          onClick={() => enqueue({ operation: 'take' })}
+          aria-pressed={expanded}
+          onClick={() => {
+            cancelPointer();
+            setExpanded(!expanded);
+          }}
         >
-          {state.available ? 'Take control' : 'Start browser'}
+          {expanded ? 'Restore view' : 'Expand view'}
         </Button>
-        <Button
-          disabled={pending || !state.available || (state.mode === 'human' && !owns)}
-          onClick={() => enqueue({ operation: 'release' })}
-        >
-          Return control to agent
-        </Button>
-        <Button disabled={pending || !owns} onClick={() => enqueue({ operation: 'pause' })}>
-          Pause
-        </Button>
-        <Button
-          disabled={pending || (state.mode === 'human' && !owns)}
-          onClick={() => enqueue({ operation: 'reset' })}
-        >
-          Restart browser
-        </Button>
-      </Space>
-      <p role="status" aria-live="polite">
-        {pending ? 'Applying browser action…' : message}
+      </div>
+      <details className="browser-advanced-controls">
+        <summary>More controls</summary>
+        <Space wrap>
+          <Button disabled={pending} onClick={() => enqueue({ operation: 'state' })}>
+            Retry connection
+          </Button>
+          <Button disabled={pending || !owns} onClick={() => enqueue({ operation: 'pause' })}>
+            Pause
+          </Button>
+          <Button
+            disabled={pending || (state.mode === 'human' && !owns)}
+            onClick={() => enqueue({ operation: 'reset' })}
+          >
+            Restart browser
+          </Button>
+        </Space>
+      </details>
+      <p className="browser-view-status" role="status" aria-live="polite">
+        {message}
+        {pending && <span className="browser-working"> · Applying action…</span>}
       </p>
-      <Input.Search
-        ref={addressInput}
-        aria-label="Browser address"
-        value={address}
-        disabled={!owns || pending}
-        onChange={(event) => setAddress(event.target.value)}
-        enterButton="Go"
-        onSearch={() => {
-          try {
-            const url = new URL(address.includes('://') ? address : `https://${address}`);
-            if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
-              throw new Error('invalid');
-            enqueue({ action: { type: 'navigate', url: url.href } });
-          } catch {
-            setMessage('Enter an HTTP or HTTPS address without credentials.');
-          }
-        }}
-      />
+      <div className="browser-navigation-toolbar" role="toolbar" aria-label="Browser navigation">
+        <Button
+          aria-label="Go back"
+          disabled={!owns || pending || !frame}
+          onClick={() => browserAction({ type: 'back' })}
+        >
+          ←
+        </Button>
+        <Button
+          aria-label="Go forward"
+          disabled={!owns || pending || !frame}
+          onClick={() => browserAction({ type: 'forward' })}
+        >
+          →
+        </Button>
+        <Button
+          aria-label="Reload page"
+          disabled={!owns || pending || !frame}
+          onClick={() => browserAction({ type: 'reload' })}
+        >
+          ↻
+        </Button>
+        <Input.Search
+          ref={addressInput}
+          aria-label="Browser address"
+          value={address}
+          disabled={!owns}
+          onChange={(event) => {
+            addressDirty.current = true;
+            setAddress(event.target.value);
+          }}
+          enterButton="Go"
+          onSearch={() => {
+            try {
+              const url = new URL(address.includes('://') ? address : `https://${address}`);
+              if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
+                throw new Error('invalid');
+              browserAction({ type: 'navigate', url: url.href });
+            } catch {
+              setMessage('Enter an HTTP or HTTPS address without credentials.');
+            }
+          }}
+        />
+      </div>
+      {owns && frame?.browser && (
+        <div className="browser-tab-toolbar" role="toolbar" aria-label="Browser tabs">
+          {frame.browser.tabs.map((tab) => (
+            <div className={`browser-tab${tab.active ? ' is-active' : ''}`} key={tab.id}>
+              <Button
+                aria-pressed={tab.active}
+                title={tab.url}
+                disabled={pending}
+                onClick={() => browserAction({ type: 'switch_tab', tabId: tab.id })}
+              >
+                {tab.title || (tab.url === 'about:blank' ? 'New tab' : tab.url)}
+              </Button>
+              <Button
+                aria-label={`Close tab ${tab.title || tab.url}`}
+                disabled={pending || frame.browser!.tabs.length <= 1}
+                onClick={() => browserAction({ type: 'close_tab', tabId: tab.id })}
+              >
+                ×
+              </Button>
+            </div>
+          ))}
+          <Button
+            disabled={pending || frame.browser.tabs.length >= 64}
+            onClick={() => browserAction({ type: 'new_tab' })}
+          >
+            New tab
+          </Button>
+        </div>
+      )}
+      <div className="browser-zoom-toolbar">
+        <label>
+          View zoom{' '}
+          <select
+            aria-label="View zoom"
+            value={zoom ?? 'fit'}
+            onChange={(event) =>
+              changeZoom(event.target.value === 'fit' ? null : Number(event.target.value))
+            }
+          >
+            <option value="fit">Fit</option>
+            {[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3, 3.25, 3.5, 3.75, 4].map(
+              (value) => (
+                <option key={value} value={value}>
+                  {value * 100}%
+                </option>
+              ),
+            )}
+          </select>
+        </label>
+        <Button
+          aria-pressed={panView}
+          disabled={zoom === null}
+          onClick={() => {
+            cancelPointer();
+            setPanView(!panView);
+          }}
+        >
+          {panView ? 'Interact with page' : 'Pan view'}
+        </Button>
+        <span>
+          {panView
+            ? 'Drag or scroll to move the enlarged view'
+            : 'Ctrl/⌘ + wheel to magnify · Pan view to move around'}
+        </span>
+      </div>
       <div
         ref={viewport}
         aria-busy={pending}
         data-input-sequence={state.nextSequence}
-        className={`browser-interactive-viewport${owns ? ' browser-controlled' : ''}`}
+        className={`browser-interactive-viewport${owns ? ' browser-controlled' : ''}${zoom !== null ? ' is-zoomed' : ''}${panView ? ' is-panning' : ''}`}
+        onScroll={() => {
+          if (pointer.current) cancelPointer();
+        }}
       >
-        {frame && (
-          <img
-            ref={image}
-            className="browser-preview-image"
-            alt="Interactive browser viewport"
-            draggable={false}
-            width={frame.width}
-            height={frame.height}
-            src={`data:image/png;base64,${frame.png}`}
-            onContextMenu={(event) => {
-              if (owns) event.preventDefault();
-            }}
-            onPointerDown={(event) => {
-              if (!owns || !picture.current || pointer.current || event.isPrimary === false) return;
-              event.preventDefault();
-              keyboard.current?.focus({ preventScroll: true });
-              const rect = event.currentTarget.getBoundingClientRect();
-              const point = mapBrowserPoint(rect, picture.current, event.clientX, event.clientY);
-              if (point) {
-                event.currentTarget.setPointerCapture?.(event.pointerId);
-                pointer.current = {
-                  ...point,
-                  pointerId: event.pointerId,
-                  button: event.button,
-                  width: picture.current.width,
-                  height: picture.current.height,
-                  rect,
-                  frameId: picture.current.frameId,
-                  generation: picture.current.generation,
-                  epoch: picture.current.epoch,
-                };
-                wake.current.dispatchEvent(new Event('change'));
-              }
-            }}
-            onPointerCancel={(event) => {
-              if (pointer.current?.pointerId === event.pointerId) cancelPointer();
-            }}
-            onLostPointerCapture={(event) => {
-              if (pointer.current?.pointerId === event.pointerId) cancelPointer();
-            }}
-            onPointerUp={(event) => {
-              const from = pointer.current;
-              if (!from || from.pointerId !== event.pointerId || from.button !== event.button)
-                return;
-              cancelPointer();
-              if (!owns || !picture.current) return;
-              const rect = event.currentTarget.getBoundingClientRect();
-              if (
-                rect.left !== from.rect.left ||
-                rect.top !== from.rect.top ||
-                rect.width !== from.rect.width ||
-                rect.height !== from.rect.height
-              )
-                return;
-              const point = mapBrowserPoint(rect, from, event.clientX, event.clientY);
-              if (!point) return;
-              const previous = lastClick.current;
-              const isDrag = Math.hypot(point.x - from.x, point.y - from.y) > 4;
-              if (isDrag && from.button !== 0) return;
-              const double =
-                !isDrag &&
-                previous &&
-                previous.button === event.button &&
-                previous.epoch === from.epoch &&
-                Date.now() - previous.at < 400 &&
-                Math.hypot(point.x - previous.x, point.y - previous.y) <= 4;
-              lastClick.current =
-                isDrag || double
-                  ? null
-                  : { ...point, at: Date.now(), button: event.button, epoch: from.epoch };
-              const action: BrowserHumanAction = isDrag
-                ? { type: 'drag', from: { x: from.x, y: from.y }, to: point }
-                : {
-                    type: 'click',
-                    point,
-                    button: event.button === 2 ? 'right' : event.button === 1 ? 'middle' : 'left',
-                    count: double ? 2 : 1,
-                    modifiers: [
-                      ...(event.altKey ? ['alt' as const] : []),
-                      ...(event.ctrlKey ? ['ctrl' as const] : []),
-                      ...(event.metaKey ? ['meta' as const] : []),
-                      ...(event.shiftKey ? ['shift' as const] : []),
-                    ],
-                  };
-              enqueue({
-                action,
-                frameId: from.frameId,
-                generation: from.generation,
-                epoch: from.epoch,
-              });
-            }}
-          />
+        {!frame && (
+          <div className="browser-view-empty">
+            <svg width="64" height="54" viewBox="0 0 64 54" fill="none" aria-hidden="true">
+              <rect
+                x="3"
+                y="3"
+                width="58"
+                height="38"
+                rx="6"
+                stroke="currentColor"
+                strokeWidth="2"
+              />
+              <path d="M23 51h18M32 41v10M3 13h58" stroke="currentColor" strokeWidth="2" />
+              <circle cx="10" cy="8" r="1" fill="currentColor" />
+              <circle cx="15" cy="8" r="1" fill="currentColor" />
+            </svg>
+            <strong>
+              {state.available
+                ? 'Waiting for the browser picture'
+                : 'Your browser, ready when you are'}
+            </strong>
+            <span>
+              {state.available ? message : 'Start the browser to open a page and interact with it.'}
+            </span>
+          </div>
         )}
+        {frame && (
+          <div
+            className="browser-picture"
+            style={zoom !== null ? { width: frame.width * zoom } : undefined}
+          >
+            <img
+              ref={image}
+              className="browser-preview-image"
+              alt="Interactive browser viewport"
+              draggable={false}
+              width={frame.width}
+              height={frame.height}
+              src={`data:image/png;base64,${frame.png}`}
+              onContextMenu={(event) => {
+                if (owns) event.preventDefault();
+              }}
+              onPointerDown={(event) => {
+                if (
+                  panView &&
+                  zoom !== null &&
+                  event.button === 0 &&
+                  event.isPrimary !== false &&
+                  !localPan.current &&
+                  viewport.current
+                ) {
+                  event.preventDefault();
+                  event.currentTarget.setPointerCapture?.(event.pointerId);
+                  localPan.current = {
+                    pointerId: event.pointerId,
+                    x: event.clientX,
+                    y: event.clientY,
+                    left: viewport.current.scrollLeft,
+                    top: viewport.current.scrollTop,
+                  };
+                  return;
+                }
+                if (!owns || !picture.current || pointer.current || event.isPrimary === false)
+                  return;
+                event.preventDefault();
+                keyboard.current?.focus({ preventScroll: true });
+                const rect = event.currentTarget.getBoundingClientRect();
+                const point = mapBrowserPoint(rect, picture.current, event.clientX, event.clientY);
+                if (point) {
+                  event.currentTarget.setPointerCapture?.(event.pointerId);
+                  pointer.current = {
+                    ...point,
+                    pointerId: event.pointerId,
+                    clientX: event.clientX,
+                    clientY: event.clientY,
+                    button: event.button,
+                    width: picture.current.width,
+                    height: picture.current.height,
+                    rect,
+                    frameId: picture.current.frameId,
+                    generation: picture.current.generation,
+                    epoch: picture.current.epoch,
+                  };
+                  wake.current.dispatchEvent(new Event('change'));
+                }
+              }}
+              onPointerMove={(event) => {
+                const pan = localPan.current;
+                if (pan && pan.pointerId === event.pointerId && viewport.current) {
+                  viewport.current.scrollLeft = pan.left + pan.x - event.clientX;
+                  viewport.current.scrollTop = pan.top + pan.y - event.clientY;
+                  return;
+                }
+                const from = pointer.current;
+                if (!from || from.pointerId !== event.pointerId || from.button !== 0) return;
+                const to = mapBrowserPoint(from.rect, from, event.clientX, event.clientY);
+                if (
+                  to &&
+                  Math.hypot(event.clientX - from.clientX, event.clientY - from.clientY) > 3
+                )
+                  setDragPreview({ from: { x: from.x, y: from.y }, to });
+              }}
+              onPointerCancel={(event) => {
+                if (localPan.current?.pointerId === event.pointerId) localPan.current = null;
+                if (pointer.current?.pointerId === event.pointerId) cancelPointer();
+              }}
+              onLostPointerCapture={(event) => {
+                if (localPan.current?.pointerId === event.pointerId) localPan.current = null;
+                if (pointer.current?.pointerId === event.pointerId) cancelPointer();
+              }}
+              onPointerUp={(event) => {
+                if (localPan.current && localPan.current.pointerId === event.pointerId) {
+                  localPan.current = null;
+                  if (event.currentTarget.hasPointerCapture?.(event.pointerId))
+                    event.currentTarget.releasePointerCapture(event.pointerId);
+                  return;
+                }
+                const from = pointer.current;
+                if (!from || from.pointerId !== event.pointerId || from.button !== event.button)
+                  return;
+                cancelPointer();
+                if (!owns || !picture.current) return;
+                const rect = event.currentTarget.getBoundingClientRect();
+                if (
+                  rect.left !== from.rect.left ||
+                  rect.top !== from.rect.top ||
+                  rect.width !== from.rect.width ||
+                  rect.height !== from.rect.height
+                )
+                  return;
+                const point = mapBrowserPoint(rect, from, event.clientX, event.clientY);
+                if (!point) return;
+                const previous = lastClick.current;
+                const isDrag =
+                  Math.hypot(event.clientX - from.clientX, event.clientY - from.clientY) > 3;
+                if (isDrag && from.button !== 0) return;
+                const double =
+                  !isDrag &&
+                  previous &&
+                  previous.button === event.button &&
+                  previous.epoch === from.epoch &&
+                  Date.now() - previous.at < 400 &&
+                  Math.hypot(point.x - previous.x, point.y - previous.y) <= 4;
+                lastClick.current =
+                  isDrag || double
+                    ? null
+                    : { ...point, at: Date.now(), button: event.button, epoch: from.epoch };
+                const action: BrowserHumanAction = isDrag
+                  ? { type: 'drag', from: { x: from.x, y: from.y }, to: point }
+                  : {
+                      type: 'click',
+                      point,
+                      button: event.button === 2 ? 'right' : event.button === 1 ? 'middle' : 'left',
+                      count: double ? 2 : 1,
+                      modifiers: [
+                        ...(event.altKey ? ['alt' as const] : []),
+                        ...(event.ctrlKey ? ['ctrl' as const] : []),
+                        ...(event.metaKey ? ['meta' as const] : []),
+                        ...(event.shiftKey ? ['shift' as const] : []),
+                      ],
+                    };
+                enqueue({
+                  action,
+                  frameId: from.frameId,
+                  generation: from.generation,
+                  epoch: from.epoch,
+                });
+              }}
+            />
+            {dragPreview && (
+              <svg
+                className="browser-drag-preview"
+                viewBox={`0 0 ${frame.width} ${frame.height}`}
+                aria-hidden="true"
+              >
+                <line
+                  x1={dragPreview.from.x}
+                  y1={dragPreview.from.y}
+                  x2={dragPreview.to.x}
+                  y2={dragPreview.to.y}
+                />
+                <circle cx={dragPreview.from.x} cy={dragPreview.from.y} r="5" />
+                <circle cx={dragPreview.to.x} cy={dragPreview.to.y} r="12" />
+              </svg>
+            )}
+          </div>
+        )}
+        {dragPreview && <div className="browser-drag-hint">Release to drop</div>}
         <textarea
           ref={keyboard}
           className="browser-input-capture"
@@ -578,6 +905,30 @@ export function InteractiveBrowserView({
               return;
             }
             if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') return;
+            const shortcut = event.key.toLowerCase();
+            if (
+              (event.ctrlKey || event.metaKey) &&
+              ['t', 'w', 'r', '+', '=', '-', '0'].includes(shortcut)
+            ) {
+              event.preventDefault();
+              if (shortcut === 't') browserAction({ type: 'new_tab' });
+              else if (shortcut === 'w') {
+                const tab = picture.current?.browser?.tabs.find((tab) => tab.active);
+                if (tab) browserAction({ type: 'close_tab', tabId: tab.id });
+              } else if (shortcut === 'r') browserAction({ type: 'reload' });
+              else
+                changeZoom(
+                  shortcut === '0'
+                    ? null
+                    : Math.max(0.5, Math.min(4, (zoom ?? 1) + (shortcut === '-' ? -0.25 : 0.25))),
+                );
+              return;
+            }
+            if (event.altKey && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+              event.preventDefault();
+              browserAction({ type: event.key === 'ArrowLeft' ? 'back' : 'forward' });
+              return;
+            }
             const special = [
               'Enter',
               'Tab',
@@ -614,40 +965,46 @@ export function InteractiveBrowserView({
           }}
         />
       </div>
-      <label className="browser-text-composer">
-        Type text locally, then insert into the focused browser field
-        <textarea
-          aria-label="Text to insert into browser"
-          value={textDraft}
-          disabled={!owns}
-          maxLength={4000}
-          rows={3}
-          autoComplete="off"
-          onChange={(event) => {
-            draftVersion.current++;
-            setTextDraft(event.currentTarget.value);
+      <details className="browser-typing-tools">
+        <summary>Paste or compose text</summary>
+        <label className="browser-text-composer">
+          Type text locally, then insert into the focused browser field
+          <textarea
+            aria-label="Text to insert into browser"
+            value={textDraft}
+            disabled={!owns}
+            maxLength={4000}
+            rows={3}
+            autoComplete="off"
+            onChange={(event) => {
+              draftVersion.current++;
+              setTextDraft(event.currentTarget.value);
+            }}
+          />
+        </label>
+        <Button
+          disabled={!owns || !textDraft || insertingText}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            if (text(textDraft, draftVersion.current)) setInsertingText(true);
           }}
-        />
-      </label>
-      <Button
-        disabled={!owns || !textDraft || insertingText}
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={() => {
-          if (text(textDraft, draftVersion.current)) setInsertingText(true);
-        }}
-      >
-        Insert text
-      </Button>
+        >
+          Insert text
+        </Button>
+      </details>
       {frame && (
         <p className="browser-preview-meta">
           Last picture{' '}
           <time dateTime={frame.capturedAt}>{new Date(frame.capturedAt).toLocaleTimeString()}</time>{' '}
-          · {owns ? 'Click the picture, then type or scroll.' : 'Take control to interact.'}
+          {refreshMs !== null && ` · ${refreshMs} ms refresh`} ·{' '}
+          {owns
+            ? 'Click to type · Drag to move items · Scroll to browse'
+            : 'Take control to interact.'}
         </p>
       )}
       <p className="browser-preview-meta">
-        Pictures are for you only. Closing or hiding this view while you control the browser pauses
-        agent browser actions. Return control explicitly when finished.
+        Private view · Closing or hiding pauses browser control. Return control to the agent when
+        finished.
       </p>
     </Modal>
   );

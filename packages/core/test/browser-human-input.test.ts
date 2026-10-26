@@ -10,7 +10,8 @@ import {
   type BrowserSurface,
 } from '@trinity-harness/contracts';
 import { ZendriverBrowserDriver, LocalSandbox } from '../src/index.js';
-import { interactionFromSurface } from '../src/tools/browser-interactions.js';
+import { interactionFromSurface, browserSurfaceScript } from '../src/tools/browser-interactions.js';
+import { browserStateScript } from '../src/tools/browser-driver-scripts.js';
 import type { ZendriverClient } from '../src/tools/zendriver-mcp.js';
 
 const browser = globalThis as unknown as {
@@ -28,13 +29,50 @@ function setup() {
     documentRevision: 'revision',
     url: 'https://example.com/',
     browserVersion: 'Chrome/155',
+    tabCount: 2,
   };
   let owner = true;
   let redirectFocus = false;
   const call = vi.fn<ZendriverClient['call']>(async (name, args) => {
+    if (name === 'browser_tab_list')
+      return {
+        content: [],
+        structuredContent: {
+          tabs: [
+            { id: state.tabId, url: state.url, title: 'Example', is_current: true },
+            { id: 'other-tab', url: 'https://other.example/', title: 'Other', is_current: false },
+          ],
+        },
+      };
+    if (name === 'browser_tab_activate')
+      return { content: [], structuredContent: { id: 'other-tab' } };
+    if (name === 'browser_tab_close')
+      return { content: [], structuredContent: { closed_id: 'other-tab' } };
+    if (name === 'browser_tab_new') return { content: [], structuredContent: { id: 'new-tab' } };
+    if (['browser_back', 'browser_forward', 'browser_reload'].includes(name))
+      return { content: [], structuredContent: { url: state.url, title: 'Example' } };
+    if (name === 'browser_status')
+      return {
+        content: [],
+        structuredContent: {
+          open: true,
+          tab_count: state.tabCount,
+          current_tab: { id: state.tabId, url: state.url },
+        },
+      };
     if (name === 'browser_evaluate') {
       const { expression } = z.object({ expression: z.string() }).parse(args);
-      return { content: [], structuredContent: { value: browser.window.eval(expression) } };
+      if (
+        expression === '(()=>{history.back();return {ok:true}})()' ||
+        expression === '(()=>{history.forward();return {ok:true}})()'
+      )
+        return { content: [], structuredContent: { value: { ok: true } } };
+      let script = expression.replace(browserStateScript, JSON.stringify(state));
+      if (script.includes(browserSurfaceScript('all'))) {
+        readSurface();
+        script = script.replace(browserSurfaceScript('all'), JSON.stringify(surface));
+      }
+      return { content: [], structuredContent: { value: browser.window.eval(script) } };
     }
     if (name === 'browser_key_sequence') {
       const { sequence } = z
@@ -53,7 +91,6 @@ function setup() {
   });
   const sessionId = randomUUID();
   const driver = new ZendriverBrowserDriver({ call }, sessionId, randomUUID(), async () => owner);
-  vi.spyOn(driver, 'inspect').mockImplementation(async () => ({ ...state }));
   const surface: BrowserSurface = {
     context: {
       width: 800,
@@ -68,7 +105,7 @@ function setup() {
     truncated: false,
     privacyDenied: false,
   };
-  const readSurface = vi.spyOn(driver, 'surface').mockResolvedValue(surface);
+  const readSurface = vi.fn();
   const target = {
     frameId: randomUUID(),
     tabId: state.tabId,
@@ -184,6 +221,51 @@ it('rechecks ownership for every keyboard action', async () => {
   ).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' });
   expect(f.first.value).toBe('A');
 });
+it.each([
+  [
+    { type: 'back' },
+    'browser_evaluate',
+    { expression: '(()=>{history.back();return {ok:true}})()' },
+  ],
+  [
+    { type: 'forward' },
+    'browser_evaluate',
+    { expression: '(()=>{history.forward();return {ok:true}})()' },
+  ],
+  [{ type: 'reload' }, 'browser_reload', { return_snapshot: false }],
+  [{ type: 'new_tab' }, 'browser_tab_new', { activate: true }],
+  [{ type: 'switch_tab', tabId: 'other-tab' }, 'browser_tab_activate', { tab_id: 'other-tab' }],
+  [{ type: 'close_tab', tabId: 'other-tab' }, 'browser_tab_close', { tab_id: 'other-tab' }],
+] as const)(
+  'dispatches private browser chrome action %j against the owned tab',
+  async (action, name, args) => {
+    const f = setup();
+    // Navigation/tab controls depend on document identity, not mutable page layout.
+    expect(
+      await f.driver.humanInput(action, { ...f.target, fingerprint: '0'.repeat(64) }, f.ctx),
+    ).toEqual({ effect: 'applied' });
+    expect(f.call).toHaveBeenCalledWith(name, args, f.ctx.signal);
+    expect(f.readSurface).not.toHaveBeenCalled();
+  },
+);
+it('rejects foreign tab ids and changed active documents without dispatch', async () => {
+  const f = setup();
+  expect(
+    await f.driver.humanInput({ type: 'switch_tab', tabId: 'foreign-tab' }, f.target, f.ctx),
+  ).toEqual({ effect: 'none' });
+  expect(
+    await f.driver.humanInput({ type: 'close_tab', tabId: 'foreign-tab' }, f.target, f.ctx),
+  ).toEqual({ effect: 'none' });
+  f.state.documentRevision = 'changed';
+  expect(await f.driver.humanInput({ type: 'new_tab' }, f.target, f.ctx)).toEqual({
+    effect: 'none',
+  });
+  expect(
+    f.call.mock.calls.some(([name]) =>
+      ['browser_tab_activate', 'browser_tab_close', 'browser_tab_new'].includes(name),
+    ),
+  ).toBe(false);
+});
 
 it('binds initial frame-based typing to its observed focus and suppresses capture across focus changes', async () => {
   const f = setup();
@@ -210,4 +292,20 @@ it('binds initial frame-based typing to its observed focus and suppresses captur
   expect(
     (await f.driver.humanFrame(true, f.ctx, () => new Date('2026-10-26T00:00:00Z'))).preview.state,
   ).toBe('busy');
+});
+
+it('rechecks ownership and document identity after capture before returning private pixels', async () => {
+  const f = setup();
+  vi.spyOn(f.driver, 'paint').mockResolvedValue('ready');
+  const png = PNG.sync.write(new PNG({ width: 800, height: 600 }));
+  const screenshot = vi.spyOn(f.driver, 'screenshot').mockImplementationOnce(async () => {
+    f.state.documentRevision = 'new-document';
+    return png;
+  });
+  expect((await f.driver.humanFrame(true, f.ctx)).preview.state).toBe('busy');
+  screenshot.mockImplementationOnce(async () => {
+    f.revoke();
+    return png;
+  });
+  await expect(f.driver.humanFrame(true, f.ctx)).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' });
 });
