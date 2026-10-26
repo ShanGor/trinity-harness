@@ -86,6 +86,16 @@ Fresh development provisioning configures the guest TAP route automatically. Exi
 sudo bash scripts/configure-firecracker-guest-egress.sh <environment-id>
 ```
 
+After a host reboot, `/run/netns` and its TAP/veth devices can be absent while the existing data disk and `network.json` remain. Do not rerun the fresh provisioner or replace the user's volume. For an existing `development-unencrypted` environment, first ensure the configured gateway, proxy (when enabled) and DNS relay are active, then run the repair through the maintenance gate:
+
+```bash
+FIRECRACKER_MAINTENANCE_URL=http://127.0.0.1:3000 \
+  bash scripts/release-firecracker-node.sh local-kvm-01 -- \
+  pkexec /usr/bin/bash "$PWD/scripts/recover-firecracker-development-network.sh" <environment-id>
+```
+
+Supply the existing maintenance token through the operator environment. The repair requires the original protected volume/runtime/network metadata, confirms there is no active VMM or existing namespace/interface, archives the old network metadata, and recreates only the namespace/TAP through the installed egress helper. It preserves the data disk, runtime UID/GID and immutable images. Failed or ambiguous repairs retain artifacts for inspection. After a successful repair/resume, wake the environment for a fresh generation and separately verify guest RPC and browser frames. This is an explicit development recovery procedure; automatic host-reboot network restoration remains a deployment gate.
+
 Rebuild the development guest rootfs after changing its network configuration, preserve the per-environment writable data disk, and start a fresh generation. This is a development NAT path, not a production isolation guarantee or a domain allowlist. `SANDBOX_PROXY_URL` selects whole-guest egress on the host.
 
 ### Local storage setup

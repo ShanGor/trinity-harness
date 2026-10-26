@@ -117,6 +117,11 @@ export interface BrowserRuntimePort {
   execute(request: BrowserRuntimeRequest, signal?: AbortSignal): Promise<BrowserRuntimeResult>;
 }
 
+/** Authenticated metadata selects the shared browser's durable anchor session. */
+export interface BrowserSessionScope {
+  resolve(sessionId: string, signal?: AbortSignal): Promise<string | null>;
+}
+
 export const browserRuntimeRecordSchema = z.object({
   sessionId: z.uuid(),
   generation: z.uuid(),

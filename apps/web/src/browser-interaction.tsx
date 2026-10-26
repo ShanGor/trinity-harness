@@ -92,6 +92,10 @@ export function InteractiveBrowserView({
   const draftVersion = useRef(0);
   const current = useRef(state),
     picture = useRef(frame);
+  const closeRequested = useRef(false);
+  const heldControl = useRef(false);
+  const closeView = useRef(onClose);
+  closeView.current = onClose;
   const queue = useRef<Queued[]>([]);
   const wake = useRef(new EventTarget());
   const image = useRef<HTMLImageElement>(null);
@@ -141,6 +145,7 @@ export function InteractiveBrowserView({
   const owns = state.mode === 'human' && state.controllerId === viewId;
   const enqueue = useCallback(
     (item: Queued): boolean => {
+      if (closeRequested.current) return false;
       if ('action' in item) {
         const control = current.current;
         if (control.mode !== 'human' || control.controllerId !== viewId) return false;
@@ -203,6 +208,8 @@ export function InteractiveBrowserView({
       }
       const old = current.current;
       current.current = result.state;
+      if (result.state.mode !== 'paused')
+        heldControl.current = result.state.mode === 'human' && result.state.controllerId === viewId;
       setState(result.state);
       if (
         old.epoch !== result.state.epoch ||
@@ -267,7 +274,11 @@ export function InteractiveBrowserView({
       while (!controller.signal.aborted) {
         let retryDelay = 0;
         const cycleStarted = performance.now();
-        if (document.visibilityState === 'hidden' && !queue.current.length) {
+        if (
+          document.visibilityState === 'hidden' &&
+          !queue.current.length &&
+          !closeRequested.current
+        ) {
           await wait(controller.signal, wake.current, 60_000);
           continue;
         }
@@ -276,7 +287,18 @@ export function InteractiveBrowserView({
         if (first && 'action' in first && first.action.type === 'text')
           await wait(controller.signal, new EventTarget(), 35);
         if (controller.signal.aborted) break;
-        const item = queue.current.shift();
+        const closing = closeRequested.current;
+        const control = current.current;
+        if (
+          closing &&
+          (!control.generation ||
+            !heldControl.current ||
+            !['human', 'paused'].includes(control.mode))
+        ) {
+          closeView.current();
+          return;
+        }
+        const item: Queued | undefined = closing ? { operation: 'release' } : queue.current.shift();
         try {
           let request: BrowserInteractionRequest;
           const control = current.current;
@@ -346,10 +368,21 @@ export function InteractiveBrowserView({
             setRefreshMs(Math.round(performance.now() - started));
           if (controller.signal.aborted) break;
           apply(result, item);
+          if (closing) {
+            closeRequested.current = false;
+            if (!result.error && result.state.mode === 'agent') {
+              closeView.current();
+              return;
+            }
+            setMessage(
+              `Could not return control to the agent. ${result.error?.message ?? 'Check the browser state and close again.'}`,
+            );
+          }
           initialized = true;
           if (result.error?.code === 'UNAVAILABLE') retryDelay = 5000;
         } catch (error) {
           if (controller.signal.aborted) break;
+          closeRequested.current = false;
           setConnected(false);
           const status = error instanceof Error && 'status' in error ? error.status : undefined;
           if (status === 501) {
@@ -373,15 +406,17 @@ export function InteractiveBrowserView({
             return;
           }
           setMessage(
-            status === 503
-              ? 'Managed browser service is temporarily unavailable. Retrying the connection; input was not retried.'
-              : 'Connection interrupted. Input was not retried; waiting for a fresh picture…',
+            closing
+              ? 'Could not confirm that control returned to the agent. Reconnecting; close again once connected.'
+              : status === 503
+                ? 'Managed browser service is temporarily unavailable. Retrying the connection; input was not retried.'
+                : 'Connection interrupted. Input was not retried; waiting for a fresh picture…',
           );
           retryDelay = 5000;
         } finally {
           if (!controller.signal.aborted) setPending(false);
         }
-        if (!queue.current.length)
+        if (!queue.current.length && !closeRequested.current)
           await wait(
             controller.signal,
             wake.current,
@@ -409,6 +444,16 @@ export function InteractiveBrowserView({
       document.removeEventListener('visibilitychange', visible);
     };
   }, [client, sessionId, viewId, onUnsupported, enqueue, cancelPointer]);
+  const requestClose = (): void => {
+    if (closeRequested.current) return;
+    closeRequested.current = true;
+    cancelPointer();
+    queue.current = [];
+    setInsertingText(false);
+    setPending(true);
+    setMessage('Returning control to the agent…');
+    wake.current.dispatchEvent(new Event('change'));
+  };
   useEffect(() => {
     const node = viewport.current;
     const wheel = (event: WheelEvent): void => {
@@ -512,7 +557,7 @@ export function InteractiveBrowserView({
       }
       className={`browser-view-modal${expanded ? ' browser-view-expanded' : ''}`}
       open
-      onCancel={onClose}
+      onCancel={requestClose}
       footer={null}
       width={expanded ? 'calc(100vw - 32px)' : 1120}
       destroyOnHidden
@@ -1003,8 +1048,7 @@ export function InteractiveBrowserView({
         </p>
       )}
       <p className="browser-preview-meta">
-        Private view · Closing or hiding pauses browser control. Return control to the agent when
-        finished.
+        Private view · Closing returns control to the agent. Hiding this browser tab pauses control.
       </p>
     </Modal>
   );

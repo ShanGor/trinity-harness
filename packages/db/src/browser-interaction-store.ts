@@ -34,9 +34,14 @@ export class PgBrowserInteractionStore implements BrowserInteractionStore {
     const recorded = browserInputRecordSchema.parse(row.record);
     return browserInputRecordSchema.parse({ ...recorded, effect: row.effect ?? 'unknown' });
   }
-  async reserve(record: BrowserControlRecord, requestId: string): Promise<void> {
+  async reserve(
+    record: BrowserControlRecord,
+    requestId: string,
+    sourceSessionId?: string,
+  ): Promise<void> {
     const parsed = browserControlRecordSchema.parse(record);
     const input = browserInputRecordSchema.parse({
+      ...(sourceSessionId ? { sourceSessionId } : {}),
       generation: parsed.generation,
       epoch: parsed.epoch,
       sequence: parsed.sequence,

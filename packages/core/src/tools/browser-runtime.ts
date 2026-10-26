@@ -23,6 +23,7 @@ import {
   type BrowserInteractionResult,
   type BrowserControlRecord,
   type BrowserControlState,
+  type BrowserSessionScope,
 } from '@trinity-harness/contracts';
 import { canonicalBrowserJson } from './browser-artifacts.js';
 import { BrowserDriverError } from './browser-driver-error.js';
@@ -273,6 +274,7 @@ export class HttpBrowserRuntime
 
 export interface ManagedBrowserSupervisorOptions {
   store: BrowserRuntimeStore;
+  scope?: BrowserSessionScope;
   owner: string;
   authorize: (request: BrowserRuntimeRequest, signal: AbortSignal) => Promise<boolean>;
   authorizePreview?: (sessionId: string, signal: AbortSignal) => Promise<boolean>;
@@ -317,8 +319,11 @@ export class ManagedBrowserSupervisor
           nextSequence: 1,
         };
   }
-  private async controlEvent(record: BrowserControlRecord): Promise<void> {
-    await this.options.events?.append(record.sessionId, [
+  private async controlEvent(
+    record: BrowserControlRecord,
+    source = record.sessionId,
+  ): Promise<void> {
+    await this.options.events?.append(source, [
       {
         type: 'browser/control_changed',
         eventId: randomUUID(),
@@ -331,6 +336,16 @@ export class ManagedBrowserSupervisor
   }
   private now(): Date {
     return (this.options.now ?? (() => new Date()))();
+  }
+  private async scopeFor(sessionId: string, signal: AbortSignal): Promise<string | null> {
+    return this.options.scope ? this.options.scope.resolve(sessionId, signal) : sessionId;
+  }
+  private async canView(source: string, scope: string, signal: AbortSignal): Promise<boolean> {
+    return !!(
+      (await this.options.authorizePreview?.(source, signal)) &&
+      (await this.scopeFor(source, signal)) === scope &&
+      (source === scope || (await this.options.authorizePreview?.(scope, signal)))
+    );
   }
   private failTimers(): void {
     this.shutdown.abort();
@@ -443,20 +458,19 @@ export class ManagedBrowserSupervisor
       return failure('UNAVAILABLE', 'Interactive browser control is unavailable.');
     }
     try {
-      if (
-        ['state', 'frame'].includes(request.operation) &&
-        this.activeOperations.has(request.sessionId)
-      ) {
-        if (!(await this.options.authorizePreview(request.sessionId, active)))
+      const scope = await this.scopeFor(request.sessionId, active);
+      if (!scope) return failure('NOT_AUTHORIZED', 'Browser ownership is unavailable.');
+      if (['state', 'frame'].includes(request.operation) && this.activeOperations.has(scope)) {
+        if (!(await this.canView(request.sessionId, scope, active)))
           return failure('NOT_AUTHORIZED', 'Browser ownership is unavailable.');
-        const record = await this.options.interactionStore.get(request.sessionId);
+        const record = await this.options.interactionStore.get(scope);
         const state = record
           ? this.controlState(record, request.viewId)
           : {
               ...this.controlState(),
               available: true,
               mode: 'agent' as const,
-              generation: this.sessions.get(request.sessionId)?.generation ?? null,
+              generation: this.sessions.get(scope)?.generation ?? null,
             };
         return {
           state,
@@ -464,20 +478,20 @@ export class ManagedBrowserSupervisor
         };
       }
       return await this.options.store.run(
-        request.sessionId,
+        scope,
         async (lockSignal) => {
           admitted = true;
           signal?.throwIfAborted();
           const operationSignal = AbortSignal.any([active, lockSignal]);
-          if (!(await this.options.authorizePreview!(request.sessionId, operationSignal)))
+          if (!(await this.canView(request.sessionId, scope, operationSignal)))
             return failure('NOT_AUTHORIZED', 'Browser ownership is unavailable.');
-          let session = this.sessions.get(request.sessionId);
-          let record = await this.control(request.sessionId);
-          const bound = await this.options.store.binding(request.sessionId);
+          let session = this.sessions.get(scope);
+          let record = await this.control(scope);
+          const bound = await this.options.store.binding(scope);
           if (request.operation === 'reset') {
             if (record?.mode === 'human' && record.controllerId !== request.viewId)
               return failure('NOT_CONTROLLER', 'Another view controls this browser.', record);
-            await this.destroy(request.sessionId);
+            await this.destroy(scope);
             if (record) {
               record = {
                 ...record,
@@ -489,9 +503,10 @@ export class ManagedBrowserSupervisor
                 frames: [],
                 keyboard: null,
                 needsObservation: true,
+                observedSessions: [],
               };
               await this.options.interactionStore!.put(record);
-              await this.controlEvent(record);
+              await this.controlEvent(record, request.sessionId);
             }
             return { state: this.controlState() };
           }
@@ -512,7 +527,7 @@ export class ManagedBrowserSupervisor
             try {
               session = await this.options.create(
                 {
-                  sessionId: request.sessionId,
+                  sessionId: scope,
                   callId: `human-${randomUUID()}`,
                   args: { operation: 'read_page', filter: 'all' },
                   permissionGranted: false,
@@ -521,12 +536,12 @@ export class ManagedBrowserSupervisor
               );
               try {
                 await this.options.store.bind({
-                  sessionId: request.sessionId,
+                  sessionId: scope,
                   generation: session.generation,
                   owner: this.options.owner,
                   status: 'active',
                 });
-                this.sessions.set(request.sessionId, session);
+                this.sessions.set(scope, session);
               } catch (error) {
                 await session.dispose();
                 throw error;
@@ -539,7 +554,7 @@ export class ManagedBrowserSupervisor
             return failure('UNAVAILABLE', 'No interactive managed browser is active.');
           if (!record || record.generation !== session.generation) {
             record = {
-              sessionId: request.sessionId,
+              sessionId: scope,
               generation: session.generation,
               epoch: (record?.epoch ?? 0) + 1,
               mode: 'agent',
@@ -550,6 +565,7 @@ export class ManagedBrowserSupervisor
               frames: [],
               keyboard: null,
               needsObservation: false,
+              observedSessions: [],
             };
             await this.options.interactionStore!.put(record);
           }
@@ -566,8 +582,8 @@ export class ManagedBrowserSupervisor
           if (request.operation === 'take') {
             if (record.mode === 'human' && !controls)
               return fail('NOT_CONTROLLER', 'Another view already controls this browser.');
-            this.idle.get(request.sessionId)?.abort();
-            this.idle.delete(request.sessionId);
+            this.idle.get(scope)?.abort();
+            this.idle.delete(scope);
             record = {
               ...record,
               mode: 'human',
@@ -579,7 +595,7 @@ export class ManagedBrowserSupervisor
               keyboard: null,
             };
             await this.options.interactionStore!.put(record);
-            await this.controlEvent(record);
+            await this.controlEvent(record, request.sessionId);
             this.armLease(record);
           } else if (request.operation === 'heartbeat') {
             if (!controls) return fail('NOT_CONTROLLER', 'This view does not control the browser.');
@@ -606,19 +622,19 @@ export class ManagedBrowserSupervisor
               frames: [],
               keyboard: null,
               needsObservation: true,
+              observedSessions: [],
             };
             await this.options.interactionStore!.put(record);
-            await this.controlEvent(record);
+            await this.controlEvent(record, request.sessionId);
             this.armLease(record);
-            this.armIdle(request.sessionId);
+            this.armIdle(scope);
           } else if (request.operation === 'input') {
             if (!controls) return fail('NOT_CONTROLLER', 'Take control before sending input.');
-            const previous = await this.options.interactionStore!.input(
-              request.sessionId,
-              request.requestId,
-            );
+            const previous = await this.options.interactionStore!.input(scope, request.requestId);
             if (previous) {
               if (
+                (previous.sourceSessionId !== undefined &&
+                  previous.sourceSessionId !== request.sessionId) ||
                 previous.generation !== record.generation ||
                 previous.epoch !== record.epoch ||
                 previous.viewId !== request.viewId ||
@@ -664,19 +680,32 @@ export class ManagedBrowserSupervisor
               keyboard: null,
               expiresAt: new Date(this.now().getTime() + 15_000).toISOString(),
               needsObservation: true,
+              observedSessions: [],
             };
             await this.options.interactionStore!.reserve(
               { ...record, mode: 'quarantined' },
               request.requestId,
+              request.sessionId,
             );
             try {
+              if (!(await this.canView(request.sessionId, scope, operationSignal))) {
+                record = {
+                  ...record,
+                  mode: 'paused',
+                  epoch: record.epoch + 1,
+                  controllerId: null,
+                  expiresAt: null,
+                };
+                await this.options.interactionStore!.finish(scope, request.requestId, 'none');
+                await this.options.interactionStore!.put(record);
+                await this.controlEvent(record);
+                this.armLease(record);
+                this.armIdle(scope);
+                return failure('NOT_AUTHORIZED', 'Browser ownership changed before input.');
+              }
               const outcome = await session.humanInput(request.action, target, operationSignal);
               if (outcome?.effect === 'none') {
-                await this.options.interactionStore!.finish(
-                  request.sessionId,
-                  request.requestId,
-                  'none',
-                );
+                await this.options.interactionStore!.finish(scope, request.requestId, 'none');
                 await this.options.interactionStore!.put(record);
                 return {
                   ...fail(
@@ -702,11 +731,7 @@ export class ManagedBrowserSupervisor
                   effect: 'applied',
                 },
               ]);
-              await this.options.interactionStore!.finish(
-                request.sessionId,
-                request.requestId,
-                'applied',
-              );
+              await this.options.interactionStore!.finish(scope, request.requestId, 'applied');
               await this.options.interactionStore!.put(record);
             } catch {
               const inputEpoch = record.epoch;
@@ -732,16 +757,16 @@ export class ManagedBrowserSupervisor
                   effect: 'unknown',
                 },
               ]);
-              await this.controlEvent(record);
+              await this.controlEvent(record, request.sessionId);
               this.armLease(record);
-              this.armIdle(request.sessionId);
+              this.armIdle(scope);
               return fail(
                 'UNKNOWN_EFFECT',
                 'Input outcome is unknown. Take control again to inspect the browser; do not automatically repeat the input.',
               );
             }
           }
-          if (!(await this.options.authorizePreview!(request.sessionId, operationSignal)))
+          if (!(await this.canView(request.sessionId, scope, operationSignal)))
             return failure('NOT_AUTHORIZED', 'Browser ownership changed.');
           if (request.operation === 'input' && request.capture === false)
             return {
@@ -789,13 +814,13 @@ export class ManagedBrowserSupervisor
                   keyboard: null,
                 };
                 await this.options.interactionStore!.put(record);
-                await this.controlEvent(record);
+                await this.controlEvent(record, request.sessionId);
                 this.armLease(record);
-                this.armIdle(request.sessionId);
+                this.armIdle(scope);
               }
               return { state: this.controlState(record, request.viewId) };
             }
-            if (!(await this.options.authorizePreview!(request.sessionId, operationSignal)))
+            if (!(await this.canView(request.sessionId, scope, operationSignal)))
               return failure('NOT_AUTHORIZED', 'Browser ownership changed.');
             return {
               state: this.controlState(record, request.viewId),
@@ -847,13 +872,17 @@ export class ManagedBrowserSupervisor
   private async executeLocked(
     request: BrowserRuntimeRequest,
     active: AbortSignal,
+    scope: string,
   ): Promise<BrowserRuntimeResult> {
     active.throwIfAborted();
-    if (!(await this.options.authorize(request, active))) {
-      await this.destroy(request.sessionId);
+    if (
+      !(await this.options.authorize(request, active)) ||
+      (await this.scopeFor(request.sessionId, active)) !== scope
+    ) {
+      if (!this.options.scope) await this.destroy(scope);
       return browserRuntimeFailure(request, 'NOT_AUTHORIZED');
     }
-    const control = await this.control(request.sessionId);
+    const control = await this.control(scope);
     if (control && control.mode !== 'agent')
       return {
         isError: true,
@@ -869,6 +898,7 @@ export class ManagedBrowserSupervisor
       };
     if (
       control?.needsObservation &&
+      !(this.options.scope && control.observedSessions.includes(request.sessionId)) &&
       !['navigate', 'web_search', 'read_page', 'get_page_text', 'screenshot'].includes(
         request.args.operation,
       )
@@ -890,19 +920,19 @@ export class ManagedBrowserSupervisor
     if (previous) {
       if (previous.hash !== hash) return browserRuntimeFailure(request, 'NOT_AUTHORIZED');
       if (previous.result) return previous.result;
-      await this.destroy(request.sessionId);
+      await this.destroy(scope);
       return browserRuntimeFailure(request, 'NOT_EXECUTED', 'unknown');
     }
-    this.idle.get(request.sessionId)?.abort();
-    this.idle.delete(request.sessionId);
-    let session = this.sessions.get(request.sessionId);
-    const record = await this.options.store.binding(request.sessionId);
+    this.idle.get(scope)?.abort();
+    this.idle.delete(scope);
+    let session = this.sessions.get(scope);
+    const record = await this.options.store.binding(scope);
     if (session && this.stopping.has(session))
       return browserRuntimeFailure(request, 'NOT_EXECUTED', 'unknown');
     if (record?.status === 'active' && (record.owner !== this.options.owner || !session))
       return browserRuntimeFailure(request, 'NOT_EXECUTED', 'unknown');
     if (session && (record?.generation !== session.generation || record.status !== 'active')) {
-      await this.destroy(request.sessionId);
+      await this.destroy(scope);
       return browserRuntimeFailure(request, 'NOT_EXECUTED', 'unknown');
     }
     if (!session) {
@@ -910,15 +940,15 @@ export class ManagedBrowserSupervisor
         return browserRuntimeFailure(request, 'NOT_EXECUTED');
       this.allocating++;
       try {
-        session = await this.options.create(request, active);
+        session = await this.options.create({ ...request, sessionId: scope }, active);
         try {
           await this.options.store.bind({
-            sessionId: request.sessionId,
+            sessionId: scope,
             owner: this.options.owner,
             generation: session.generation,
             status: 'active',
           });
-          this.sessions.set(request.sessionId, session);
+          this.sessions.set(scope, session);
         } catch (err) {
           await session.dispose();
           throw err;
@@ -934,14 +964,25 @@ export class ManagedBrowserSupervisor
     if (control?.needsObservation && !result.isError)
       await this.options.interactionStore!.put({
         ...control,
-        needsObservation: false,
+        needsObservation: !!this.options.scope,
+        observedSessions: this.options.scope
+          ? [
+              ...control.observedSessions.filter((id) => id !== request.sessionId),
+              request.sessionId,
+            ].slice(-128)
+          : [],
         frame: null,
         frames: [],
         keyboard: null,
       });
     active.throwIfAborted();
-    if (result.isError) await this.destroy(request.sessionId);
-    else this.armIdle(request.sessionId);
+    const sourceDenied =
+      this.options.scope &&
+      result.value.kind === 'browser-error-v1' &&
+      result.value.code === 'NOT_AUTHORIZED' &&
+      result.value.effect === 'none';
+    if (result.isError && !sourceDenied) await this.destroy(scope);
+    else this.armIdle(scope);
     return result;
   }
   async execute(input: BrowserRuntimeRequest, signal?: AbortSignal): Promise<BrowserRuntimeResult> {
@@ -952,19 +993,22 @@ export class ManagedBrowserSupervisor
       ...(signal ? [signal] : []),
     ]);
     try {
+      const scope = await this.scopeFor(request.sessionId, deadline);
+      if (!scope || !(await this.options.authorize(request, deadline)))
+        return browserRuntimeFailure(request, 'NOT_AUTHORIZED');
       return await this.options.store.run(
-        request.sessionId,
+        scope,
         async (lockSignal) => {
           const stop = new AbortController();
-          this.activeOperations.set(request.sessionId, stop);
+          this.activeOperations.set(scope, stop);
           const active = AbortSignal.any([deadline, lockSignal, stop.signal]);
           try {
-            return await this.executeLocked(request, active);
+            return await this.executeLocked(request, active, scope);
           } catch (err) {
-            await this.destroy(request.sessionId);
+            await this.destroy(scope);
             throw err;
           } finally {
-            this.activeOperations.delete(request.sessionId);
+            this.activeOperations.delete(scope);
           }
         },
         deadline,
@@ -1001,18 +1045,21 @@ export class ManagedBrowserSupervisor
       disconnected.signal,
     ]);
     try {
-      if (!(await this.options.authorizePreview?.(sessionId, active)))
+      const scope = await this.scopeFor(sessionId, active);
+      if (!scope || !(await this.canView(sessionId, scope, active)))
         return { state: 'unavailable' };
       // A spectator must not queue behind a long action or keep the idle lease alive.
-      if (this.activeOperations.has(sessionId)) return { state: 'busy' };
+      if (this.activeOperations.has(scope)) return { state: 'busy' };
       return await this.options.store.run(
-        sessionId,
+        scope,
         async (lockSignal) => {
           admitted = true;
           signal?.throwIfAborted();
           const captureSignal = AbortSignal.any([active, lockSignal]);
-          const session = this.sessions.get(sessionId);
-          const record = await this.options.store.binding(sessionId);
+          if (!(await this.canView(sessionId, scope, captureSignal)))
+            return { state: 'unavailable' };
+          const session = this.sessions.get(scope);
+          const record = await this.options.store.binding(scope);
           if (
             !session?.preview ||
             this.stopping.has(session) ||
@@ -1025,7 +1072,7 @@ export class ManagedBrowserSupervisor
           captureSignal.throwIfAborted();
           if (
             signal?.aborted ||
-            !(await this.options.authorizePreview?.(sessionId, captureSignal)) ||
+            !(await this.canView(sessionId, scope, captureSignal)) ||
             (result.state === 'frame' && result.generation !== session.generation)
           )
             return { state: 'unavailable' };

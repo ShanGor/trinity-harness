@@ -19,6 +19,8 @@ import {
   EnvironmentController,
   HttpNodeRuntime,
   validateGuestDeployment,
+  PersonalBrowserSessionScope,
+  browserRuntimeFailure,
 } from '@trinity-harness/core';
 import {
   createPool,
@@ -53,6 +55,7 @@ async function main(): Promise<void> {
   const store = new PgSessionStore(db);
   const metas = new PgSessionMetaStore(db);
   const users = new PgUserStore(db, new ScryptPasswordHasher());
+  const browserScope = new PersonalBrowserSessionScope(metas);
   const blobs = new LocalBlobStore(path.join(env.WORKSPACE_ROOT, '.trinity', 'blobs'));
   if (env.EXECUTION_DRIVER !== 'firecracker') {
     const probe = await new LocalSandbox(env.WORKSPACE_ROOT, { envMode: 'minimal' }).execArgv(
@@ -99,6 +102,7 @@ async function main(): Promise<void> {
     );
   const supervisor = new ManagedBrowserSupervisor({
     store: journal,
+    scope: browserScope,
     interactionStore: new PgBrowserInteractionStore(pool),
     events: {
       append: async (sessionId, events) => {
@@ -209,13 +213,6 @@ async function main(): Promise<void> {
         await dispose();
         throw new Error('Zendriver browser driver was not initialized');
       }
-      const tool = createBrowserTool({
-        store,
-        blobs,
-        now: () => new Date(),
-        driver: activeDriver,
-        access: activeDriver,
-      });
       return {
         generation,
         humanFrame: (privateView, active) =>
@@ -248,15 +245,44 @@ async function main(): Promise<void> {
             generation,
             () => new Date(),
           ),
-        execute: (command, active) =>
-          tool.execute(command.args, {
+        execute: async (command, active) => {
+          if (
+            !(await authorized(command.sessionId, active)) ||
+            (await browserScope.resolve(command.sessionId, active)) !== request.sessionId
+          )
+            return browserRuntimeFailure(command, 'NOT_AUTHORIZED');
+          const source = await metas.get(command.sessionId);
+          if (!source?.workspaceUri) return browserRuntimeFailure(command, 'NOT_AUTHORIZED');
+          const sourceRoot = path.resolve(source.workspaceUri);
+          const relativeSource = path.relative(path.resolve(env.WORKSPACE_ROOT), sourceRoot);
+          if (relativeSource.startsWith('..') || path.isAbsolute(relativeSource))
+            return browserRuntimeFailure(command, 'NOT_AUTHORIZED');
+          const sourceDriver = new ZendriverBrowserDriver(
+            connection!,
+            command.sessionId,
+            generation,
+            async (id, signal) =>
+              (await authorized(id, signal)) &&
+              (await browserScope.resolve(id, signal)) === request.sessionId,
+          );
+          const tool = createBrowserTool({
+            store,
+            blobs,
+            now: () => new Date(),
+            driver: sourceDriver,
+            access: sourceDriver,
+          });
+          return tool.execute(command.args, {
             sessionId: command.sessionId,
             callId: command.callId,
             permissionGranted: command.permissionGranted,
-            sandbox,
-            workspaceRoot: root,
+            sandbox: guestRouter
+              ? new RemoteSandbox(guestRouter, command.sessionId)
+              : new LocalSandbox(sourceRoot, { envMode: 'minimal' }),
+            workspaceRoot: sourceRoot,
             signal: active,
-          }),
+          });
+        },
         dispose,
       };
     },

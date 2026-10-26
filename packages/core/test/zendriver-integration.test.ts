@@ -91,6 +91,68 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
       await new Promise<void>((resolve) => server.close(() => resolve()));
       if (root) await rm(root, { recursive: true, force: true });
     });
+    it('keeps evidence in its originating chat when two source drivers share one browser connection', async () => {
+      const sideId = randomUUID();
+      const sideDriver = new ZendriverBrowserDriver(
+        connection,
+        sideId,
+        generation,
+        async () => true,
+      );
+      const store = new MemorySessionStore();
+      const blobs = new LocalBlobStore(path.join(root, 'shared-source-blobs'));
+      const mainTool = createBrowserTool({
+        store,
+        blobs,
+        now: () => new Date(),
+        driver,
+        access: driver,
+      });
+      const sideTool = createBrowserTool({
+        store,
+        blobs,
+        now: () => new Date(),
+        driver: sideDriver,
+        access: sideDriver,
+      });
+      const mainContext = { ...context, callId: randomUUID(), signal: AbortSignal.timeout(20_000) };
+      const main = browserResultSchema.parse(
+        (await mainTool.execute({ operation: 'navigate', url }, mainContext)).value,
+      );
+      await store.append(sessionId, [
+        {
+          type: 'tool/call',
+          eventId: randomUUID(),
+          at: new Date().toISOString(),
+          callId: mainContext.callId,
+          name: 'browser',
+          args: { operation: 'navigate', url },
+        },
+        {
+          type: 'tool/result',
+          eventId: randomUUID(),
+          at: new Date().toISOString(),
+          callId: mainContext.callId,
+          isError: false,
+          value: main,
+        },
+      ]);
+      const sideContext = { ...mainContext, sessionId: sideId, callId: randomUUID() };
+      const side = browserResultSchema.parse(
+        (await sideTool.execute({ operation: 'read_page', filter: 'all' }, sideContext)).value,
+      );
+      expect(side.sessionId).toBe(sideId);
+      expect(side.artifactUri).toContain(`/${sideId}/`);
+      expect(side.bindingId).not.toBe(main.bindingId);
+      expect(side.tabId).toBe(main.tabId);
+      expect(side.driver?.runtimeGeneration).toBe(main.driver?.runtimeGeneration);
+      expect(side.blocks.some((block) => block.text.includes('Exact “quote”：世界.'))).toBe(true);
+      const denied = await sideTool.execute(
+        { operation: 'read_observation', observationId: main.observationId },
+        { ...sideContext, callId: randomUUID() },
+      );
+      expect(denied.isError).toBe(true);
+    });
     it('captures user-facing previews with Zendriver and suppresses sensitive pages', async () => {
       const preview = () =>
         captureBrowserPreview(

@@ -208,11 +208,13 @@ export const browserControlRecordSchema = z
       .nullable()
       .default(null),
     needsObservation: z.boolean().default(false),
+    observedSessions: z.array(z.uuid()).max(128).default([]),
   })
   .strict();
 export type BrowserControlRecord = z.infer<typeof browserControlRecordSchema>;
 export const browserInputRecordSchema = z
   .object({
+    sourceSessionId: z.uuid().optional(),
     generation: z.uuid(),
     epoch: z.number().int().nonnegative(),
     sequence: z.number().int().positive(),
@@ -231,7 +233,7 @@ export interface BrowserInteractionStore {
   get(sessionId: string): Promise<BrowserControlRecord | null>;
   put(record: BrowserControlRecord): Promise<void>;
   input(sessionId: string, requestId: string): Promise<BrowserInputRecord | null>;
-  reserve(record: BrowserControlRecord, requestId: string): Promise<void>;
+  reserve(record: BrowserControlRecord, requestId: string, sourceSessionId?: string): Promise<void>;
   finish(
     sessionId: string,
     requestId: string,

@@ -209,6 +209,191 @@ it('drops private pixels when returning control and cancels the watch when close
     throw error;
   }
 });
+function dismissBrowser(via: 'close button' | 'outside click' | 'Escape'): void {
+  if (via === 'close button') {
+    document.querySelector<HTMLButtonElement>('.ant-modal-close')!.click();
+  } else {
+    const wrap = document.querySelector('.ant-modal-wrap')!;
+    if (via === 'Escape')
+      wrap.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, keyCode: 27 }));
+    else {
+      wrap.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      wrap.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      wrap.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    }
+  }
+}
+it.each(['close button', 'outside click', 'Escape'] as const)(
+  'returns control before closing with %s',
+  async (via) => {
+    const f = await mount();
+    try {
+      await act(async () => f.button('Start browser').click());
+      const original = f.interactBrowser.getMockImplementation()!;
+      let complete!: () => void;
+      f.interactBrowser.mockImplementationOnce(async (request) => {
+        expect(request.operation).toBe('release');
+        await new Promise<void>((resolve) => {
+          complete = resolve;
+        });
+        return original(request);
+      });
+      await act(async () => dismissBrowser(via));
+      expect(f.onClose).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain('Returning control to the agent');
+      await act(async () => complete());
+      expect(f.interactBrowser.mock.calls.at(-1)![0]).toMatchObject({
+        operation: 'release',
+        sessionId: f.sessionId,
+        epoch: 2,
+      });
+      expect(f.onClose).toHaveBeenCalledOnce();
+      expect(document.querySelector('.browser-preview-image')).toBeNull();
+    } finally {
+      await f.close();
+    }
+  },
+);
+it('finishes a pending takeover before returning control on close', async () => {
+  const f = await mount();
+  try {
+    const original = f.interactBrowser.getMockImplementation()!;
+    let complete!: () => void;
+    f.interactBrowser.mockImplementationOnce(async (request) => {
+      await new Promise<void>((resolve) => {
+        complete = resolve;
+      });
+      return original(request);
+    });
+    await act(async () => f.button('Start browser').click());
+    await act(async () => dismissBrowser('close button'));
+    expect(f.onClose).not.toHaveBeenCalled();
+    await act(async () => complete());
+    expect(f.interactBrowser.mock.calls.map(([r]) => r.operation)).toEqual([
+      'state',
+      'take',
+      'release',
+    ]);
+    expect(f.onClose).toHaveBeenCalledOnce();
+  } finally {
+    await f.close();
+  }
+});
+it('waits for active input and drops queued typing before returning control on close', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const original = f.interactBrowser.getMockImplementation()!;
+    let complete!: () => void;
+    f.interactBrowser.mockImplementationOnce(async (request) => {
+      await new Promise<void>((resolve) => {
+        complete = resolve;
+      });
+      return original(request);
+    });
+    await act(async () => inputValue(keyboardInput(), 'first'));
+    await act(async () => vi.advanceTimersByTimeAsync(35));
+    await act(async () => inputValue(keyboardInput(), 'queued'));
+    await act(async () => dismissBrowser('outside click'));
+    expect(f.onClose).not.toHaveBeenCalled();
+    expect(f.interactBrowser.mock.calls.at(-1)![0].operation).toBe('input');
+    await act(async () => complete());
+    expect(inputs(f).map((r) => r.action)).toEqual([{ type: 'text', text: 'first' }]);
+    expect(f.interactBrowser.mock.calls.at(-1)![0].operation).toBe('release');
+    expect(f.onClose).toHaveBeenCalledOnce();
+  } finally {
+    await f.close();
+  }
+});
+it.each(['rejected', 'disconnected'] as const)(
+  'keeps the view open when returning control on close is %s',
+  async (failure) => {
+    const f = await mount();
+    try {
+      await act(async () => f.button('Start browser').click());
+      const taken = f.interactBrowser.mock.results.at(-1)!.value;
+      f.interactBrowser.mockImplementationOnce(async () => {
+        if (failure === 'disconnected') throw Error('lost acknowledgement');
+        const result = await taken;
+        return {
+          state: result.state,
+          error: { code: 'PRIVACY_BLOCKED', message: 'A fresh non-private view is required.' },
+        };
+      });
+      await act(async () => dismissBrowser('close button'));
+      expect(f.onClose).not.toHaveBeenCalled();
+      expect(document.body.textContent).toContain(
+        failure === 'disconnected' ? 'Could not confirm' : 'Could not return control',
+      );
+      expect(f.interactBrowser.mock.calls.filter(([r]) => r.operation === 'release')).toHaveLength(
+        1,
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+it('closes a view that never took control without sending a handoff', async () => {
+  const f = await mount();
+  try {
+    await act(async () => dismissBrowser('close button'));
+    expect(f.onClose).toHaveBeenCalledOnce();
+    expect(f.interactBrowser.mock.calls.map(([r]) => r.operation)).toEqual(['state']);
+  } finally {
+    await f.close();
+  }
+});
+it('returns control when closing after this view paused it', async () => {
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    await act(async () => f.button('Pause').click());
+    await act(async () => dismissBrowser('close button'));
+    expect(f.interactBrowser.mock.calls.at(-1)![0]).toMatchObject({
+      operation: 'release',
+      epoch: 3,
+    });
+    expect(f.onClose).toHaveBeenCalledOnce();
+  } finally {
+    await f.close();
+  }
+});
+it('preserves quarantine when closing during input with an unknown outcome', async () => {
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    let complete!: () => void;
+    f.interactBrowser.mockImplementationOnce(async (request) => {
+      if (request.operation !== 'input') throw Error('Expected input');
+      await new Promise<void>((resolve) => {
+        complete = resolve;
+      });
+      return {
+        state: {
+          available: true,
+          mode: 'quarantined',
+          generation: request.generation,
+          epoch: request.epoch + 1,
+          controllerId: null,
+          expiresAt: null,
+          nextSequence: request.sequence + 1,
+        },
+        error: { code: 'UNKNOWN_EFFECT', message: 'Inspect the browser before continuing.' },
+      };
+    });
+    await act(async () =>
+      keyboardInput().dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' })),
+    );
+    await act(async () => dismissBrowser('close button'));
+    await act(async () => complete());
+    expect(f.onClose).toHaveBeenCalledOnce();
+    expect(f.interactBrowser.mock.calls.filter(([r]) => r.operation === 'release')).toHaveLength(0);
+    expect(inputs(f)).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
 it('does not retry an input after its response is lost', async () => {
   const f = await mount();
   try {

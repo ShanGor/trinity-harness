@@ -38,6 +38,7 @@ describe.skipIf(!reachable)('durable browser control and input journal', () => {
   it('preserves reservations and unknown outcomes across adapter reconstruction without typed input values', async () => {
     const store = new PgBrowserInteractionStore(pool),
       sessionId = randomUUID(),
+      sourceSessionId = randomUUID(),
       requestId = randomUUID();
     const record = browserControlRecordSchema.parse({
       sessionId,
@@ -49,13 +50,14 @@ describe.skipIf(!reachable)('durable browser control and input journal', () => {
       sequence: 1,
       frame: null,
     });
-    await store.reserve(record, requestId);
+    await store.reserve(record, requestId, sourceSessionId);
     const restarted = new PgBrowserInteractionStore(pool);
     expect(await restarted.get(sessionId)).toEqual(record);
     expect(await restarted.input(sessionId, requestId)).toMatchObject({
       effect: 'unknown',
       epoch: 2,
       sequence: 1,
+      sourceSessionId,
     });
     await restarted.finish(sessionId, requestId, 'applied');
     expect((await store.input(sessionId, requestId))?.effect).toBe('applied');

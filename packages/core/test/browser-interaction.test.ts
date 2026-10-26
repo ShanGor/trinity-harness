@@ -12,8 +12,13 @@ import {
   type BrowserHumanCapture,
   type BrowserInteractionResult,
   type BrowserHumanInputResult,
+  type ManagedBrowserSession,
 } from '@trinity-harness/contracts';
-import { ManagedBrowserSupervisor, MemorySessionStore } from '../src/index.js';
+import {
+  ManagedBrowserSupervisor,
+  MemorySessionStore,
+  browserRuntimeFailure,
+} from '../src/index.js';
 
 const supervisors: ManagedBrowserSupervisor[] = [];
 afterEach(async () => {
@@ -32,10 +37,15 @@ class Controls implements BrowserInteractionStore {
   async input(id: string, key: string): Promise<BrowserInputRecord | null> {
     return this.inputs.get(`${id}/${key}`) ?? null;
   }
-  async reserve(record: BrowserControlRecord, key: string): Promise<void> {
+  async reserve(
+    record: BrowserControlRecord,
+    key: string,
+    sourceSessionId?: string,
+  ): Promise<void> {
     if (this.inputs.has(`${record.sessionId}/${key}`)) throw Error('duplicate');
     await this.put(record);
     this.inputs.set(`${record.sessionId}/${key}`, {
+      ...(sourceSessionId ? { sourceSessionId } : {}),
       generation: record.generation,
       epoch: record.epoch,
       viewId: record.controllerId!,
@@ -126,8 +136,9 @@ function result(request: BrowserRuntimeRequest): BrowserRuntimeResult {
     },
   };
 }
-function setup() {
+function setup(shared = false) {
   const sessionId = randomUUID(),
+    sideId = randomUUID(),
     viewId = randomUUID(),
     generation = randomUUID();
   const controls = new Controls(),
@@ -135,6 +146,7 @@ function setup() {
     events = new MemorySessionStore();
   let time = Date.parse('2026-10-26T00:00:00Z');
   let owner = true;
+  const revokedSessions = new Set<string>();
   let privatePage = false;
   const humanInput = vi.fn(async (): Promise<BrowserHumanInputResult | void> => undefined),
     execute = vi.fn(async (request: BrowserRuntimeRequest) => result(request)),
@@ -167,7 +179,9 @@ function setup() {
           },
         },
   );
-  const create = vi.fn(async () => ({
+  const create = vi.fn<
+    (request: BrowserRuntimeRequest, signal: AbortSignal) => Promise<ManagedBrowserSession>
+  >(async () => ({
     generation,
     execute,
     dispose,
@@ -176,11 +190,14 @@ function setup() {
   }));
   const supervisor = new ManagedBrowserSupervisor({
     store: journal,
+    scope: shared
+      ? { resolve: async (id) => (id === sessionId || id === sideId ? sessionId : null) }
+      : undefined,
     interactionStore: controls,
     events,
     owner: randomUUID(),
-    authorize: async () => owner,
-    authorizePreview: async () => owner,
+    authorize: async (request) => owner && !revokedSessions.has(request.sessionId),
+    authorizePreview: async (id) => owner && !revokedSessions.has(id),
     create,
     maxSessions: 2,
     idleMs: 300000,
@@ -216,6 +233,7 @@ function setup() {
   });
   return {
     sessionId,
+    sideId,
     viewId,
     generation,
     controls,
@@ -239,8 +257,219 @@ function setup() {
     sensitive: () => {
       privatePage = true;
     },
+    revokeSession: (id: string) => {
+      revokedSessions.add(id);
+    },
   };
 }
+it('shares one browser between Main and side viewers while retaining the originating input event', async () => {
+  const f = setup(true);
+  const taken = await f.supervisor.interact({
+    sessionId: f.sideId,
+    viewId: f.viewId,
+    operation: 'take',
+  });
+  expect(taken.frame).toBeDefined();
+  expect(f.create.mock.calls[0]?.[0]).toMatchObject({ sessionId: f.sessionId });
+  const main = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: randomUUID(),
+    operation: 'state',
+  });
+  expect(main.state).toMatchObject({
+    available: true,
+    generation: taken.state.generation,
+    mode: 'human',
+    controllerId: null,
+  });
+  const applied = await f.supervisor.interact({ ...f.input(taken), sessionId: f.sideId });
+  expect(applied.input?.effect).toBe('applied');
+  expect((await f.controls.input(f.sessionId, applied.input!.requestId))?.sourceSessionId).toBe(
+    f.sideId,
+  );
+  expect(f.controls.records.has(f.sideId)).toBe(false);
+  expect((await f.events.load(f.sideId)).some((event) => event.type === 'browser/user_input')).toBe(
+    true,
+  );
+  expect(
+    (await f.events.load(f.sessionId)).some((event) => event.type === 'browser/user_input'),
+  ).toBe(false);
+  await f.supervisor.interact({
+    sessionId: f.sideId,
+    viewId: f.viewId,
+    operation: 'pause',
+    generation: taken.state.generation!,
+    epoch: taken.state.epoch,
+  });
+  expect((await f.take()).frame).toBeDefined();
+  expect(f.create).toHaveBeenCalledTimes(1);
+});
+
+it('enforces shared human control and per-chat observation fences after return to the agent', async () => {
+  const f = setup(true);
+  const taken = await f.take();
+  const side = (operation: Parameters<typeof f.model>[0] = 'navigate') => ({
+    ...f.model(operation),
+    sessionId: f.sideId,
+  });
+  expect((await f.supervisor.execute(side())).value).toMatchObject({ code: 'NOT_EXECUTED' });
+  expect(f.execute).not.toHaveBeenCalled();
+  await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'release',
+    generation: taken.state.generation!,
+    epoch: taken.state.epoch,
+  });
+  expect((await f.supervisor.execute(f.model('read_page'))).isError).toBe(false);
+  expect((await f.supervisor.execute(side('scroll'))).value).toMatchObject({
+    code: 'STALE_TARGET',
+  });
+  const read = side('read_page');
+  expect((await f.supervisor.execute(read)).value).toMatchObject({
+    sessionId: f.sideId,
+    callId: read.callId,
+  });
+  expect((await f.supervisor.execute(side('scroll'))).isError).toBe(false);
+  expect(f.journal.commands.has(`${f.sideId}/${read.callId}`)).toBe(true);
+  expect(f.journal.commands.has(`${f.sessionId}/${read.callId}`)).toBe(false);
+  expect(f.create).toHaveBeenCalledTimes(1);
+  // A later human edit invalidates each chat's prior observation receipt.
+  const again = await f.take();
+  await f.supervisor.interact(f.input(again));
+  await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'release',
+    generation: again.state.generation!,
+    epoch: again.state.epoch,
+  });
+  expect((await f.supervisor.execute(side('scroll'))).value).toMatchObject({
+    code: 'STALE_TARGET',
+  });
+});
+
+it('does not dispose the shared browser when a side chat closes or an unrelated caller is denied', async () => {
+  const f = setup(true);
+  await f.take();
+  await f.supervisor.close(f.sideId);
+  expect(f.dispose).not.toHaveBeenCalled();
+  expect(
+    (
+      await f.supervisor.interact({
+        sessionId: randomUUID(),
+        viewId: randomUUID(),
+        operation: 'take',
+      })
+    ).error?.code,
+  ).toBe('NOT_AUTHORIZED');
+  expect(
+    (await f.supervisor.execute({ ...f.model(), sessionId: randomUUID() })).value,
+  ).toMatchObject({ code: 'NOT_AUTHORIZED' });
+  expect(f.dispose).not.toHaveBeenCalled();
+  expect(
+    (await f.supervisor.interact({ sessionId: f.sideId, viewId: f.viewId, operation: 'frame' }))
+      .frame,
+  ).toBeDefined();
+  await f.supervisor.close(f.sessionId);
+  expect(f.dispose).toHaveBeenCalledTimes(1);
+});
+
+it('serializes side model work and Main takeover under the same durable browser lock', async () => {
+  const f = setup(true);
+  let entered!: () => void, complete!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    complete = resolve;
+  });
+  f.execute.mockImplementationOnce(async (request) => {
+    entered();
+    await held;
+    return result(request);
+  });
+  const model = f.supervisor.execute({ ...f.model(), sessionId: f.sideId });
+  await started;
+  const busy = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'frame',
+  });
+  expect(busy.error?.code).toBe('BUSY');
+  let taken = false;
+  const takeover = f.take().then((r) => {
+    taken = true;
+    return r;
+  });
+  await Promise.resolve();
+  expect(taken).toBe(false);
+  complete();
+  expect((await model).isError).toBe(false);
+  expect((await takeover).state.mode).toBe('human');
+  expect(f.create).toHaveBeenCalledTimes(1);
+});
+
+it('rechecks the originating side chat after reserving an input and before effects', async () => {
+  const f = setup(true);
+  const taken = await f.supervisor.interact({
+    sessionId: f.sideId,
+    viewId: f.viewId,
+    operation: 'take',
+  });
+  const input = { ...f.input(taken), sessionId: f.sideId };
+  const reserve = f.controls.reserve.bind(f.controls);
+  vi.spyOn(f.controls, 'reserve').mockImplementationOnce(async (record, key, source) => {
+    await reserve(record, key, source);
+    f.revokeSession(f.sideId);
+  });
+  expect((await f.supervisor.interact(input)).error?.code).toBe('NOT_AUTHORIZED');
+  expect(f.humanInput).not.toHaveBeenCalled();
+  expect((await f.controls.input(f.sessionId, input.requestId))?.effect).toBe('none');
+  expect((await f.controls.get(f.sessionId))?.mode).toBe('paused');
+  expect(f.dispose).not.toHaveBeenCalled();
+  expect((await f.take()).frame).toBeDefined();
+});
+
+it('keeps identical tool call IDs separate across originating chats sharing one browser', async () => {
+  const f = setup(true);
+  const main = { ...f.model(), callId: 'same-call' };
+  const side = { ...main, sessionId: f.sideId };
+  expect((await f.supervisor.execute(main)).value).toMatchObject({ sessionId: f.sessionId });
+  expect((await f.supervisor.execute(side)).value).toMatchObject({ sessionId: f.sideId });
+  expect((await f.supervisor.execute(side)).value).toMatchObject({ sessionId: f.sideId });
+  expect(f.execute).toHaveBeenCalledTimes(2);
+  expect(f.create).toHaveBeenCalledTimes(1);
+  expect(f.journal.commands.size).toBe(2);
+});
+
+it('does not replay a shared input receipt under a different originating chat', async () => {
+  const f = setup(true);
+  const taken = await f.supervisor.interact({
+    sessionId: f.sideId,
+    viewId: f.viewId,
+    operation: 'take',
+  });
+  const input = { ...f.input(taken), sessionId: f.sideId };
+  expect((await f.supervisor.interact(input)).input?.effect).toBe('applied');
+  expect((await f.supervisor.interact({ ...input, sessionId: f.sessionId })).error?.code).toBe(
+    'INPUT_SEQUENCE',
+  );
+  expect(f.humanInput).toHaveBeenCalledTimes(1);
+});
+
+it('keeps the shared browser when a side tool loses authorization before any effect', async () => {
+  const f = setup(true);
+  const side = { ...f.model(), sessionId: f.sideId };
+  f.execute.mockResolvedValueOnce(browserRuntimeFailure(side, 'NOT_AUTHORIZED'));
+  expect((await f.supervisor.execute(side)).value).toMatchObject({
+    code: 'NOT_AUTHORIZED',
+    effect: 'none',
+  });
+  expect(f.dispose).not.toHaveBeenCalled();
+  expect((await f.supervisor.execute(f.model())).isError).toBe(false);
+  expect(f.create).toHaveBeenCalledTimes(1);
+});
 it('delivers tab metadata only to the controlling view and excludes it from durable journals', async () => {
   const f = setup();
   const taken = await f.take();

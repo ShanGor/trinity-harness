@@ -80,7 +80,13 @@ export const BrowserActivity = memo(function BrowserActivity({
               : 'Browser activity recorded'}
         </span>
       </div>
-      <Button size="small" onClick={() => setOpen(true)}>
+      <Button
+        size="small"
+        onClick={() => {
+          setInteractive(Boolean(client.interactBrowser));
+          setOpen(true);
+        }}
+      >
         Open browser
       </Button>
       {open && interactive && client.interactBrowser ? (
