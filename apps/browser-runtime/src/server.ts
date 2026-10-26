@@ -74,7 +74,7 @@ export function buildBrowserRuntimeServer(
     const parsed = browserInteractionRequestSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid browser interaction' });
     if (!runtime.interact)
-      return reply.code(503).send({ error: 'browser interaction unavailable' });
+      return reply.code(501).send({ error: 'browser interaction is not configured' });
     const cancelled = new AbortController();
     const abort = (): void => {
       if (!reply.raw.writableFinished) cancelled.abort();

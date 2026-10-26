@@ -58,6 +58,7 @@ import { TurnProgress } from './turn-progress';
 import { BrowserActivity } from './browser-activity';
 import { ScheduledTasks } from './scheduled-tasks';
 import { InboxIndicator } from './inbox-indicator';
+import { PersonalComputer } from './personal-computer';
 import { loadTimelineWithPrompt } from './conversation-history';
 
 import {
@@ -135,7 +136,7 @@ export default function App() {
   const [historyWidthRatio, setHistoryWidthRatio] = useState(0.18);
   const [mode, setMode] = useState<'chat' | 'work'>('chat');
   const [page, setPage] = useState<
-    'conversation' | 'tasks' | 'history' | 'memory' | 'scheduled' | 'audit'
+    'conversation' | 'tasks' | 'history' | 'memory' | 'scheduled' | 'computer' | 'audit'
   >('conversation');
   const activityBySession = useRef(
     new Map<string, { sourceSessionId: string; sourceEventId: string; kind: 'chat' | 'work' }[]>(),
@@ -1186,6 +1187,16 @@ export default function App() {
             <span aria-hidden="true">◷</span> Scheduled
           </Button>
           <InboxIndicator client={client} onOpen={() => setPage('scheduled')} />
+          <Button
+            type="text"
+            aria-current={page === 'computer' ? 'page' : undefined}
+            onClick={() => {
+              void refreshSessions();
+              setPage('computer');
+            }}
+          >
+            Browser / VM
+          </Button>
         </nav>
         <span className="sider-section-label">Recent</span>
         <div className="history-scroll">
@@ -1446,6 +1457,16 @@ export default function App() {
 
           {page === 'scheduled' && (
             <ScheduledTasks client={client} sessions={sessions} onOpen={switchSession} />
+          )}
+          {page === 'computer' && (
+            <PersonalComputer
+              client={client}
+              sessions={sessions}
+              userId={user.id}
+              mainSessionId={mainSessionId}
+              preferredSessionId={sessionId}
+              readOnly={user.role === 'viewer'}
+            />
           )}
           {page === 'audit' && auditPanel && (
             <section className="audit-page">

@@ -21,10 +21,12 @@ export const BrowserActivity = memo(function BrowserActivity({
   client,
   sessionId,
   running,
+  standalone = false,
 }: {
   client: PreviewClient;
   sessionId: string;
   running: boolean;
+  standalone?: boolean;
 }): ReactElement {
   const [open, setOpen] = useState(false);
   const [interactive, setInteractive] = useState(Boolean(client.interactBrowser));
@@ -70,7 +72,13 @@ export const BrowserActivity = memo(function BrowserActivity({
     <section className="browser-activity" aria-label="Browser activity">
       <div>
         <strong>Browser</strong>
-        <span>{running ? 'Agent is browsing' : 'Browser activity recorded'}</span>
+        <span>
+          {standalone
+            ? 'Open, start or take control of this browser'
+            : running
+              ? 'Agent is browsing'
+              : 'Browser activity recorded'}
+        </span>
       </div>
       <Button size="small" onClick={() => setOpen(true)}>
         Open browser

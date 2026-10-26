@@ -182,6 +182,8 @@ describe.skipIf(!reachable)('durable runtime control', () => {
     });
     await store.transition(one, 'quarantined');
     expect((await store.reserve(owner, nodes)).state).toBe('quarantined');
+    // A delayed healthy status probe cannot overwrite a concurrent quarantine.
+    expect((await store.transition(one, 'running', one.state)).state).toBe('quarantined');
     await store.transition(one, 'stopped');
     const next = await store.reserve(owner, nodes);
     expect(next.nodeId).toBe(one.nodeId);

@@ -216,6 +216,7 @@ export class PgEnvironmentStore implements EnvironmentStore {
   async transition(
     record: EnvironmentRecord,
     state: EnvironmentRecord['state'],
+    expectedState?: EnvironmentRecord['state'],
   ): Promise<EnvironmentRecord> {
     return this.db.transaction(async (tx) => {
       const [row] = await tx
@@ -225,10 +226,25 @@ export class PgEnvironmentStore implements EnvironmentStore {
           and(
             eq(assistantEnvironments.id, record.id),
             eq(assistantEnvironments.generation, record.generation),
+            ...(expectedState ? [eq(assistantEnvironments.state, expectedState)] : []),
           ),
         )
         .returning();
-      if (!row) throw new Error('Environment generation changed');
+      if (!row) {
+        if (expectedState) {
+          const [current] = await tx
+            .select()
+            .from(assistantEnvironments)
+            .where(
+              and(
+                eq(assistantEnvironments.id, record.id),
+                eq(assistantEnvironments.generation, record.generation),
+              ),
+            );
+          if (current) return environmentRecordSchema.parse(current);
+        }
+        throw new Error('Environment generation changed');
+      }
       const result = environmentRecordSchema.parse(row);
       if (state !== record.state)
         await tx.insert(environmentEvents).values({

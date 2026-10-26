@@ -67,21 +67,25 @@ export class EnvironmentController implements EnvironmentPort, EnvironmentMainte
     private readonly nodes: readonly EnvironmentNode[],
     private readonly runtimes: ReadonlyMap<string, NodeRuntimePort>,
   ) {}
-  async get(identity: Identity): Promise<EnvironmentRecord | null> {
-    return this.store.run(identity, async (signal) => {
-      const record = await this.store.get(identity);
-      if (!record || record.state === 'stopped' || record.state === 'quarantined') return record;
-      const runtime = this.runtimes.get(record.nodeId);
-      if (!runtime) return record;
-      try {
-        return await this.store.transition(
-          record,
-          (await runtime.command('status', record, signal)).state,
-        );
-      } catch {
-        return this.store.transition(record, 'quarantined');
-      }
-    });
+  async get(identity: Identity, signal?: AbortSignal): Promise<EnvironmentRecord | null> {
+    return this.store.runShared(
+      identity,
+      async (active) => {
+        const record = await this.store.get(identity);
+        if (!record || record.state === 'stopped' || record.state === 'quarantined') return record;
+        const runtime = this.runtimes.get(record.nodeId);
+        if (!runtime) return record;
+        try {
+          const result = await runtime.command('status', record, active);
+          active.throwIfAborted();
+          return await this.store.transition(record, result.state, record.state);
+        } catch {
+          active.throwIfAborted();
+          return this.store.transition(record, 'quarantined', record.state);
+        }
+      },
+      signal,
+    );
   }
   private async command(
     operation: 'start' | 'stop',

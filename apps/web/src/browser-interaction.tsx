@@ -20,8 +20,14 @@ const unavailable: BrowserControlState = {
   nextSequence: 1,
 };
 type Queued =
-  | { action: BrowserHumanAction; frameId?: string; generation?: string; epoch?: number }
-  | { operation: 'take' | 'release' | 'pause' | 'reset' };
+  | {
+      action: BrowserHumanAction;
+      frameId?: string;
+      generation?: string;
+      epoch?: number;
+      composerVersion?: number;
+    }
+  | { operation: 'state' | 'take' | 'release' | 'pause' | 'reset' };
 export function mapBrowserPoint(
   rect: { left: number; top: number; width: number; height: number },
   frame: { width: number; height: number },
@@ -72,6 +78,9 @@ export function InteractiveBrowserView({
   const [message, setMessage] = useState('Connecting to browser…');
   const [pending, setPending] = useState(false);
   const [address, setAddress] = useState('https://www.google.com/');
+  const [textDraft, setTextDraft] = useState('');
+  const [insertingText, setInsertingText] = useState(false);
+  const draftVersion = useRef(0);
   const current = useRef(state),
     picture = useRef(frame);
   const queue = useRef<Queued[]>([]);
@@ -81,6 +90,7 @@ export function InteractiveBrowserView({
   const keyboard = useRef<HTMLTextAreaElement>(null);
   const addressInput = useRef<InputRef>(null);
   const composing = useRef(false);
+  const keyboardId = useRef<string | undefined>(undefined);
   const lastClick = useRef<{
     x: number;
     y: number;
@@ -96,17 +106,50 @@ export function InteractiveBrowserView({
     epoch: number;
   } | null>(null);
   const owns = state.mode === 'human' && state.controllerId === viewId;
-  const enqueue = useCallback((item: Queued): void => {
-    if (queue.current.length >= 64) {
-      setMessage('Input queue is full. Wait for the picture to refresh.');
-      return;
-    }
-    queue.current.push(item);
-    wake.current.dispatchEvent(new Event('change'));
-  }, []);
+  const enqueue = useCallback(
+    (item: Queued): boolean => {
+      if ('action' in item) {
+        const control = current.current;
+        if (control.mode !== 'human' || control.controllerId !== viewId) return false;
+        item = {
+          ...item,
+          generation: item.generation ?? control.generation ?? undefined,
+          epoch: item.epoch ?? control.epoch,
+        };
+        const last = queue.current.at(-1);
+        if (
+          item.action.type === 'text' &&
+          last &&
+          'action' in last &&
+          last.action.type === 'text' &&
+          item.composerVersion === undefined &&
+          last.composerVersion === undefined &&
+          last.generation === item.generation &&
+          last.epoch === item.epoch &&
+          last.action.text.length + item.action.text.length <= 4000
+        ) {
+          last.action = { type: 'text', text: last.action.text + item.action.text };
+          return true;
+        }
+      }
+      if (queue.current.length >= 64) {
+        setMessage('Input queue is full. Wait for the picture to refresh.');
+        return false;
+      }
+      queue.current.push(item);
+      wake.current.dispatchEvent(new Event('change'));
+      return true;
+    },
+    [viewId],
+  );
   useEffect(() => {
     const controller = new AbortController();
-    const apply = (result: BrowserInteractionResult): void => {
+    const apply = (result: BrowserInteractionResult, item?: Queued): void => {
+      if (item && 'action' in item && item.composerVersion !== undefined) {
+        setInsertingText(false);
+        if (result.input?.effect === 'applied' && draftVersion.current === item.composerVersion)
+          setTextDraft('');
+      }
       const old = current.current;
       current.current = result.state;
       setState(result.state);
@@ -115,8 +158,22 @@ export function InteractiveBrowserView({
         old.generation !== result.state.generation ||
         old.controllerId !== result.state.controllerId
       ) {
+        queue.current = [];
+        setInsertingText(false);
+        keyboardId.current = undefined;
+        composing.current = false;
+        if (keyboard.current) keyboard.current.value = '';
         picture.current = null;
         setFrame(null);
+      }
+      if (result.keyboardId) keyboardId.current = result.keyboardId;
+      if (result.input && !result.keyboardId) {
+        keyboardId.current = undefined;
+        if (!result.frame) {
+          picture.current = null;
+          queue.current = [];
+          setInsertingText(false);
+        }
       }
       if (result.frame) {
         picture.current = result.frame;
@@ -127,6 +184,7 @@ export function InteractiveBrowserView({
       ) {
         picture.current = null;
         setFrame(null);
+        if (result.error?.code === 'NOT_AUTHORIZED') setTextDraft('');
       }
       setMessage(
         result.error?.message ??
@@ -140,21 +198,35 @@ export function InteractiveBrowserView({
                   ? 'Browser control is paused'
                   : 'No browser is active. Start a browser to continue.'),
       );
-      if (result.error && !['BUSY', 'UNAVAILABLE'].includes(result.error.code)) queue.current = [];
+      if (result.error && !['BUSY', 'UNAVAILABLE'].includes(result.error.code)) {
+        queue.current = [];
+        setInsertingText(false);
+        keyboardId.current = undefined;
+      }
     };
     const watch = async (): Promise<void> => {
       let initialized = false;
       while (!controller.signal.aborted) {
+        let retryDelay = 0;
         if (document.visibilityState === 'hidden' && !queue.current.length) {
           await wait(controller.signal, wake.current, 60_000);
           continue;
         }
+        // Briefly collect adjacent text commits; keys and pointer actions keep their order.
+        const first = queue.current[0];
+        if (first && 'action' in first && first.action.type === 'text')
+          await wait(controller.signal, new EventTarget(), 35);
+        if (controller.signal.aborted) break;
         const item = queue.current.shift();
         try {
           let request: BrowserInteractionRequest;
           const control = current.current;
           if (item && 'operation' in item) {
-            if (item.operation === 'take' || item.operation === 'reset')
+            if (
+              item.operation === 'state' ||
+              item.operation === 'take' ||
+              item.operation === 'reset'
+            )
               request = { sessionId, viewId, operation: item.operation };
             else if (control.generation)
               request = {
@@ -175,6 +247,7 @@ export function InteractiveBrowserView({
             ) {
               setMessage('Wait for a fresh picture before sending input.');
               queue.current = [];
+              setInsertingText(false);
               continue;
             }
             request = {
@@ -187,6 +260,10 @@ export function InteractiveBrowserView({
               sequence: control.nextSequence,
               requestId: newId(),
               action: item.action,
+              capture: item.action.type !== 'text' && item.action.type !== 'key',
+              ...((item.action.type === 'text' || item.action.type === 'key') && keyboardId.current
+                ? { keyboardId: keyboardId.current }
+                : {}),
             };
           } else
             request = {
@@ -197,17 +274,23 @@ export function InteractiveBrowserView({
           if (item) setPending(true);
           const result = await client.interactBrowser(request, controller.signal);
           if (controller.signal.aborted) break;
-          apply(result);
+          apply(result, item);
           initialized = true;
         } catch (error) {
           if (controller.signal.aborted) break;
           const status = error instanceof Error && 'status' in error ? error.status : undefined;
-          if (status === 503 && !initialized) {
+          if (status === 501) {
             onUnsupported();
             return;
           }
+          initialized = false;
           queue.current = [];
+          setInsertingText(false);
+          keyboardId.current = undefined;
+          picture.current = null;
+          setFrame(null);
           if (status === 401 || status === 404) {
+            setTextDraft('');
             picture.current = null;
             setFrame(null);
             current.current = unavailable;
@@ -215,7 +298,12 @@ export function InteractiveBrowserView({
             setMessage('Browser access is no longer available.');
             return;
           }
-          setMessage('Connection interrupted. Input was not retried; waiting for a fresh picture…');
+          setMessage(
+            status === 503
+              ? 'Managed browser service is temporarily unavailable. Retrying the connection; input was not retried.'
+              : 'Connection interrupted. Input was not retried; waiting for a fresh picture…',
+          );
+          retryDelay = 5000;
         } finally {
           if (!controller.signal.aborted) setPending(false);
         }
@@ -223,7 +311,7 @@ export function InteractiveBrowserView({
           await wait(
             controller.signal,
             wake.current,
-            current.current.mode === 'human' ? 250 : 1000,
+            retryDelay || (current.current.mode === 'human' ? 250 : 1000),
           );
       }
     };
@@ -263,15 +351,29 @@ export function InteractiveBrowserView({
     node?.addEventListener('wheel', wheel, { passive: false });
     return () => node?.removeEventListener('wheel', wheel);
   }, [enqueue, viewId]);
-  const text = (value: string): void => {
+  const text = (value: string, composerVersion?: number): boolean => {
     if (!value || current.current.mode !== 'human' || current.current.controllerId !== viewId)
-      return;
-    for (let offset = 0; offset < value.length; offset += 4000)
-      enqueue({ action: { type: 'text', text: value.slice(offset, offset + 4000) } });
+      return false;
+    const chunks: string[] = [];
+    for (let offset = 0; offset < value.length;) {
+      let end = Math.min(offset + 4000, value.length);
+      if (end < value.length && /[\uD800-\uDBFF]/.test(value[end - 1]!)) end--;
+      chunks.push(value.slice(offset, end));
+      offset = end;
+    }
+    if (queue.current.length + chunks.length > 64) {
+      setMessage('Input queue is full. Wait for the picture to refresh.');
+      return false;
+    }
+    for (const chunk of chunks) enqueue({ action: { type: 'text', text: chunk }, composerVersion });
+    return true;
   };
   return (
     <Modal title="Browser" open onCancel={onClose} footer={null} width={1120} destroyOnHidden>
       <Space wrap className="browser-control-toolbar">
+        <Button disabled={pending} onClick={() => enqueue({ operation: 'state' })}>
+          Retry connection
+        </Button>
         <Button
           type={owns ? 'default' : 'primary'}
           disabled={pending || (state.mode === 'human' && !owns)}
@@ -418,7 +520,7 @@ export function InteractiveBrowserView({
             text(event.data);
             event.currentTarget.value = '';
           }}
-          onChange={(event) => {
+          onInput={(event) => {
             if (!composing.current) {
               text(event.currentTarget.value);
               event.currentTarget.value = '';
@@ -472,6 +574,30 @@ export function InteractiveBrowserView({
           }}
         />
       </div>
+      <label className="browser-text-composer">
+        Type text locally, then insert into the focused browser field
+        <textarea
+          aria-label="Text to insert into browser"
+          value={textDraft}
+          disabled={!owns}
+          maxLength={4000}
+          rows={3}
+          autoComplete="off"
+          onChange={(event) => {
+            draftVersion.current++;
+            setTextDraft(event.currentTarget.value);
+          }}
+        />
+      </label>
+      <Button
+        disabled={!owns || !textDraft || insertingText}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => {
+          if (text(textDraft, draftVersion.current)) setInsertingText(true);
+        }}
+      >
+        Insert text
+      </Button>
       {frame && (
         <p className="browser-preview-meta">
           Last picture{' '}

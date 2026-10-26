@@ -39,6 +39,39 @@ function fakeFetch(routes: Record<string, (init?: RequestInit) => Response>) {
 }
 
 describe('AcpClient', () => {
+  it('uses authenticated identity-owned VM routes and validates their public response', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      Response.json({ available: true, environment: null }),
+    );
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      const client = new AcpClient({ token: 'private-token' });
+      const controller = new AbortController();
+      expect(await client.getEnvironment(controller.signal)).toEqual({
+        available: true,
+        environment: null,
+      });
+      await client.changeEnvironment('wake', controller.signal);
+      await client.changeEnvironment('suspend', controller.signal);
+      expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+        '/api/me/environment',
+        '/api/me/environment/wake',
+        '/api/me/environment/suspend',
+      ]);
+      expect(fetcher.mock.calls[1]![1]).toMatchObject({
+        method: 'POST',
+        body: '{}',
+        headers: { authorization: 'Bearer private-token' },
+        signal: controller.signal,
+      });
+      fetcher.mockImplementationOnce(async () =>
+        Response.json({ available: true, environment: { state: 'ready' } }),
+      );
+      await expect(client.getEnvironment()).rejects.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it('fetches user-only preview pixels with auth, cancellation and schema validation', async () => {
     const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(init?.cache).toBe('no-store');

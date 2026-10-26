@@ -89,6 +89,15 @@ it('reports disabled scheduling/environment capabilities without inventing runna
       (await app.inject({ method: 'POST', url: '/api/me/environment/wake', payload: {} }))
         .statusCode,
     ).toBe(503);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: `/api/sessions/${randomUUID()}/browser-interaction`,
+          payload: { operation: 'state', viewId: randomUUID() },
+        })
+      ).statusCode,
+    ).toBe(501);
   } finally {
     await app.close();
   }

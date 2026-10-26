@@ -734,13 +734,29 @@ export async function buildServer(
     }
   });
 
-  app.get('/api/me/environment', async (req) =>
-    environmentResponseSchema.parse({
-      available: !!deps.environments && !!req.identity,
-      environment:
-        deps.environments && req.identity ? await deps.environments.get(req.identity) : null,
-    }),
-  );
+  app.get('/api/me/environment', async (req, reply) => {
+    if (!deps.environments || !req.identity) return { available: false, environment: null };
+    const cancelled = new AbortController();
+    const abort = (): void => {
+      if (!reply.raw.writableFinished) cancelled.abort();
+    };
+    req.raw.once('aborted', abort);
+    reply.raw.once('close', abort);
+    try {
+      const environment = await deps.environments.get(
+        req.identity,
+        AbortSignal.any([cancelled.signal, AbortSignal.timeout(10_000)]),
+      );
+      return reply
+        .header('cache-control', 'private, no-store')
+        .send(environmentResponseSchema.parse({ available: true, environment }));
+    } catch {
+      return reply.code(503).send({ error: 'environment status unavailable' });
+    } finally {
+      req.raw.removeListener('aborted', abort);
+      reply.raw.removeListener('close', abort);
+    }
+  });
   for (const action of ['wake', 'suspend'] as const)
     app.post(`/api/me/environment/${action}`, async (req, reply) => {
       if (!deps.environments || !req.identity)
@@ -2006,7 +2022,7 @@ export async function buildServer(
       )
         return reply.code(404).send({ error: 'browser unavailable' });
       if (!deps.browserInteraction)
-        return reply.code(503).send({ error: 'browser interaction unavailable' });
+        return reply.code(501).send({ error: 'browser interaction is not configured' });
       const body =
         req.body && typeof req.body === 'object' && !Array.isArray(req.body)
           ? (req.body as Record<string, unknown>)

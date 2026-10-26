@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { PNG } from 'pngjs';
 import {
@@ -17,6 +17,8 @@ import {
   type BrowserHumanCapture,
   type BrowserHumanAction,
   type BrowserFrameTarget,
+  type BrowserKeyboardTarget,
+  type BrowserHumanInputResult,
   type ToolContext,
 } from '@trinity-harness/contracts';
 import { browserExtractor } from './browser-extractor.js';
@@ -31,6 +33,7 @@ import {
   browserPointScript,
   browserPaintScript,
   browserStateScript,
+  browserFocusScript,
 } from './browser-driver-scripts.js';
 import { BrowserDriverError } from './browser-driver-error.js';
 import { ZENDRIVER_VERSION, zendriverStructured, type ZendriverClient } from './zendriver-mcp.js';
@@ -40,6 +43,7 @@ const ack = z.object({ ok: z.literal(true) });
 const CHROME_ERROR_PAGE_URL = 'chrome-error://chromewebdata/';
 /** One instance is bound to one supervisor-owned MCP connection and generation. */
 export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessPort {
+  private readonly focusKey = `__trinity_focus_${randomUUID()}`;
   constructor(
     private readonly client: ZendriverClient,
     private readonly sessionId: string,
@@ -64,6 +68,11 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
       throw new BrowserDriverError('NOT_AUTHORIZED');
     const state = await this.inspect(signal);
     return this.binding(state);
+  }
+  private async humanFocus(signal?: AbortSignal): Promise<{ revision: string; focused: boolean }> {
+    return z
+      .object({ revision: z.string().min(1).max(200), focused: z.boolean() })
+      .parse(await this.evaluate(browserFocusScript(this.focusKey, randomUUID()), signal));
   }
   private binding(state: BrowserDriverState): BrowserBinding {
     return {
@@ -91,6 +100,7 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
     if (!privateView)
       return { preview: await captureBrowserPreview(this, this, ctx, this.generation, now) };
     const binding = await this.humanBinding(ctx.signal);
+    const focusBefore = await this.humanFocus(ctx.signal);
     const before = await this.surface(binding, 'all', undefined, ctx);
     const { width, height } = before.context;
     if (width > BROWSER_LIMITS.imageDimension || height > BROWSER_LIMITS.imageDimension)
@@ -108,10 +118,12 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
     PNG.sync.read(bytes);
     const current = await this.humanBinding(ctx.signal);
     const after = await this.surface(current, 'all', undefined, ctx);
+    const focusAfter = await this.humanFocus(ctx.signal);
     const fingerprint = interactionFromSurface(before).fingerprint;
     if (
       binding.tabId !== current.tabId ||
       binding.documentRevision !== current.documentRevision ||
+      focusBefore.revision !== focusAfter.revision ||
       fingerprint !== interactionFromSurface(after).fingerprint
     )
       return { preview: { state: 'busy' } };
@@ -130,6 +142,7 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
         tabId: binding.tabId,
         documentRevision: binding.documentRevision,
         fingerprint,
+        focusRevision: focusAfter.revision,
         width,
         height,
         capturedAt,
@@ -138,27 +151,36 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
   }
   async humanInput(
     action: BrowserHumanAction,
-    target: BrowserFrameTarget,
+    target: BrowserFrameTarget | BrowserKeyboardTarget,
     ctx: ToolContext,
-  ): Promise<void> {
+  ): Promise<BrowserHumanInputResult> {
     const binding = await this.humanBinding(ctx.signal);
-    const surface = await this.surface(binding, 'all', undefined, ctx);
+    if (binding.tabId !== target.tabId || binding.documentRevision !== target.documentRevision)
+      return { effect: 'none' };
+    const keyboard = !('frameId' in target);
+    if (keyboard && action.type !== 'text' && action.type !== 'key') return { effect: 'none' };
+    if (!keyboard) {
+      const surface = await this.surface(binding, 'all', undefined, ctx);
+      if (interactionFromSurface(surface).fingerprint !== target.fingerprint)
+        return { effect: 'none' };
+    }
+    const before = await this.humanFocus(ctx.signal);
     if (
-      binding.tabId !== target.tabId ||
-      binding.documentRevision !== target.documentRevision ||
-      interactionFromSurface(surface).fingerprint !== target.fingerprint
+      (action.type === 'text' || action.type === 'key') &&
+      target.focusRevision !== undefined &&
+      before.revision !== target.focusRevision
     )
-      throw new BrowserDriverError('STALE_TARGET');
+      return { effect: 'none' };
     const inside = (p: { x: number; y: number }): boolean =>
-      p.x < target.width && p.y < target.height;
+      'frameId' in target && p.x < target.width && p.y < target.height;
     if (
       (action.type === 'click' && !inside(action.point)) ||
       (action.type === 'drag' && (!inside(action.from) || !inside(action.to)))
     )
-      throw new BrowserDriverError('STALE_TARGET');
+      return { effect: 'none' };
     if (action.type === 'navigate') {
       await this.navigate(binding, action.url, ctx);
-      return;
+      return { effect: 'applied' };
     }
     if (action.type === 'click' || action.type === 'drag') {
       const args =
@@ -183,9 +205,6 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
         ctx.signal,
       );
     } else {
-      const focused = z
-        .boolean()
-        .parse(await this.evaluate('Boolean(document.querySelector(":focus"))', ctx.signal));
       const step =
         action.type === 'text'
           ? { text: action.text }
@@ -194,12 +213,25 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
         zendriverStructured(
           await this.client.call(
             'browser_key_sequence',
-            { css: focused ? ':focus' : 'body', sequence: [step], return_snapshot: false },
+            { css: before.focused ? ':focus' : 'body', sequence: [step], return_snapshot: false },
             ctx.signal,
           ),
         ),
       );
     }
+    const current = await this.humanBinding(ctx.signal);
+    if (current.tabId !== binding.tabId || current.documentRevision !== binding.documentRevision)
+      return { effect: 'applied' };
+    const after = await this.humanFocus(ctx.signal);
+    if (action.type === 'text' && before.revision !== after.revision) return { effect: 'applied' };
+    return {
+      effect: 'applied',
+      keyboard: {
+        tabId: current.tabId,
+        documentRevision: current.documentRevision,
+        focusRevision: after.revision,
+      },
+    };
   }
   async open(signal?: AbortSignal, expectedChromeVersion = '155.0.8059.84'): Promise<void> {
     const configured = z

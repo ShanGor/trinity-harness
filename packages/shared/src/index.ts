@@ -3,6 +3,7 @@ export * from './ids.js';
 export * from './protocol.js';
 export * from './usage.js';
 export * from './workspace.js';
+export { environmentResponseSchema } from '@trinity-harness/contracts';
 export { browserPreviewSchema } from '@trinity-harness/contracts';
 export type { BrowserPreview } from '@trinity-harness/contracts';
 export {

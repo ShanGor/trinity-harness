@@ -33,9 +33,17 @@
 
 ### Managed browser 交互部署与行为
 
+左侧 **Browser / VM** 可直接打开个人会话浏览器，不依赖先前的 browser 工具调用，也不切换当前对话；现有会话草稿与流保持。页面只列出当前用户的个人会话，沿用既有 owner-only interaction / preview API。VM 面板通过 `/api/me/environment` 显示电源状态，显式 Wake / 确认 Suspend；未启用环境服务时显示 unavailable。电源状态不代表 guest/tool readiness，完整 VM 桌面观看仍未实现。
+
+VM status 与 guest RPC 共用 shared lifecycle lock，不等待整个浏览器进程结束；start/stop 继续使用 exclusive lock。状态同步使用 PG expected-state / generation 比较，旧 status 不能覆盖并发 quarantine；用户断线 / 10 秒 status deadline 不会把 VM 标成 quarantine，Web 读取有 15 秒超时。
+
+HTTP 501 表示 interaction 未配置，可使用只读 preview；503 表示临时不可达，保留交互窗口并以五秒间隔重连或点击 Retry connection。重连只读 state，不自动重试 Take control 或任何输入；旧画面与待执行输入在连接失败后失效，本地文本草稿保留。部署匹配的 Web/server/worker/browser-runtime；常驻的 browser-runtime 服务需要重启加载 adapter 更新，不能仅依赖 Web 热更新。
+
 先应用 migration `0016_great_gressill.sql`，再部署匹配的 browser-runtime、server、worker 和 Web。`BrowserInteractionPort` 与 Zod DTO 定义在 contracts；浏览器运行时私有 `/interaction` 仅接受既有 runtime token；BFF `/api/sessions/:id/browser-interaction` 仅允许真实个人 session owner。前端不得提交 owner、宿主路径、CDP endpoint、JS 或 selector。legacy CDP 和旧部署继续使用只读 preview。
 
-Take control 等待已准入的 Agent 操作结束，然后进入 human epoch；一个 view 同时持有控制权。输入要求匹配 generation、epoch、递增 sequence、request UUID 和最近 5 秒内的 frame；运行时复核 tab / document / fingerprint。PG 预留输入后才执行，重复 request 不再产生网站 effect；失败或崩溃保留 unknown / quarantined，需显式接管观察。只记录 actor / 控制状态 / effect metadata，不保存键入文字、URL 或图片。关闭 / 隐藏页面或 15 秒控制租约到期后暂停，不自动把控制还给 Agent；显式 Return control 后，使用旧页面目标的交互必须先取得新观察；navigate / web_search 自身会产生新观察，可以直接继续，不需要为恢复 stale state 再问用户 go-ahead。Viewer 断线不会中止已准入的截图并杀死 Chrome。
+Take control 等待已准入的 Agent 操作结束，然后进入 human epoch；一个 view 同时持有控制权。输入要求匹配 generation、epoch、递增 sequence 和 request UUID。基于画面的动作要求最近 5 秒内的 frame，运行时复核 tab / document / fingerprint；连续 text/key 可使用 runtime 签发、PG 持久化的 opaque keyboardId，每次仍复核 owned tab / document / focus revision，受当前 controller 与 15 秒控制租约约束。焦点移走再返回也会失效；keyboardId 不能授权坐标动作或导航。PG 预留输入后才执行，重复 request 不再产生网站 effect；已确认的执行前 stale target 记录 none，不确定的执行失败或崩溃保留 unknown / quarantined，需显式接管观察。只记录 actor / 控制状态 / effect metadata，不保存键入文字、URL 或图片。关闭 / 隐藏页面或控制租约到期后暂停，不自动把控制还给 Agent；显式 Return control 后，使用旧页面目标的交互必须先取得新观察；navigate / web_search 自身会产生新观察，可以直接继续，不需要为恢复 stale state 再问用户 go-ahead。Viewer 断线不会中止已准入的截图并杀死 Chrome。
+
+Web 对 text/key 使用 `capture: false`，ack 返回 effect 与可用的新 keyboardId，不等待 PNG；指针动作仍请求更新画面。输入队列优先于空闲截图轮询，相邻文本在 35ms 窗口合并，不跨按键、指针或控制权边界；IME composition 只提交完成文本，粘贴与 Enter/Tab 保持顺序。可在 “Type text locally” 文本框本地编辑，点击 “Insert text” 插入远端焦点；不会自动发送 Enter，轮询和待执行输入不会重建文本框或覆盖本地草稿。草稿仅在确认插入且用户未继续编辑后清空；结果未知时保留文本，不自动重发。截图仍走同一 browser lock，不是独立视频通道，也不保证固定刷新率。新增 DTO 字段要求部署匹配的 Web/server/worker/browser-runtime；旧 PG JSON controls 自动默认 keyboard=null，无需新 migration。
 
 用户明确接管后可在私有视图处理登录输入；观看者的敏感页面预览仍被抑制。截图只发给用户，不写入证据或模型上下文。人类操作会使当前 browser 状态凭据失效，已保存的 immutable sources 保持可引用。整个桌面、WebRTC、uinput 和跨任意 guest 程序的全局互斥尚未实现；当前机制仅覆盖私有 managed browser adapter，维持 `trusted-managed` 标签。
 

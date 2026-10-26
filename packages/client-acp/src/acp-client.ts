@@ -13,6 +13,7 @@ import {
   browserInteractionResultSchema,
   scheduleListSchema,
   inboxListSchema,
+  environmentResponseSchema,
 } from '@trinity-harness/shared';
 import type {
   ServerEvent,
@@ -144,6 +145,26 @@ export class AcpClient {
   }
   async getSchedules(): Promise<ReturnType<typeof scheduleListSchema.parse>> {
     return scheduleListSchema.parse(await this.assistantRequest('/api/schedules'));
+  }
+  async getEnvironment(
+    signal?: AbortSignal,
+  ): Promise<ReturnType<typeof environmentResponseSchema.parse>> {
+    return environmentResponseSchema.parse(
+      await this.assistantRequest(
+        '/api/me/environment',
+        'GET',
+        undefined,
+        AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(15_000)]),
+      ),
+    );
+  }
+  async changeEnvironment(
+    action: 'wake' | 'suspend',
+    signal?: AbortSignal,
+  ): Promise<ReturnType<typeof environmentResponseSchema.parse>> {
+    return environmentResponseSchema.parse(
+      await this.assistantRequest(`/api/me/environment/${action}`, 'POST', {}, signal),
+    );
   }
   async createSchedule(input: ScheduleCreate): Promise<void> {
     await this.assistantRequest('/api/schedules', 'POST', input);

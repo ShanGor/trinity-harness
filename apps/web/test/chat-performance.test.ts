@@ -16,6 +16,7 @@ const fake = vi.hoisted(() => ({
   respondApproval: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ ok: true as const, alreadyStopped: false })),
   getBrowserPreview: vi.fn(async () => ({ state: 'unavailable' as const })),
+  getEnvironment: vi.fn(async () => ({ available: false, environment: null })),
 }));
 
 vi.mock('react-markdown', () => ({
@@ -42,6 +43,7 @@ vi.mock('@trinity-harness/client-acp', () => ({
     getSchedules = async () => ({ available: false, schedules: [] });
     getInbox = async () => ({ available: false, items: [] });
     getBrowserPreview = fake.getBrowserPreview;
+    getEnvironment = fake.getEnvironment;
     createSession = fake.createSession;
     ensureMainChat = async () => 'main-session';
     getTimeline = fake.getTimeline;
@@ -115,6 +117,7 @@ beforeEach(async () => {
   fake.sendPrompt.mockClear();
   fake.cancelTurn.mockClear();
   fake.getBrowserPreview.mockClear();
+  fake.getEnvironment.mockClear();
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -133,6 +136,21 @@ afterEach(async () => {
 });
 
 describe('chat typing and streaming performance', () => {
+  it('opens Browser / VM from the sidebar without replacing the conversation draft', async () => {
+    const composer = container.querySelector('textarea')!;
+    await type(composer, 'Keep my unfinished conversation');
+    await click(
+      [...container.querySelectorAll('nav button')].find(
+        (button) => button.textContent === 'Browser / VM',
+      )!,
+    );
+    expect(document.body.textContent).toContain('Virtual machine');
+    expect(fake.getEnvironment).toHaveBeenCalledOnce();
+    expect(composer.isConnected).toBe(true);
+    await click(container.querySelector('.new-chat-button'));
+    expect(container.querySelector('textarea')).toBe(composer);
+    expect(composer.value).toBe('Keep my unfinished conversation');
+  });
   it('creates side Chat with workspace-write permissions', async () => {
     await type(container.querySelector('textarea')!, 'Save research notes');
     await click(container.querySelector('.ant-sender-actions-btn'));

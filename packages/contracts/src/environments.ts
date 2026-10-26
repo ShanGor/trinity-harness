@@ -100,10 +100,12 @@ export interface EnvironmentStore {
   transition(
     record: EnvironmentRecord,
     state: EnvironmentRecord['state'],
+    /** Status probes retain a concurrent state change rather than overwriting it. */
+    expectedState?: EnvironmentRecord['state'],
   ): Promise<EnvironmentRecord>;
 }
 export interface EnvironmentPort {
-  get(identity: Identity): Promise<EnvironmentRecord | null>;
+  get(identity: Identity, signal?: AbortSignal): Promise<EnvironmentRecord | null>;
   wake(identity: Identity, signal?: AbortSignal): Promise<EnvironmentRecord>;
   suspend(identity: Identity, signal?: AbortSignal): Promise<EnvironmentRecord | null>;
 }

@@ -7,6 +7,8 @@ import type {
   BrowserHumanCapture,
   BrowserHumanAction,
   BrowserFrameTarget,
+  BrowserKeyboardTarget,
+  BrowserHumanInputResult,
 } from './browser-interaction.js';
 
 const path = z.array(z.number().int().nonnegative()).max(80);
@@ -144,8 +146,8 @@ export interface ManagedBrowserSession {
   humanFrame?(privateView: boolean, signal: AbortSignal): Promise<BrowserHumanCapture>;
   humanInput?(
     action: BrowserHumanAction,
-    target: BrowserFrameTarget,
+    target: BrowserFrameTarget | BrowserKeyboardTarget,
     signal: AbortSignal,
-  ): Promise<void>;
+  ): Promise<BrowserHumanInputResult | void>;
   dispose(): Promise<void>;
 }

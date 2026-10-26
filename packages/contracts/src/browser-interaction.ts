@@ -75,6 +75,8 @@ export const browserInteractionRequestSchema = z.discriminatedUnion('operation',
       requestId: z.uuid(),
       sequence: z.number().int().positive(),
       frameId: z.uuid(),
+      keyboardId: z.uuid().optional(),
+      capture: z.boolean().optional(),
       action: browserHumanActionSchema,
     })
     .strict(),
@@ -101,6 +103,7 @@ export const browserInteractionResultSchema = z
   .object({
     state: browserControlStateSchema,
     frame: browserInteractionFrameSchema.optional(),
+    keyboardId: z.uuid().optional(),
     error: z
       .object({
         code: z.enum([
@@ -131,12 +134,28 @@ export const browserFrameTargetSchema = z
     tabId: z.string().max(200),
     documentRevision: z.string().max(200),
     fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    focusRevision: z.string().min(1).max(200).optional(),
     width: z.number().int().positive().max(2048),
     height: z.number().int().positive().max(2048),
     capturedAt: z.iso.datetime(),
   })
   .strict();
 export type BrowserFrameTarget = z.infer<typeof browserFrameTargetSchema>;
+export const browserKeyboardTargetSchema = z
+  .object({
+    tabId: z.string().max(200),
+    documentRevision: z.string().max(200),
+    focusRevision: z.string().min(1).max(200),
+  })
+  .strict();
+export type BrowserKeyboardTarget = z.infer<typeof browserKeyboardTargetSchema>;
+export const browserHumanInputResultSchema = z.discriminatedUnion('effect', [
+  z.object({ effect: z.literal('none') }).strict(),
+  z
+    .object({ effect: z.literal('applied'), keyboard: browserKeyboardTargetSchema.optional() })
+    .strict(),
+]);
+export type BrowserHumanInputResult = z.infer<typeof browserHumanInputResultSchema>;
 export const browserControlRecordSchema = z
   .object({
     sessionId: z.uuid(),
@@ -148,6 +167,11 @@ export const browserControlRecordSchema = z
     sequence: z.number().int().nonnegative(),
     frame: browserFrameTargetSchema.nullable(),
     frames: z.array(browserFrameTargetSchema).max(8).default([]),
+    keyboard: z
+      .object({ id: z.uuid(), target: browserKeyboardTargetSchema })
+      .strict()
+      .nullable()
+      .default(null),
     needsObservation: z.boolean().default(false),
   })
   .strict();

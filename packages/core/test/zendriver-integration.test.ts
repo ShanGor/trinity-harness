@@ -149,13 +149,25 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
         x: target.box.x + target.box.width / 2,
         y: target.box.y + target.box.height / 2,
       });
-      await driver.humanInput(
+      const clicked = await driver.humanInput(
         { type: 'click', point: point(input), button: 'left', count: 1, modifiers: [] },
         await frame(),
         ctx,
       );
-      await driver.humanInput({ type: 'key', key: 'a', modifiers: ['ctrl'] }, await frame(), ctx);
-      await driver.humanInput({ type: 'text', text: 'Human 世界' }, await frame(), ctx);
+      if (clicked.effect !== 'applied' || !clicked.keyboard) throw new Error('No keyboard target');
+      const selected = await driver.humanInput(
+        { type: 'key', key: 'a', modifiers: ['ctrl'] },
+        clicked.keyboard,
+        ctx,
+      );
+      if (selected.effect !== 'applied' || !selected.keyboard)
+        throw new Error('No keyboard target');
+      const typed = await driver.humanInput(
+        { type: 'text', text: 'Human 世界' },
+        selected.keyboard,
+        ctx,
+      );
+      expect(typed.effect).toBe('applied');
       expect(
         (
           await connection.call(

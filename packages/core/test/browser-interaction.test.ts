@@ -11,6 +11,7 @@ import {
   type BrowserRuntimeResult,
   type BrowserHumanCapture,
   type BrowserInteractionResult,
+  type BrowserHumanInputResult,
 } from '@trinity-harness/contracts';
 import { ManagedBrowserSupervisor, MemorySessionStore } from '../src/index.js';
 
@@ -135,7 +136,7 @@ function setup() {
   let time = Date.parse('2026-10-26T00:00:00Z');
   let owner = true;
   let privatePage = false;
-  const humanInput = vi.fn(async () => undefined),
+  const humanInput = vi.fn(async (): Promise<BrowserHumanInputResult | void> => undefined),
     execute = vi.fn(async (request: BrowserRuntimeRequest) => result(request)),
     dispose = vi.fn(async () => undefined);
   const capture = vi.fn(async (privateView: boolean): Promise<BrowserHumanCapture> =>
@@ -530,4 +531,80 @@ it('stops owned Chrome when a lease timer cannot read its durable control state'
   } finally {
     spy.mockRestore();
   }
+});
+
+it('acknowledges inputs without capture and fences consecutive keyboard input independently of frames', async () => {
+  const f = setup(),
+    taken = await f.take();
+  const keyboard = { tabId: 'tab', documentRevision: 'revision', focusRevision: 'focus:1' };
+  f.humanInput.mockResolvedValue({ effect: 'applied', keyboard });
+  const first = await f.supervisor.interact({ ...f.input(taken), capture: false });
+  expect(first.input?.effect).toBe('applied');
+  expect(first.frame).toBeUndefined();
+  expect(first.keyboardId).toBeDefined();
+  expect(f.capture).toHaveBeenCalledTimes(1);
+  expect((await f.controls.get(f.sessionId))?.frames).toEqual([]);
+  f.advance(6000);
+  const next = {
+    ...f.input(taken),
+    sequence: first.state.nextSequence,
+    capture: false,
+    keyboardId: first.keyboardId,
+  };
+  for (const patch of [
+    { keyboardId: randomUUID() },
+    {
+      action: {
+        type: 'click' as const,
+        point: { x: 10, y: 10 },
+        button: 'left' as const,
+        count: 1,
+        modifiers: [],
+      },
+    },
+    { keyboardId: undefined },
+  ])
+    expect((await f.supervisor.interact({ ...next, ...patch })).error?.code).toBe('STALE_FRAME');
+  expect(f.humanInput).toHaveBeenCalledTimes(1);
+  const second = await f.supervisor.interact(next);
+  expect(second.input?.effect).toBe('applied');
+  expect(f.humanInput).toHaveBeenLastCalledWith(next.action, keyboard, expect.any(AbortSignal));
+  expect(second.keyboardId).not.toBe(first.keyboardId);
+  expect(f.capture).toHaveBeenCalledTimes(1);
+  const replay = await f.supervisor.interact(next);
+  expect(replay.input?.effect).toBe('applied');
+  expect(f.humanInput).toHaveBeenCalledTimes(2);
+  expect(
+    (
+      await f.supervisor.interact({
+        ...next,
+        requestId: randomUUID(),
+        sequence: second.state.nextSequence,
+      })
+    ).error?.code,
+  ).toBe('STALE_FRAME');
+  const viewer = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: randomUUID(),
+    operation: 'frame',
+  });
+  expect(viewer.keyboardId).toBeUndefined();
+});
+
+it('journals a driver-rejected stale focus as no effect and never reexecutes that request', async () => {
+  const f = setup(),
+    taken = await f.take();
+  f.humanInput.mockResolvedValue({ effect: 'none' });
+  const request = { ...f.input(taken), capture: false };
+  const result = await f.supervisor.interact(request);
+  expect(result).toMatchObject({
+    error: { code: 'STALE_FRAME' },
+    input: { effect: 'none' },
+    state: { mode: 'human' },
+  });
+  expect((await f.controls.get(f.sessionId))?.keyboard).toBeNull();
+  expect((await f.controls.input(f.sessionId, request.requestId))?.effect).toBe('none');
+  expect((await f.supervisor.interact(request)).input?.effect).toBe('none');
+  expect(f.humanInput).toHaveBeenCalledTimes(1);
+  expect(f.capture).toHaveBeenCalledTimes(1);
 });

@@ -405,6 +405,7 @@ export class ManagedBrowserSupervisor
       record.expiresAt = null;
       record.frame = null;
       record.frames = [];
+      record.keyboard = null;
       await this.options.interactionStore!.put(record);
       await this.controlEvent(record);
       this.armIdle(sessionId);
@@ -485,6 +486,7 @@ export class ManagedBrowserSupervisor
                 expiresAt: null,
                 frame: null,
                 frames: [],
+                keyboard: null,
                 needsObservation: true,
               };
               await this.options.interactionStore!.put(record);
@@ -545,6 +547,7 @@ export class ManagedBrowserSupervisor
               sequence: 0,
               frame: null,
               frames: [],
+              keyboard: null,
               needsObservation: false,
             };
             await this.options.interactionStore!.put(record);
@@ -572,6 +575,7 @@ export class ManagedBrowserSupervisor
               expiresAt: new Date(this.now().getTime() + 15_000).toISOString(),
               frame: null,
               frames: [],
+              keyboard: null,
             };
             await this.options.interactionStore!.put(record);
             await this.controlEvent(record);
@@ -599,6 +603,7 @@ export class ManagedBrowserSupervisor
               epoch: record.epoch + 1,
               frame: null,
               frames: [],
+              keyboard: null,
               needsObservation: true,
             };
             await this.options.interactionStore!.put(record);
@@ -637,16 +642,25 @@ export class ManagedBrowserSupervisor
                 'INPUT_SEQUENCE',
                 'Input sequence is stale or out of order. Refresh the browser.',
               );
-            const target =
-              record.frames.find((frame) => frame.frameId === request.frameId) ??
-              (record.frame?.frameId === request.frameId ? record.frame : undefined);
-            if (!target || this.now().getTime() - Date.parse(target.capturedAt) > 5_000)
+            const target = request.keyboardId
+              ? (request.action.type === 'text' || request.action.type === 'key') &&
+                record.keyboard?.id === request.keyboardId
+                ? record.keyboard.target
+                : undefined
+              : (record.frames.find((frame) => frame.frameId === request.frameId) ??
+                (record.frame?.frameId === request.frameId ? record.frame : undefined));
+            if (
+              !target ||
+              ('capturedAt' in target &&
+                this.now().getTime() - Date.parse(target.capturedAt) > 5_000)
+            )
               return fail('STALE_FRAME', 'The picture is stale. Refresh before sending input.');
             record = {
               ...record,
               sequence: request.sequence,
               frame: null,
               frames: [],
+              keyboard: null,
               expiresAt: new Date(this.now().getTime() + 15_000).toISOString(),
               needsObservation: true,
             };
@@ -655,7 +669,27 @@ export class ManagedBrowserSupervisor
               request.requestId,
             );
             try {
-              await session.humanInput(request.action, target, operationSignal);
+              const outcome = await session.humanInput(request.action, target, operationSignal);
+              if (outcome?.effect === 'none') {
+                await this.options.interactionStore!.finish(
+                  request.sessionId,
+                  request.requestId,
+                  'none',
+                );
+                await this.options.interactionStore!.put(record);
+                return {
+                  ...fail(
+                    'STALE_FRAME',
+                    'Browser focus or page changed. Inspect a fresh picture before continuing.',
+                  ),
+                  input: { requestId: request.requestId, effect: 'none' },
+                };
+              }
+              if (outcome?.effect === 'applied' && outcome.keyboard)
+                record.keyboard = {
+                  id: randomUUID(),
+                  target: outcome.keyboard,
+                };
               await this.options.events?.append(request.sessionId, [
                 {
                   type: 'browser/user_input',
@@ -683,6 +717,7 @@ export class ManagedBrowserSupervisor
                 expiresAt: null,
                 frame: null,
                 frames: [],
+                keyboard: null,
               };
               await this.options.interactionStore!.put(record);
               await this.options.events?.append(request.sessionId, [
@@ -707,6 +742,12 @@ export class ManagedBrowserSupervisor
           }
           if (!(await this.options.authorizePreview!(request.sessionId, operationSignal)))
             return failure('NOT_AUTHORIZED', 'Browser ownership changed.');
+          if (request.operation === 'input' && request.capture === false)
+            return {
+              state: this.controlState(record, request.viewId),
+              input: { requestId: request.requestId, effect: 'applied' },
+              ...(record.keyboard ? { keyboardId: record.keyboard.id } : {}),
+            };
           if (['frame', 'take', 'input'].includes(request.operation)) {
             const privateView = record.mode === 'human' && record.controllerId === request.viewId;
             if (privateView)
@@ -744,6 +785,7 @@ export class ManagedBrowserSupervisor
                   expiresAt: null,
                   frame: null,
                   frames: [],
+                  keyboard: null,
                 };
                 await this.options.interactionStore!.put(record);
                 await this.controlEvent(record);
@@ -757,6 +799,7 @@ export class ManagedBrowserSupervisor
             return {
               state: this.controlState(record, request.viewId),
               frame: { ...captured.preview, frameId, epoch: record.epoch },
+              ...(privateView && record.keyboard ? { keyboardId: record.keyboard.id } : {}),
               ...(request.operation === 'input'
                 ? { input: { requestId: request.requestId, effect: 'applied' as const } }
                 : {}),
@@ -885,6 +928,7 @@ export class ManagedBrowserSupervisor
         needsObservation: false,
         frame: null,
         frames: [],
+        keyboard: null,
       });
     active.throwIfAborted();
     if (result.isError) await this.destroy(request.sessionId);

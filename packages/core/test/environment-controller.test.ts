@@ -8,6 +8,52 @@ import {
 } from '@trinity-harness/contracts';
 import { EnvironmentController, HttpNodeRuntime } from '../src/index.js';
 
+it('reads status alongside guest traffic and does not quarantine a cancelled status read', async () => {
+  const identity: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'developer' };
+  const record: EnvironmentRecord = {
+    id: randomUUID(),
+    generation: randomUUID(),
+    tenantId: identity.tenantId,
+    userId: identity.userId,
+    nodeId: 'host',
+    state: 'running',
+    vcpus: 2,
+    memoryMiB: 2048,
+  };
+  const store: EnvironmentStore = {
+    run: vi.fn(async () => {
+      throw new Error('exclusive lifecycle lock is held by guest traffic');
+    }),
+    runShared: vi.fn(async (_identity, action, signal) =>
+      action(signal ?? new AbortController().signal),
+    ),
+    get: async () => record,
+    reserve: async () => record,
+    authorizeNode: async () => true,
+    isNodeDraining: async () => false,
+    beginNodeDrain: async () => undefined,
+    endNodeDrain: async () => undefined,
+    listNodeEnvironments: async () => [record],
+    transition: vi.fn(async (_previous, state) => ({ ...record, state })),
+  };
+  const cancel = new AbortController();
+  const command = vi.fn(async () => ({ generation: record.generation, state: 'running' as const }));
+  const controller = new EnvironmentController(store, [], new Map([['host', { command }]]));
+  expect(await controller.get(identity, cancel.signal)).toEqual(record);
+  expect(store.run).not.toHaveBeenCalled();
+  expect(store.runShared).toHaveBeenCalledWith(identity, expect.any(Function), cancel.signal);
+  expect(store.transition).toHaveBeenCalledWith(record, 'running', 'running');
+  vi.mocked(store.transition).mockClear();
+  command.mockImplementationOnce(async () => {
+    cancel.abort();
+    throw new Error('cancelled');
+  });
+  await expect(controller.get(identity, cancel.signal)).rejects.toMatchObject({
+    name: 'AbortError',
+  });
+  expect(store.transition).not.toHaveBeenCalled();
+});
+
 it('quarantines uncertain starts and never assigns another host on retry', async () => {
   const identity: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'developer' };
   let record: EnvironmentRecord = {
