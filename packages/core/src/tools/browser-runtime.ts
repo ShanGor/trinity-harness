@@ -525,6 +525,26 @@ export class ManagedBrowserSupervisor
         }
       }
       const intervention = running?.intervention?.closed ? undefined : running?.intervention;
+      const viewingSession = this.sessions.get(scope);
+      if (request.operation === 'frame' && viewingSession?.readOnlyFrame && !intervention) {
+        if (!(await this.canView(request.sessionId, scope, active)))
+          return failure('NOT_AUTHORIZED', 'Browser ownership is unavailable.');
+        const record = await this.options.interactionStore.get(scope);
+        if (record?.mode !== 'human')
+          return await this.options.store.run(
+            `desktop:${scope}`,
+            (lockSignal) =>
+              this.readOnlyFrame(
+                request,
+                scope,
+                viewingSession,
+                AbortSignal.any([active, lockSignal]),
+              ),
+            active,
+          );
+        if (record.controllerId !== request.viewId)
+          return failure('NOT_CONTROLLER', 'Another view controls this browser.', record);
+      }
       if (['state', 'frame'].includes(request.operation) && running && !intervention) {
         if (!(await this.canView(request.sessionId, scope, active)))
           return failure('NOT_AUTHORIZED', 'Browser ownership is unavailable.');
@@ -951,6 +971,71 @@ export class ManagedBrowserSupervisor
       if (activated && !takeCommitted) activated.release();
       signal?.removeEventListener('abort', disconnect);
     }
+  }
+  private async readOnlyFrame(
+    request: BrowserInteractionRequest,
+    scope: string,
+    session: ManagedBrowserSession,
+    signal: AbortSignal,
+  ): Promise<BrowserInteractionResult> {
+    const before = await this.options.interactionStore!.get(scope);
+    const state = (record: BrowserControlRecord | null): BrowserControlState =>
+      record
+        ? this.controlState(record, request.viewId)
+        : {
+            ...this.controlState(),
+            available: true,
+            mode: 'agent',
+            generation: session.generation,
+          };
+    const failure = (
+      code: NonNullable<BrowserInteractionResult['error']>['code'],
+      message: string,
+    ): BrowserInteractionResult => ({ state: state(before), error: { code, message } });
+    const valid = async (): Promise<boolean> => {
+      const binding = await this.options.store.binding(scope);
+      return (
+        (await this.canView(request.sessionId, scope, signal)) &&
+        this.sessions.get(scope) === session &&
+        !this.stopping.has(session) &&
+        binding?.status === 'active' &&
+        binding.owner === this.options.owner &&
+        binding.generation === session.generation
+      );
+    };
+    if (!(await valid()))
+      return {
+        state: this.controlState(),
+        error: { code: 'NOT_AUTHORIZED', message: 'Browser ownership is unavailable.' },
+      };
+    if (before?.mode === 'human')
+      return failure('NOT_CONTROLLER', 'Another view controls this browser.');
+    if (before && before.generation !== session.generation)
+      return failure('UNAVAILABLE', 'Browser picture binding changed. Refresh the browser.');
+    const preview = browserPreviewSchema.parse(await session.readOnlyFrame!(signal));
+    const after = await this.options.interactionStore!.get(scope);
+    signal.throwIfAborted();
+    if (!(await valid()))
+      return {
+        state: this.controlState(),
+        error: { code: 'NOT_AUTHORIZED', message: 'Browser ownership changed.' },
+      };
+    if (
+      after?.epoch !== before?.epoch ||
+      after?.generation !== before?.generation ||
+      after?.mode !== before?.mode ||
+      after?.controllerId !== before?.controllerId
+    )
+      return {
+        state: state(after),
+        error: { code: 'BUSY', message: 'Browser control changed. Waiting for a fresh picture…' },
+      };
+    if (preview.state !== 'frame' || preview.generation !== session.generation)
+      return failure('UNAVAILABLE', 'A fresh browser picture is unavailable.');
+    return {
+      state: state(after),
+      frame: { ...preview, frameId: randomUUID(), epoch: after?.epoch ?? 0, surface: 'desktop' },
+    };
   }
   private stop(session: ManagedBrowserSession): Promise<void> {
     let pending = this.stopping.get(session);

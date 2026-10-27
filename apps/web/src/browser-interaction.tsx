@@ -226,8 +226,21 @@ export function InteractiveBrowserView({
         keyboardId.current = undefined;
         composing.current = false;
         if (keyboard.current) keyboard.current.value = '';
+        // A successful desktop handoff keeps the last pixels visible while
+        // polling obtains a read-only frame. Old input targets still expire.
+        const keepDesktopPicture =
+          item &&
+          'operation' in item &&
+          item.operation === 'release' &&
+          !result.error &&
+          old.mode === 'human' &&
+          old.controllerId === viewId &&
+          old.generation === result.state.generation &&
+          result.state.available &&
+          result.state.mode === 'agent' &&
+          picture.current?.surface === 'desktop';
         picture.current = null;
-        setFrame(null);
+        if (!keepDesktopPicture) setFrame(null);
       }
       if (result.state.mode !== 'human') cancelPointer();
       if (result.keyboardId) keyboardId.current = result.keyboardId;
@@ -259,7 +272,7 @@ export function InteractiveBrowserView({
           (result.state.mode === 'human' && result.state.controllerId === viewId
             ? 'You control the browser'
             : result.state.mode === 'agent'
-              ? 'Agent controls the browser'
+              ? 'Watching in read-only mode · Agent controls the browser'
               : result.state.mode === 'quarantined'
                 ? 'Input outcome is unknown. Take control to inspect the browser before continuing.'
                 : result.state.available
@@ -462,14 +475,9 @@ export function InteractiveBrowserView({
   useEffect(() => {
     const node = viewport.current;
     const wheel = (event: WheelEvent): void => {
-      if (
-        current.current.mode !== 'human' ||
-        current.current.controllerId !== viewId ||
-        !picture.current
-      )
-        return;
-      event.preventDefault();
+      if (!picture.current) return;
       if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
         cancelPointer();
         setZoom((value) =>
           Math.max(0.5, Math.min(4, (value ?? 1) + (event.deltaY < 0 ? 0.25 : -0.25))),
@@ -477,10 +485,13 @@ export function InteractiveBrowserView({
         return;
       }
       if (panView && zoom !== null) {
+        event.preventDefault();
         cancelPointer();
         node?.scrollBy({ left: event.deltaX, top: event.deltaY });
         return;
       }
+      if (current.current.mode !== 'human' || current.current.controllerId !== viewId) return;
+      event.preventDefault();
       if (pointer.current) return;
       const point =
         picture.current.surface === 'desktop' && image.current
@@ -807,7 +818,7 @@ export function InteractiveBrowserView({
             <img
               ref={image}
               className="browser-preview-image"
-              alt="Interactive browser viewport"
+              alt={owns ? 'Interactive browser viewport' : 'Read-only browser viewport'}
               draggable={false}
               width={frame.width}
               height={frame.height}

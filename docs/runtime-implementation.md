@@ -53,6 +53,8 @@ Tabs created by Chrome's native bookmark manager also require the pinned `zendri
 
 Closing and reopening the viewer rechecks interactive support after a previous HTTP 501 fallback. An unconfigured response applies only to that opening; it does not permanently remove Start / Take control from the mounted Browser activity. Reopening only reads state and never automatically starts a browser or takes control.
 
+The desktop viewer also shows the owner's existing browser in read-only mode before takeover and after return to the agent, including during agent commands. Watching does not change control or authorize input. Another human-controlled view remains private; ownership, runtime generation or control changes invalidate in-flight pictures. Deploy matching contracts/core, Web and Browser Runtime and restart the resident runtime. This change needs no guest image or database migration.
+
 A browser-start HTTP 503 can also originate from a quarantined guest even when Browser Runtime is healthy. After a host reboot, check gateway/proxy/DNS readiness and the environment's ephemeral network namespace. Preserve the existing volume and use the explicit [development network recovery procedure](../deploy/firecracker/README.md#whole-guest-egress-with-sandbox_proxy_url) behind the maintenance/confirmed-stop gate; a frontend retry cannot repair host networking.
 
 先应用 migration `0016_great_gressill.sql`，再部署匹配的 browser-runtime、server、worker 和 Web。`BrowserInteractionPort` 与 Zod DTO 定义在 contracts；浏览器运行时私有 `/interaction` 仅接受既有 runtime token；BFF `/api/sessions/:id/browser-interaction` 仅允许真实个人 session owner。前端不得提交 owner、宿主路径、CDP endpoint、JS 或 selector。legacy CDP 和旧部署继续使用只读 preview。

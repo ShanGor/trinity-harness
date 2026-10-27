@@ -151,6 +151,8 @@ export interface ManagedBrowserSession {
   /** Fence further calls in an in-flight agent operation without cancelling its current call. */
   fenceAgent?(): boolean;
   preview?(signal: AbortSignal): Promise<BrowserPreview>;
+  /** User-only desktop pixels, independent of agent calls; never grants input targets. */
+  readOnlyFrame?(signal: AbortSignal): Promise<BrowserPreview>;
   humanFrame?(privateView: boolean, signal: AbortSignal): Promise<BrowserHumanCapture>;
   /** A non-mutating handoff check, independent of any blocked private capture. */
   humanHandoff?(signal: AbortSignal): Promise<BrowserHumanCapture>;

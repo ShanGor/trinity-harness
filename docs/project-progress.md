@@ -5,6 +5,13 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Read-only desktop watching (2026-10-27)
+
+- [x] The desktop viewer shows the owner's existing browser before takeover and after return, including during agent commands. An independent bounded desktop capture keeps watch pixels out of control targets, event history and model evidence; ownership, generation and control changes discard in-flight pictures. Another human-controlled view remains private, and remote input still requires explicit takeover and a fresh input frame.
+- [x] Validation: 140 relevant deterministic tests, repository lint/typecheck and the production Web build passed (existing bundle-size warning). Agent-browser checked a disposable read-only viewer and explicit takeover; no live owner pixels or user input were inspected or replayed.
+- [x] Removed the blank flash on returning desktop control: a successful same-generation handoff retains the displayed picture and image node until a read-only refresh replaces it, while immediately clearing input targets and keyboard authority. Regression coverage checks the handoff without advancing the polling timer, rejects input during the transition, and still clears pixels for changed generation/controller or privacy/authorization denial. All 57 viewer/activity tests and repository lint/typecheck passed. This follow-up requires only a frontend reload.
+- [ ] Verify the updated authenticated watch route against the assigned live guest. Deploy matching contracts/core, Web and Browser Runtime and reload the runtime; no guest image rebuild or migration is needed.
+
 ### Guest desktop investigation (2026-10-27)
 
 - [x] In a disposable local Xvfb/Chrome/VNC fixture, captured a real JavaScript prompt while its Zendriver input call was blocked; an RFB Enter dismissed the dialog and the original call returned. An opt-in real-process regression repeats the check with a private Unix socket. This is a component feasibility check, not a deployed desktop.

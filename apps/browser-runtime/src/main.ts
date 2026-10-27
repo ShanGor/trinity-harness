@@ -1,7 +1,11 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
-import { type BrowserRuntimeRequest, type ManagedBrowserSession } from '@trinity-harness/contracts';
+import {
+  type BrowserHumanCapture,
+  type BrowserRuntimeRequest,
+  type ManagedBrowserSession,
+} from '@trinity-harness/contracts';
 import {
   LocalSandbox,
   LocalBlobStore,
@@ -216,20 +220,8 @@ async function main(): Promise<void> {
         await dispose();
         throw new Error('Zendriver browser driver was not initialized');
       }
-      return {
-        generation,
-        ...(browserGuest
-          ? {
-              fenceAgent: (): boolean => {
-                if (!agentGate) return false;
-                agentGate.fence();
-                return true;
-              },
-            }
-          : {}),
-        humanFrame: async (privateView, active) => {
-          if (!privateView && browserGuest) return { preview: { state: 'privacy_blocked' } };
-          if (privateView && browserGuest) {
+      const desktopFrame = browserGuest
+        ? async (active: AbortSignal): Promise<BrowserHumanCapture> => {
             const capturedAt = new Date().toISOString();
             const desktop = await browserGuest.call(
               request.sessionId,
@@ -258,6 +250,26 @@ async function main(): Promise<void> {
                 ...(desktop.focusRevision ? { focusRevision: desktop.focusRevision } : {}),
               },
             };
+          }
+        : undefined;
+      return {
+        generation,
+        ...(browserGuest
+          ? {
+              fenceAgent: (): boolean => {
+                if (!agentGate) return false;
+                agentGate.fence();
+                return true;
+              },
+            }
+          : {}),
+        ...(desktopFrame
+          ? { readOnlyFrame: async (active: AbortSignal) => (await desktopFrame(active)).preview }
+          : {}),
+        humanFrame: async (privateView, active) => {
+          if (desktopFrame) {
+            if (!privateView) return { preview: { state: 'privacy_blocked' } };
+            return desktopFrame(active);
           }
           return activeDriver.humanFrame(privateView, {
             sessionId: request.sessionId,
@@ -309,18 +321,18 @@ async function main(): Promise<void> {
           browserGuest
             ? Promise.resolve({ state: 'privacy_blocked' as const })
             : captureBrowserPreview(
-            activeDriver,
-            activeDriver,
-            {
-              sessionId: request.sessionId,
-              callId: `preview-${randomUUID()}`,
-              sandbox,
-              workspaceRoot: root,
-              signal: active,
-            },
-            generation,
-            () => new Date(),
-          ),
+                activeDriver,
+                activeDriver,
+                {
+                  sessionId: request.sessionId,
+                  callId: `preview-${randomUUID()}`,
+                  sandbox,
+                  workspaceRoot: root,
+                  signal: active,
+                },
+                generation,
+                () => new Date(),
+              ),
         execute: async (command, active) => {
           if (
             !(await authorized(command.sessionId, active)) ||

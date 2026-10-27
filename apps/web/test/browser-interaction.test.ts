@@ -32,7 +32,7 @@ it('maps fractional layout and zoom coordinates to whole desktop pixels', () => 
     y: 1079,
   });
 });
-async function mount(initialStatus?: number, desktop = false) {
+async function mount(initialStatus?: number, desktop = false, initiallyAvailable = false) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('matchMedia', () => ({ matches: false, addListener() {}, removeListener() {} }));
   const container = document.createElement('div');
@@ -44,7 +44,7 @@ async function mount(initialStatus?: number, desktop = false) {
     epoch = 2,
     controllerId: string | null = null;
   let mode: BrowserControlState['mode'] = 'agent';
-  let available = false;
+  let available = initiallyAvailable;
   const state = (): BrowserControlState => ({
     available,
     mode,
@@ -158,6 +158,107 @@ async function mount(initialStatus?: number, desktop = false) {
   };
   return { interactBrowser, button, close, onClose, onUnsupported, root, sessionId };
 }
+it('shows and refreshes a read-only desktop before takeover and after returning control', async () => {
+  fakeClock();
+  const f = await mount(undefined, true, true);
+  try {
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    const p = pointerImage();
+    expect(p.img.alt).toBe('Read-only browser viewport');
+    expect(document.querySelector('[role="status"]')?.textContent).toContain('read-only');
+    expect(document.querySelector('.browser-navigation-toolbar')).toBeNull();
+    expect(
+      document.querySelector<HTMLTextAreaElement>('[aria-label="Text to insert into browser"]')
+        ?.disabled,
+    ).toBe(true);
+    await act(async () => {
+      p.dispatch('pointerdown');
+      p.dispatch('pointerup');
+      document
+        .querySelector('.browser-interactive-viewport')!
+        .dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 100 }));
+      document
+        .querySelector<HTMLTextAreaElement>('[aria-label="Browser keyboard input"]')!
+        .dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(inputs(f)).toEqual([]);
+    expect(
+      f.interactBrowser.mock.calls.every(
+        ([r]) => r.operation === 'state' || r.operation === 'frame',
+      ),
+    ).toBe(true);
+    expect(
+      f.interactBrowser.mock.calls.filter(([r]) => r.operation === 'frame').length,
+    ).toBeGreaterThan(1);
+    await act(async () => f.button('Take control').click());
+    expect(p.img.alt).toBe('Interactive browser viewport');
+    await act(async () => f.button('Return control to agent').click());
+    expect(document.querySelector('.browser-preview-image')).toBe(p.img);
+    expect(p.img.alt).toBe('Read-only browser viewport');
+    expect(document.querySelector('.browser-view-empty')).toBeNull();
+    await act(async () => {
+      p.dispatch('pointerdown');
+      p.dispatch('pointerup');
+      document
+        .querySelector('.browser-interactive-viewport')!
+        .dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 100 }));
+      document
+        .querySelector<HTMLTextAreaElement>('[aria-label="Browser keyboard input"]')!
+        .dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    });
+    expect(inputs(f)).toEqual([]);
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(document.querySelector('.browser-preview-image')).toBe(p.img);
+    expect(document.querySelector<HTMLImageElement>('.browser-preview-image')?.alt).toBe(
+      'Read-only browser viewport',
+    );
+    expect(inputs(f)).toEqual([]);
+  } finally {
+    await f.close();
+  }
+});
+
+it.each(['generation', 'controller', 'PRIVACY_BLOCKED', 'NOT_AUTHORIZED'] as const)(
+  'clears a retained desktop picture when the next read changes %s',
+  async (change) => {
+    fakeClock();
+    const f = await mount(undefined, true);
+    try {
+      await act(async () => f.button('Start browser').click());
+      const picture = document.querySelector('.browser-preview-image');
+      await act(async () => f.button('Return control to agent').click());
+      expect(document.querySelector('.browser-preview-image')).toBe(picture);
+      const original = f.interactBrowser.getMockImplementation()!;
+      f.interactBrowser.mockImplementationOnce(async (request) => {
+        const result = await original(request);
+        return {
+          state: {
+            ...result.state,
+            ...(change === 'generation' ? { generation: randomUUID() } : {}),
+            ...(change === 'controller'
+              ? { mode: 'human' as const, epoch: result.state.epoch + 1, controllerId: null }
+              : {}),
+          },
+          ...(change === 'PRIVACY_BLOCKED' || change === 'NOT_AUTHORIZED'
+            ? {
+                error: {
+                  code: change,
+                  message: 'Access denied.',
+                },
+              }
+            : {}),
+        };
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(1000));
+      expect(document.querySelector('.browser-preview-image')).toBeNull();
+      expect(inputs(f)).toEqual([]);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
 it('keeps desktop control after a click on a fractionally scaled picture', async () => {
   const f = await mount(undefined, true);
   try {

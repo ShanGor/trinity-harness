@@ -155,6 +155,15 @@ function setup(shared = false, desktop = false) {
     >(async (request) => result(request)),
     dispose = vi.fn(async () => undefined);
   const fenceAgent = vi.fn(() => true);
+  const readOnlyFrame = vi.fn(async () => ({
+    state: 'frame' as const,
+    generation,
+    capturedAt: new Date(time).toISOString(),
+    securityMode: 'trusted-managed' as const,
+    width: 100,
+    height: 80,
+    png: 'aW1hZ2U=',
+  }));
   const capture = vi.fn(async (privateView: boolean): Promise<BrowserHumanCapture> =>
     privatePage && !privateView
       ? { preview: { state: 'privacy_blocked' } }
@@ -192,7 +201,7 @@ function setup(shared = false, desktop = false) {
     dispose,
     humanFrame: capture,
     humanInput,
-    ...(desktop ? { fenceAgent } : {}),
+    ...(desktop ? { fenceAgent, readOnlyFrame } : {}),
   }));
   const supervisor = new ManagedBrowserSupervisor({
     store: journal,
@@ -247,6 +256,7 @@ function setup(shared = false, desktop = false) {
     events,
     humanInput,
     fenceAgent,
+    readOnlyFrame,
     execute,
     dispose,
     create,
@@ -320,6 +330,95 @@ it('fences a blocked agent call while the controlling user operates the desktop'
   expect(f.dispose).not.toHaveBeenCalled();
   expect((await f.controls.get(f.sessionId))?.needsObservation).toBe(true);
 });
+
+it('watches the desktop during agent work without taking control or granting input targets', async () => {
+  const f = setup(true, true);
+  let finish!: (value: BrowserRuntimeResult) => void;
+  const command = f.model();
+  f.execute.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const agent = f.supervisor.execute(command);
+  await vi.waitFor(() => expect(f.execute).toHaveBeenCalledTimes(1));
+  try {
+    const request = { sessionId: f.sideId, viewId: f.viewId, operation: 'frame' as const };
+    const watched = await f.supervisor.interact(request);
+    expect(watched.frame?.surface).toBe('desktop');
+    expect(watched.state).toMatchObject({ available: true, mode: 'agent', controllerId: null });
+    expect(watched.frame?.browser).toBeUndefined();
+    expect(watched.keyboardId).toBeUndefined();
+    expect(f.fenceAgent).not.toHaveBeenCalled();
+    expect(f.controls.records.size).toBe(0);
+    expect(await f.events.load(f.sideId)).toEqual([]);
+    expect(f.humanInput).not.toHaveBeenCalled();
+    f.revokeSession(f.sideId);
+    expect((await f.supervisor.interact(request)).error?.code).toBe('NOT_AUTHORIZED');
+    expect(f.readOnlyFrame).toHaveBeenCalledTimes(1);
+  } finally {
+    finish(result(command));
+    await agent;
+  }
+});
+
+it('keeps desktop watching read-only and requires a fresh takeover frame for input', async () => {
+  const f = setup(false, true);
+  await f.supervisor.execute(f.model());
+  const request = { sessionId: f.sessionId, viewId: f.viewId, operation: 'frame' as const };
+  await f.supervisor.interact({ ...request, operation: 'state' });
+  const watched = await f.supervisor.interact(request);
+  expect(watched.frame?.surface).toBe('desktop');
+  expect((await f.supervisor.interact(f.input(watched))).error?.code).toBe('NOT_CONTROLLER');
+  expect((await f.controls.get(f.sessionId))?.frames).toEqual([]);
+  const taken = await f.take();
+  expect(
+    (await f.supervisor.interact({ ...f.input(taken), frameId: watched.frame!.frameId })).error
+      ?.code,
+  ).toBe('STALE_FRAME');
+  expect((await f.supervisor.interact({ ...request, viewId: randomUUID() })).frame).toBeUndefined();
+  expect(f.readOnlyFrame).toHaveBeenCalledTimes(1);
+  expect(f.humanInput).not.toHaveBeenCalled();
+  await f.supervisor.interact({
+    ...request,
+    operation: 'release',
+    generation: f.generation,
+    epoch: taken.state.epoch,
+  });
+  const returned = await f.controls.get(f.sessionId);
+  expect((await f.supervisor.interact(request)).frame?.surface).toBe('desktop');
+  expect(await f.controls.get(f.sessionId)).toEqual(returned);
+  expect(returned).toMatchObject({
+    mode: 'agent',
+    needsObservation: true,
+    frames: [],
+    keyboard: null,
+  });
+});
+
+it.each(['takeover', 'revocation', 'generation'] as const)(
+  'discards read-only desktop pixels after %s during capture',
+  async (change) => {
+    const f = setup(false, true);
+    await f.supervisor.execute(f.model());
+    const preview = await f.readOnlyFrame();
+    f.readOnlyFrame.mockClear();
+    f.readOnlyFrame.mockImplementationOnce(async () => {
+      if (change === 'takeover') await f.take();
+      else if (change === 'revocation') f.revoke();
+      else f.journal.records.get(f.sessionId)!.generation = randomUUID();
+      return preview;
+    });
+    const watched = await f.supervisor.interact({
+      sessionId: f.sessionId,
+      viewId: f.viewId,
+      operation: 'frame',
+    });
+    expect(watched.frame).toBeUndefined();
+    expect(watched.error?.code).toBe(change === 'takeover' ? 'BUSY' : 'NOT_AUTHORIZED');
+  },
+);
 
 it('quarantines an uncertain desktop input during intervention and never repeats it', async () => {
   const f = setup(false, true);
