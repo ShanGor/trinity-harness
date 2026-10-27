@@ -76,7 +76,12 @@ export function InteractiveBrowserView({
 }): ReactElement {
   const [viewId] = useState(() => newId());
   const [state, setState] = useState<BrowserControlState>(unavailable);
-  const [frame, setFrame] = useState<BrowserInteractionFrame | null>(null);
+  const [frame, updateFrame] = useState<BrowserInteractionFrame | null>(null);
+  const displayedPicture = useRef(frame);
+  const setFrame = useCallback((value: BrowserInteractionFrame | null): void => {
+    displayedPicture.current = value;
+    updateFrame(value);
+  }, []);
   const [message, setMessage] = useState('Connecting to browser…');
   const [pending, setPending] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -238,7 +243,7 @@ export function InteractiveBrowserView({
           old.generation === result.state.generation &&
           result.state.available &&
           result.state.mode === 'agent' &&
-          picture.current?.surface === 'desktop';
+          displayedPicture.current?.surface === 'desktop';
         picture.current = null;
         if (!keepDesktopPicture) setFrame(null);
       }
@@ -461,7 +466,7 @@ export function InteractiveBrowserView({
       queue.current = [];
       document.removeEventListener('visibilitychange', visible);
     };
-  }, [client, sessionId, viewId, onUnsupported, enqueue, cancelPointer]);
+  }, [client, sessionId, viewId, onUnsupported, enqueue, cancelPointer, setFrame]);
   const requestClose = (): void => {
     if (closeRequested.current) return;
     closeRequested.current = true;
@@ -573,11 +578,15 @@ export function InteractiveBrowserView({
         <div className="browser-view-heading">
           <span>Browser</span>
           <span className={`browser-control-badge${owns ? ' is-controlled' : ''}`}>
-            {owns
-              ? 'You have control'
-              : state.mode === 'agent' && state.available
-                ? 'Agent has control'
-                : 'View only'}
+            {!connected
+              ? 'Connecting'
+              : !state.available
+                ? 'Not started'
+                : owns
+                  ? 'You have control'
+                  : state.mode === 'agent' && state.available
+                    ? 'Agent has control'
+                    : 'View only'}
           </span>
         </div>
       }

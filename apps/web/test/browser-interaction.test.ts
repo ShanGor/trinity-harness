@@ -219,6 +219,37 @@ it('shows and refreshes a read-only desktop before takeover and after returning 
   }
 });
 
+it('keeps the desktop visible on handoff after an input acknowledgement invalidated its targets', async () => {
+  fakeClock();
+  const f = await mount(undefined, true);
+  try {
+    await act(async () => f.button('Start browser').click());
+    const picture = document.querySelector('.browser-preview-image');
+    const original = f.interactBrowser.getMockImplementation()!;
+    f.interactBrowser.mockImplementationOnce(async (request) => {
+      if (request.operation !== 'input') throw Error('Expected input');
+      const result = await original(request);
+      return {
+        state: result.state,
+        input: { requestId: request.requestId, effect: 'none' },
+        error: { code: 'STALE_FRAME', message: 'Browser focus changed.' },
+      };
+    });
+    await act(async () =>
+      keyboardInput().dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' })),
+    );
+    expect(document.querySelector('.browser-preview-image')).toBe(picture);
+    await act(async () => f.button('Return control to agent').click());
+    expect(document.querySelector('.browser-preview-image')).toBe(picture);
+    expect(document.querySelector('.browser-view-empty')).toBeNull();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(document.querySelector('.browser-preview-image')).toBe(picture);
+    expect(inputs(f)).toHaveLength(1);
+  } finally {
+    await f.close();
+  }
+});
+
 it.each(['generation', 'controller', 'PRIVACY_BLOCKED', 'NOT_AUTHORIZED'] as const)(
   'clears a retained desktop picture when the next read changes %s',
   async (change) => {

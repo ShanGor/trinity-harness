@@ -578,6 +578,11 @@ export class ManagedBrowserSupervisor
           let session = this.sessions.get(scope);
           let record = await this.control(scope);
           const bound = await this.options.store.binding(scope);
+          if (!session && bound?.status === 'active')
+            return failure(
+              'BUSY',
+              'The browser is still bound to a previous runtime. Administrator recovery must confirm that its browser processes have stopped before starting it again.',
+            );
           if (request.operation === 'reset') {
             if (record?.mode === 'human' && record.controllerId !== request.viewId)
               return failure('NOT_CONTROLLER', 'Another view controls this browser.', record);

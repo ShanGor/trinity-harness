@@ -752,6 +752,32 @@ it.each([
       .frame?.browser,
   ).toBeUndefined();
 });
+it('reports an orphaned active runtime consistently and never pretends reset confirmed its shutdown', async () => {
+  const f = setup();
+  const binding = {
+    sessionId: f.sessionId,
+    generation: f.generation,
+    owner: randomUUID(),
+    status: 'active' as const,
+  };
+  await f.journal.bind(binding);
+  for (const operation of ['state', 'frame', 'take', 'reset'] as const) {
+    const response = await f.supervisor.interact({
+      sessionId: f.sessionId,
+      viewId: f.viewId,
+      operation,
+    });
+    expect(response.error).toMatchObject({
+      code: 'BUSY',
+      message: expect.stringContaining('Administrator recovery'),
+    });
+    expect(response.state.available).toBe(false);
+    expect(await f.journal.binding(f.sessionId)).toEqual(binding);
+  }
+  expect(f.create).not.toHaveBeenCalled();
+  expect(f.dispose).not.toHaveBeenCalled();
+});
+
 it('does not allocate a browser for viewing, denies nonowners and permits one controlling view', async () => {
   const f = setup();
   expect(
