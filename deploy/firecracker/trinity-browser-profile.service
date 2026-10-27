@@ -1,0 +1,14 @@
+[Unit]
+DefaultDependencies=no
+Description=Assign the preserved browser profile to its isolated guest UID
+RequiresMountsFor=/var/lib/trinity/browser
+After=local-fs.target
+Before=trinity-browser.service trinity-guest.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/trinity-browser-profile-owner
+RemainAfterExit=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER

@@ -33,6 +33,36 @@ export interface ZendriverClient {
   ): Promise<ZendriverToolResult>;
 }
 
+/**
+ * Stops a single agent operation from issuing any more browser calls. An
+ * already dispatched call is deliberately left alone: cancelling it would
+ * destroy the driver and could dismiss a dialog before the user sees it.
+ * The owner must still reconcile that call's outcome before handing control
+ * back to an agent.
+ */
+export class ZendriverOperationGate implements ZendriverClient {
+  private fenced = false;
+  constructor(private readonly upstream: ZendriverClient) {}
+  fence(): void {
+    this.fenced = true;
+  }
+  call(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    image?: boolean,
+  ): Promise<ZendriverToolResult> {
+    signal?.throwIfAborted();
+    if (this.fenced)
+      throw new BrowserDriverError(
+        'NOT_EXECUTED',
+        'The user is taking browser control. The in-flight operation must be reconciled.',
+        'conclude',
+      );
+    return this.upstream.call(name, args, signal, image);
+  }
+}
+
 /** Bounded MCP NDJSON transport. The supervisor serializes requests per browser. */
 export class ZendriverMcpConnection implements ZendriverClient {
   private nextId = 1;
@@ -47,7 +77,16 @@ export class ZendriverMcpConnection implements ZendriverClient {
     reject: (error: Error) => void;
   };
 
-  constructor(private readonly process: LongRunningProcess) {
+  constructor(
+    private readonly process: LongRunningProcess,
+    private readonly requestTimeoutMs = 30_000,
+  ) {
+    if (
+      !Number.isInteger(requestTimeoutMs) ||
+      requestTimeoutMs < 1000 ||
+      requestTimeoutMs > 105_000
+    )
+      throw new Error('Invalid Zendriver request timeout');
     this.reader = this.read().catch(() => {
       this.fail();
     });
@@ -76,7 +115,10 @@ export class ZendriverMcpConnection implements ZendriverClient {
     signal?.throwIfAborted();
     if (this.failed || this.pending) throw new BrowserDriverError('DRIVER_FAILED');
     const id = this.nextId++;
-    const deadline = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(30_000)]);
+    const deadline = AbortSignal.any([
+      ...(signal ? [signal] : []),
+      AbortSignal.timeout(this.requestTimeoutMs),
+    ]);
     return await new Promise<unknown>((resolve, reject) => {
       const cleanup = (): void => deadline.removeEventListener('abort', abort);
       const abort = (): void => {
@@ -92,7 +134,7 @@ export class ZendriverMcpConnection implements ZendriverClient {
               ? undefined
               : new BrowserDriverError(
                   'DRIVER_FAILED',
-                  'The browser driver did not respond within 30 seconds. Its process was stopped; the operation may have taken effect. Check the browser runtime and host-managed guest egress before retrying.',
+                  `The browser driver did not respond within ${this.requestTimeoutMs / 1000} seconds. Its process was stopped; the operation may have taken effect. Check the browser runtime and host-managed guest egress before retrying.`,
                   'conclude',
                 ),
           );

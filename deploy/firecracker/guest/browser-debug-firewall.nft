@@ -1,0 +1,9 @@
+# Chrome's pinned wrapper binds its debugging server to loopback on this port.
+# Workspace processes run as a different UID and cannot connect to it.
+table inet trinity_browser {
+  chain output {
+    type filter hook output priority -20; policy accept;
+    ip daddr 127.0.0.0/8 tcp dport 39142 meta skuid != 1001 reject
+    ip6 daddr ::1 tcp dport 39142 meta skuid != 1001 reject
+  }
+}

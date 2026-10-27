@@ -513,6 +513,22 @@ describe('interrupted objective recall', () => {
     return { store, owner, original, followup, snapshot, evidence, context };
   }
 
+  it('fences removed source receipts and omits the original objective from fresh amended context', async () => {
+    const f = await fixture('error');
+    const receipt = await f.context.select(f.owner, f.followup, 'contine');
+    await f.store.append(f.owner.id, [
+      { type: 'message/removed', eventId: randomUUID(), at, promptId: f.original, role: 'user' },
+    ]);
+    await expect(f.context.validate(f.owner, receipt)).rejects.toMatchObject({
+      code: 'MEMORY_CONTEXT_CHANGED',
+    });
+    const updated = await f.context.select(f.owner, f.followup, 'contine');
+    expect(updated.interruptedTurns ?? []).toEqual([]);
+    expect(
+      JSON.stringify(personalModelMessages(await f.store.load(f.owner.id), receipt)),
+    ).not.toContain(request);
+  });
+
   it.each(['error', 'aborted', 'interrupted'] as const)(
     'keeps the objective after %s with empty indexed recall, including replay',
     async (reason) => {

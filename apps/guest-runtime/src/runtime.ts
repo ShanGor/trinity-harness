@@ -93,6 +93,8 @@ export class GuestRuntime {
     const active = AbortSignal.any([this.shutdown.signal, ...(signal ? [signal] : [])]);
     active.throwIfAborted();
     const op = request.operation;
+    if (op.kind === 'desktopFrame' || op.kind === 'desktopInput')
+      throw new Error('Desktop operations are unavailable on the workspace endpoint');
     if (op.kind === 'processRead' || op.kind === 'processWrite' || op.kind === 'processKill') {
       const record = this.process(request, op.processId);
       if (op.kind === 'processKill') {

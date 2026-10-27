@@ -373,6 +373,11 @@
 }
 
 /* Main navigation stays quiet; the conversation owns the available space. */
+.response-actions .message-text-action.ant-btn {
+  width: auto;
+  padding-inline: 10px;
+}
+
 .trinity-shell.ant-layout {
   padding: 0;
   background: #f7f7f5;
@@ -941,8 +946,30 @@
   top: 16px;
   padding-bottom: 16px;
 }
-.browser-view-expanded .browser-preview-image {
-  max-height: calc(100dvh - 380px);
+.browser-view-expanded .browser-picture .browser-preview-image {
+  /* A height cap would keep a wide picture small even after the modal expands. */
+  width: 100%;
+  max-height: none;
+}
+.browser-view-expanded .browser-interactive-viewport:not(.is-zoomed) {
+  display: block;
+  overflow: auto;
+  max-height: max(220px, calc(100dvh - 380px));
+}
+.browser-view-expanded .browser-interactive-viewport:not(.is-zoomed) .browser-picture {
+  width: 100%;
+}
+.browser-view-expanded .browser-desktop-surface:not(.is-zoomed) {
+  display: flex;
+  overflow: hidden;
+  max-height: max(220px, calc(100dvh - 330px));
+}
+.browser-view-expanded .browser-desktop-surface:not(.is-zoomed) .browser-picture {
+  width: auto;
+}
+.browser-view-expanded .browser-desktop-surface:not(.is-zoomed) .browser-preview-image {
+  width: auto;
+  max-height: max(220px, calc(100dvh - 330px));
 }
 .browser-controlled .browser-preview-image {
   cursor: default;
@@ -1040,6 +1067,9 @@
   display: flex;
   gap: 6px;
   overflow-x: auto;
+  margin-top: 8px;
+}
+.browser-bookmark-toolbar {
   margin-top: 8px;
 }
 .browser-tab {

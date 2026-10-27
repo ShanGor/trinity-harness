@@ -129,6 +129,8 @@ The builder writes only to `~/.local/share/trinity/firecracker-smoke`, copies th
 
 ### Development guest with actual tools and Zendriver
 
+The experimental whole-desktop guest is selected explicitly with `--desktop` on the guest image builder and `GUEST_DESKTOP_ENABLED=1` on the matching Browser Runtime. It requires the browser-only Node Agent route and a new guest generation. Its profile migration changes ownership within the existing browser data directory; older images cannot use that directory again until ownership is restored through a reviewed, offline maintenance procedure. The local development node has been updated after disposable direct-VMM and jailer checks, with the previous image and an offline disk copy retained. Production deployment still requires the remaining ownership, rollback and isolation gates in [guest-desktop-design.md](../../docs/guest-desktop-design.md).
+
 After the disposable transport check passes, prepare a separate guest that runs the actual `apps/guest-runtime`. The ordinary-user preparation snapshots an explicit allowlist of source, bundled skills and installed dependencies, the installed patched Zendriver 0.16.37 and Chrome, and downloads standalone Node 22.22.1 with its upstream SHA-256. It excludes `.env`, repository history, workspaces and browser profiles. These are local development artifacts, not a reproducible production release.
 
 ```bash
@@ -170,6 +172,8 @@ sudo bash scripts/run-firecracker-jailer-test.sh
 ```
 
 The root-owned runner requires `/srv/trinity-node` to have the explicit `development-unencrypted` marker and no active Trinity VM. It accepts either an empty `images` directory or the matching verified development kernel/rootfs; temporary copies are removed after the run, while preinstalled base images are preserved. By default it creates a random environment, uid/gid, disposable data disk, TAP device and isolated network namespace, installs default-drop nftables rules, and confirms guest egress is denied. It boots two generations through `jailer` and the actual `trinity-vm@` systemd unit. RPC, persistent data, stale-generation rejection, non-root tools, Zendriver screenshots and secret scrubbing are checked. It stops each unit before proceeding and removes its generated host assets after confirmed stop. Reports, PNGs and the unit journals remain in `~/.local/share/trinity/firecracker-jailer-test`.
+
+For a separately built desktop candidate, pass `--desktop --guest-root /home/OPERATOR/.local/share/trinity/CANDIDATE` to the runner. It waits for the isolated browser service and checks desktop dialog and bookmark interaction in each generation. The image installer also accepts `--guest-root` for a separately built candidate. The same idle-host and matching-image guards apply; use the maintenance gate and preserve the existing shared image for rollback before changing it. Both scripts accept the operator identity supplied by `pkexec` as well as `sudo`.
 
 To check host-routed egress too, select an operator-approved hostname and TCP port. This mode requires the host gateway above to be active:
 

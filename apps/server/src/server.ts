@@ -67,6 +67,7 @@ import {
   workspaceSelectionSchema,
   sessionSettingsSchema,
   sessionPolicyUpdateSchema,
+  messageRevisionSchema,
 } from '@trinity-harness/shared';
 import type { ServerEvent } from '@trinity-harness/shared';
 import Fastify from 'fastify';
@@ -109,6 +110,7 @@ const createSessionSchema = z.object({
 
 const postMessageSchema = z.object({
   text: z.string().min(1).max(100_000),
+  revision: messageRevisionSchema.optional(),
   /**
    * M4 multimodal: `blob://` attachments previously uploaded via
    * POST /api/sessions/:id/attachments (docs/design.md §10).
@@ -384,7 +386,7 @@ export function toServerEvent(sessionId: string, event: LoopEvent): ServerEvent 
         detail: `approval ${event.outcome} by ${event.decidedBy}`,
       };
     case 'turn/end':
-      if (event.reason === 'error') {
+      if (event.reason !== 'completed' && event.reason !== 'aborted') {
         return { type: 'error', sessionId, message: event.detail ?? 'turn failed' };
       }
       return {
@@ -421,6 +423,8 @@ function mediaOf(
 /** SessionEvent (log replay / stream) → wire events, for SSE with seq ids. */
 export function logEventToServerEvent(sessionId: string, event: SessionEvent): ServerEvent | null {
   switch (event.type) {
+    case 'message/removed':
+      return { type: 'message/removed', sessionId, promptId: event.promptId, role: event.role };
     case 'model/usage':
       return { type: 'model/usage', sessionId, usage: event.usage };
     case 'message/user':
@@ -441,6 +445,7 @@ export function logEventToServerEvent(sessionId: string, event: SessionEvent): S
         sessionId,
         message: {
           role: 'assistant',
+          id: event.eventId,
           content: blocksToText(event.content),
           at: event.at,
           ...(event.phase ? { phase: event.phase } : {}),
@@ -519,7 +524,7 @@ export function logEventToServerEvent(sessionId: string, event: SessionEvent): S
     case 'turn/start':
       return { type: 'session/turn_status', sessionId, status: 'running' };
     case 'turn/end':
-      if (event.reason === 'error') {
+      if (event.reason !== 'completed' && event.reason !== 'aborted') {
         return { type: 'error', sessionId, message: event.detail ?? 'turn failed' };
       }
       return {
@@ -615,6 +620,11 @@ export async function buildServer(
   opts?: BuildServerOptions,
 ): Promise<FastifyInstance> {
   const app = Fastify({ logger: opts?.logger ?? false });
+  app.setErrorHandler((error, _req, reply) => {
+    if ((error as { code?: string }).code === 'SESSION_CONFLICT')
+      return reply.code(409).send({ error: 'Conversation changed; refresh and retry.' });
+    reply.send(error);
+  });
   const subscribers = new Map<string, Set<(event: ServerEvent) => void>>();
   const liveSubs = new Map<string, Set<(event: ServerEvent) => void>>();
 
@@ -1099,18 +1109,46 @@ export async function buildServer(
     return deps.workspaceRoot;
   };
 
+  const broadcastRevision = (
+    sessionId: string,
+    removed: SessionEvent[],
+    promptId: string,
+    content: ContentBlock[],
+  ): void => {
+    for (const event of removed) broadcast(sessionId, logEventToServerEvent(sessionId, event)!);
+    broadcast(sessionId, {
+      type: 'message/committed',
+      sessionId,
+      message: {
+        role: 'user',
+        id: promptId,
+        at: new Date().toISOString(),
+        content: blocksToText(content.filter((block) => block.kind === 'text')),
+        attachments: mediaOf(content),
+      },
+    });
+    broadcast(sessionId, { type: 'session/turn_status', sessionId, status: 'running' });
+  };
+
   const enqueueMain = async (
     meta: SessionMeta,
     identity: Identity,
     text: string,
     content: ContentBlock[],
+    revision?: {
+      promptId: string;
+      removed: SessionEvent[];
+      expectedLastSeq: number;
+      source: { promptId: string; kind: 'retry' | 'amend' };
+    },
   ): Promise<{ promptId: string; afterSeq: number }> => {
     if (!deps.sessionRuns || (!deps.queue && !deps.createLoop))
       throw new Error('No main chat runner configured');
-    const promptId = newId();
+    const promptId = revision?.promptId ?? newId();
     const source = await deps.store.append(
       meta.id,
       [
+        ...(revision?.removed ?? []),
         {
           type: 'prompt/queued',
           eventId: newId(),
@@ -1120,9 +1158,13 @@ export async function buildServer(
           actor: identity.userId,
           tenantId: identity.tenantId,
           policy: policyFor(meta),
+          ...(revision ? { revision: revision.source } : {}),
         },
       ],
-      { actor: identity.userId },
+      {
+        actor: identity.userId,
+        ...(revision ? { expectedLastSeq: revision.expectedLastSeq } : {}),
+      },
     );
     const task: TurnTask = {
       sessionId: meta.id,
@@ -1131,8 +1173,9 @@ export async function buildServer(
       actor: identity.userId,
       tenantId: identity.tenantId,
       policy: policyFor(meta),
-      promptSeq: source.from,
+      promptSeq: source.to,
     };
+    if (revision) broadcastRevision(meta.id, revision.removed, promptId, content);
     if (deps.queue) {
       try {
         await deps.queue.enqueue(task);
@@ -1863,6 +1906,69 @@ export async function buildServer(
     return reply.code(204).send();
   });
 
+  app.delete('/api/sessions/:sessionId/messages/:promptId/:role', async (req, reply) => {
+    const sessionId = await sessionIdOf(req, reply);
+    if (!sessionId || !(await authorizeSession(sessionId, req.identity, reply))) return;
+    if (req.identity?.role === 'viewer') return reply.code(403).send({ error: 'read-only' });
+    const target = z
+      .object({ promptId: z.uuid(), role: z.enum(['user', 'assistant']) })
+      .safeParse(req.params);
+    if (!target.success) return reply.code(400).send({ error: 'invalid message' });
+    const events = await deps.store.load(sessionId);
+    if (
+      !events.some(
+        (event) =>
+          (event.type === 'message/user' && event.eventId === target.data.promptId) ||
+          (event.type === 'prompt/queued' && event.promptId === target.data.promptId),
+      )
+    )
+      return reply.code(404).send({ error: 'message not found' });
+    const lastPrompt = events.findLast((event) => event.type === 'message/user');
+    if (lastPrompt?.eventId === target.data.promptId) {
+      const start = events.indexOf(lastPrompt);
+      if (!events.slice(start + 1).some((event) => event.type === 'turn/end'))
+        await cancelTurn(sessionId, req.identity?.userId ?? 'anonymous');
+    }
+    if (
+      !events.some(
+        (event) =>
+          event.type === 'message/removed' &&
+          event.promptId === target.data.promptId &&
+          event.role === target.data.role,
+      )
+    ) {
+      const discard: SessionEvent[] =
+        !events.some(
+          (event) => event.type === 'message/user' && event.eventId === target.data.promptId,
+        ) &&
+        !events.some(
+          (event) => event.type === 'prompt/discarded' && event.promptId === target.data.promptId,
+        )
+          ? [
+              {
+                type: 'prompt/discarded',
+                eventId: newId(),
+                at: new Date().toISOString(),
+                promptId: target.data.promptId,
+                reason: 'cancelled',
+              },
+            ]
+          : [];
+      const event: SessionEvent = {
+        type: 'message/removed',
+        eventId: newId(),
+        at: new Date().toISOString(),
+        ...target.data,
+      };
+      await deps.store.append(sessionId, [...discard, event], {
+        actor: req.identity?.userId ?? 'anonymous',
+      });
+      for (const queued of discard) broadcast(sessionId, logEventToServerEvent(sessionId, queued)!);
+      broadcast(sessionId, logEventToServerEvent(sessionId, event)!);
+    }
+    return reply.code(204).send();
+  });
+
   app.post('/api/sessions/:sessionId/messages', async (req, reply) => {
     const sessionId = await sessionIdOf(req, reply);
     if (!sessionId) return;
@@ -1885,6 +1991,100 @@ export async function buildServer(
       });
       return reply.code(403).send({ error: 'viewer role is read-only' });
     }
+    const revision = body.data.revision;
+    let revisionEvents: SessionEvent[] = [];
+    let expectedLastSeq: number | undefined;
+    const promptId = revision?.operationId ?? newId();
+    let content = promptContent(body.data.text, body.data.attachments);
+    if (revision) {
+      const events = await deps.store.load(sessionId);
+      // The operation ID is also the new prompt identity, including queued Main requests.
+      const existing = events.find(
+        (event) =>
+          (event.type === 'message/user' && event.eventId === promptId) ||
+          (event.type === 'prompt/queued' && event.promptId === promptId),
+      );
+      if (existing && (existing.type === 'message/user' || existing.type === 'prompt/queued')) {
+        if (
+          existing.revision?.promptId !== revision.promptId ||
+          existing.revision.kind !== revision.kind
+        )
+          return reply
+            .code(409)
+            .send({ error: 'This operation ID already belongs to another request.' });
+        return reply.code(202).send({ accepted: true, promptId });
+      }
+      const source = events.find(
+        (event) =>
+          (event.type === 'message/user' && event.eventId === revision.promptId) ||
+          (event.type === 'prompt/queued' && event.promptId === revision.promptId),
+      );
+      if (!source || (source.type !== 'message/user' && source.type !== 'prompt/queued'))
+        return reply.code(404).send({ error: 'message not found' });
+      const queuedIds = new Set(
+        events.flatMap((event) => (event.type === 'prompt/queued' ? [event.promptId] : [])),
+      );
+      const prompts = events.flatMap((event, index) =>
+        event.type === 'message/user'
+          ? queuedIds.has(event.eventId)
+            ? []
+            : [{ id: event.eventId, index }]
+          : event.type === 'prompt/queued'
+            ? [{ id: event.promptId, index }]
+            : [],
+      );
+      const terminalFor = (
+        id: string,
+      ): Extract<SessionEvent, { type: 'turn/end' | 'prompt/discarded' }> | undefined => {
+        const start = events.findIndex(
+          (event) => event.type === 'message/user' && event.eventId === id,
+        );
+        const end = events.findIndex(
+          (event, index) => index > start && event.type === 'message/user',
+        );
+        return events.findLast(
+          (event, index) =>
+            (event.type === 'prompt/discarded' && event.promptId === id) ||
+            (event.type === 'turn/end' &&
+              (event.promptId === id ||
+                (!event.promptId && start >= 0 && index > start && (end < 0 || index < end)))),
+        ) as Extract<SessionEvent, { type: 'turn/end' | 'prompt/discarded' }> | undefined;
+      };
+      const terminal = terminalFor(revision.promptId);
+      if (!terminal || prompts.some((prompt) => !terminalFor(prompt.id)))
+        return reply
+          .code(409)
+          .send({ error: 'Wait for the running request to stop before retrying or editing.' });
+      if (terminal.type === 'turn/end' && terminal.reason === 'completed')
+        return reply.code(409).send({ error: 'This request already completed successfully.' });
+      if (revision.kind === 'amend' && prompts.at(-1)?.id !== revision.promptId)
+        return reply.code(409).send({ error: 'Only the last user message can be edited.' });
+      if (
+        events.some(
+          (event) =>
+            event.type === 'message/removed' &&
+            event.promptId === revision.promptId &&
+            event.role === 'user',
+        )
+      )
+        return reply.code(409).send({ error: 'This request was removed or replaced.' });
+      content =
+        revision.kind === 'retry'
+          ? source.content
+          : [
+              { kind: 'text', text: body.data.text },
+              ...source.content.filter((block) => block.kind === 'image' || block.kind === 'file'),
+            ];
+      body.data.text = blocksToText(content.filter((block) => block.kind === 'text'));
+      expectedLastSeq = events.length;
+      revisionEvents = (['user', 'assistant'] as const).map((role) => ({
+        type: 'message/removed',
+        eventId: newId(),
+        at: new Date().toISOString(),
+        promptId: revision.promptId,
+        role,
+      }));
+    }
     if (credentialMemoryRequest(body.data.text))
       return reply.code(400).send({ error: 'Credentials cannot be stored in personal memory.' });
     await auth?.metas.setTitleIfEmpty(sessionId, body.data.text.trim().slice(0, 200));
@@ -1899,13 +2099,21 @@ export async function buildServer(
     });
 
     if (granted.meta?.sessionRole === 'main' && deps.sessionRuns) {
-      await enqueueMain(
+      const accepted = await enqueueMain(
         granted.meta,
         identity!,
         body.data.text,
-        promptContent(body.data.text, body.data.attachments),
+        content,
+        revision
+          ? {
+              promptId,
+              removed: revisionEvents,
+              expectedLastSeq: expectedLastSeq!,
+              source: revision,
+            }
+          : undefined,
       );
-      return reply.code(202).send({ accepted: true, queued: true });
+      return reply.code(202).send({ accepted: true, queued: true, promptId: accepted.promptId });
     }
 
     if (deps.queue) {
@@ -1915,28 +2123,29 @@ export async function buildServer(
       const appended = await deps.store.append(
         granted.sessionId,
         [
+          ...revisionEvents,
           {
             type: 'message/user',
-            eventId: newId(),
+            eventId: promptId,
             at: new Date().toISOString(),
             surfaceOp: 'append',
-            content: promptContent(body.data.text, body.data.attachments),
+            content,
+            ...(revision ? { revision: { promptId: revision.promptId, kind: revision.kind } } : {}),
           },
         ],
-        { actor: identity?.userId ?? 'anonymous' },
+        { actor: identity?.userId ?? 'anonymous', expectedLastSeq },
       );
+      if (revision) broadcastRevision(sessionId, revisionEvents, promptId, content);
       await deps.queue.enqueue({
         sessionId: granted.sessionId,
         prompt: body.data.text,
-        ...(body.data.attachments !== undefined
-          ? { content: promptContent(body.data.text, body.data.attachments) }
-          : {}),
+        content,
         actor: identity?.userId ?? 'anonymous',
         tenantId: identity?.tenantId ?? granted.meta?.tenantId ?? NIL_TENANT,
-        promptSeq: appended.from,
+        promptSeq: appended.to,
         policy: policyFor(granted.meta),
       });
-      return reply.code(202).send({ accepted: true });
+      return reply.code(202).send({ accepted: true, promptId });
     }
 
     if (!deps.createLoop) {
@@ -1945,16 +2154,19 @@ export async function buildServer(
     const appended = await deps.store.append(
       sessionId,
       [
+        ...revisionEvents,
         {
           type: 'message/user',
-          eventId: newId(),
+          eventId: promptId,
           at: new Date().toISOString(),
           surfaceOp: 'append',
-          content: promptContent(body.data.text, body.data.attachments),
+          content,
+          ...(revision ? { revision: { promptId: revision.promptId, kind: revision.kind } } : {}),
         },
       ],
-      { actor: identity?.userId ?? 'anonymous' },
+      { actor: identity?.userId ?? 'anonymous', expectedLastSeq },
     );
+    if (revision) broadcastRevision(sessionId, revisionEvents, promptId, content);
     const sink = sinkFor(sessionId);
     const loop = deps.createLoop(sessionId, await workspaceRootFor(granted.meta, sessionId));
     runInline(sessionId, (signal) =>
@@ -1964,13 +2176,11 @@ export async function buildServer(
         contextGuard: executionGuard(sessionId, identity?.userId ?? 'anonymous'),
         tenantId: identity?.tenantId,
         policy: policyFor(granted.meta),
-        promptSeq: appended.from,
-        ...(body.data.attachments !== undefined
-          ? { content: promptContent(body.data.text, body.data.attachments) }
-          : {}),
+        promptSeq: appended.to,
+        content,
       }),
     );
-    return reply.code(202).send({ accepted: true });
+    return reply.code(202).send({ accepted: true, promptId });
   });
 
   app.get('/api/sessions/:sessionId/browser-preview', async (req, reply) => {

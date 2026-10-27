@@ -5,10 +5,24 @@ set -euo pipefail
 [[ $(id -u) -ne 0 ]] || { echo 'Run without sudo.' >&2; exit 1; }
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 destination="$HOME/.local/share/trinity/guest-payload"
+zendriver="$HOME/.local/share/trinity/zendriver/bin/zendriver-mcp"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output) [[ $# -ge 2 ]] || exit 64; destination="$2"; shift ;;
+    --zendriver) [[ $# -ge 2 ]] || exit 64; zendriver="$2"; shift ;;
+    *) echo 'Usage: bash scripts/prepare-firecracker-guest.sh [--output PATH] [--zendriver PATH]' >&2; exit 64 ;;
+  esac
+  shift
+done
+[[ "$destination" == "$HOME/.local/share/trinity/"* && "$(dirname "$destination")" == "$HOME/.local/share/trinity" ]] || {
+  echo 'Payload must be a direct child of the operator Trinity directory.' >&2; exit 1;
+}
+[[ "$zendriver" == "$HOME/.local/share/trinity/"* && "$zendriver" != *'/../'* ]] || {
+  echo 'Zendriver must be an operator-owned Trinity executable.' >&2; exit 1;
+}
 output="$destination"
 [[ ! -e "$output" && ! -L "$output" ]] || { echo "Refusing to overwrite $output" >&2; exit 1; }
 [[ $(uname -m) == x86_64 ]] || { echo 'Development guest currently requires x86_64.' >&2; exit 1; }
-zendriver="$HOME/.local/share/trinity/zendriver/bin/zendriver-mcp"
 [[ -x "$zendriver" && -d /opt/google/chrome && -d "$repo_root/node_modules/.pnpm" ]] || {
   echo 'Install repository dependencies, patched Zendriver and Google Chrome first.' >&2; exit 1;
 }

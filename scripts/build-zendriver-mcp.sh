@@ -39,7 +39,7 @@ fi
 patched_source="$fetch_root/zendriver-mcp"
 cp -a "$source_dir" "$patched_source"
 chmod -R u+w "$patched_source"
-for patch_name in zendriver-mcp-user-data-dir.patch zendriver-mcp-human-input.patch; do
+for patch_name in zendriver-mcp-user-data-dir.patch zendriver-mcp-human-input.patch zendriver-mcp-viewport-capture.patch; do
   patch_file="$repo_root/apps/browser-runtime/patches/$patch_name"
   if [[ ! -f "$patch_file" ]]; then
     patch_file="$(dirname "$0")/$patch_name"

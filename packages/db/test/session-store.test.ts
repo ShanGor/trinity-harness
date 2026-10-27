@@ -97,6 +97,20 @@ describe.skipIf(!reachable)('PgSessionStore (integration)', () => {
     expect(replayed.map((_, i) => i + 1)).toEqual([1, 2, 3, 4]); // seqs are 1..4 in order
   });
 
+  it('compares revision watermarks under the session append lock', async () => {
+    const sessionId = crypto.randomUUID();
+    await store.append(sessionId, [userMessage('original')]);
+    const outcomes = await Promise.allSettled([
+      store.append(sessionId, [userMessage('revision a')], { expectedLastSeq: 1 }),
+      store.append(sessionId, [userMessage('revision b')], { expectedLastSeq: 1 }),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+    expect(outcomes.find((outcome) => outcome.status === 'rejected')).toMatchObject({
+      reason: { code: 'SESSION_CONFLICT' },
+    });
+    expect(await store.load(sessionId)).toHaveLength(2);
+  });
+
   it('maintains a sha256 hash chain over the log', async () => {
     const sessionId = crypto.randomUUID();
     await store.append(sessionId, [userMessage('x'), userMessage('y')]);

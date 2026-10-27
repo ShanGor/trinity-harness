@@ -43,9 +43,11 @@ export function mapBrowserPoint(
     clientY > rect.top + rect.height
   )
     return null;
+  // Layout, Fit and local zoom can map a pointer to a fractional source pixel.
+  // The desktop input protocol addresses whole pixels, including at the edges.
   return {
-    x: Math.min(frame.width - 1, ((clientX - rect.left) * frame.width) / rect.width),
-    y: Math.min(frame.height - 1, ((clientY - rect.top) * frame.height) / rect.height),
+    x: Math.min(frame.width - 1, Math.round(((clientX - rect.left) * frame.width) / rect.width)),
+    y: Math.min(frame.height - 1, Math.round(((clientY - rect.top) * frame.height) / rect.height)),
   };
 }
 function wait(signal: AbortSignal, wake: EventTarget, ms: number): Promise<void> {
@@ -169,6 +171,7 @@ export function InteractiveBrowserView({
             type: 'scroll',
             dx: last.action.dx + item.action.dx,
             dy: last.action.dy + item.action.dy,
+            ...(item.action.point ? { point: item.action.point } : {}),
           };
           return true;
         }
@@ -321,7 +324,7 @@ export function InteractiveBrowserView({
           } else if (item && 'action' in item) {
             const shown = picture.current;
             if (
-              !shown ||
+              (!shown && item.action.type !== 'new_tab') ||
               !control.generation ||
               control.mode !== 'human' ||
               control.controllerId !== viewId
@@ -335,13 +338,15 @@ export function InteractiveBrowserView({
               sessionId,
               viewId,
               operation: 'input',
-              generation: item.generation ?? shown.generation,
-              epoch: item.epoch ?? shown.epoch,
-              frameId: item.frameId ?? shown.frameId,
+              generation: item.generation ?? control.generation,
+              epoch: item.epoch ?? control.epoch,
+              ...(shown ? { frameId: item.frameId ?? shown.frameId } : {}),
               sequence: control.nextSequence,
               requestId: newId(),
               action: item.action,
-              capture: item.action.type !== 'text' && item.action.type !== 'key',
+              capture:
+                shown?.surface === 'desktop' ||
+                (item.action.type !== 'text' && item.action.type !== 'key'),
               ...((item.action.type === 'text' || item.action.type === 'key') && keyboardId.current
                 ? { keyboardId: keyboardId.current }
                 : {}),
@@ -477,9 +482,19 @@ export function InteractiveBrowserView({
         return;
       }
       if (pointer.current) return;
+      const point =
+        picture.current.surface === 'desktop' && image.current
+          ? mapBrowserPoint(
+              image.current.getBoundingClientRect(),
+              picture.current,
+              event.clientX,
+              event.clientY,
+            )
+          : null;
       enqueue({
         action: {
           type: 'scroll',
+          ...(point ? { point } : {}),
           dx: Math.max(
             -2000,
             Math.min(
@@ -582,7 +597,7 @@ export function InteractiveBrowserView({
         <Button
           aria-pressed={expanded}
           onClick={() => {
-            cancelPointer();
+            changeZoom(null);
             setExpanded(!expanded);
           }}
         >
@@ -610,50 +625,75 @@ export function InteractiveBrowserView({
         {message}
         {pending && <span className="browser-working"> · Applying action…</span>}
       </p>
-      <div className="browser-navigation-toolbar" role="toolbar" aria-label="Browser navigation">
-        <Button
-          aria-label="Go back"
-          disabled={!owns || pending || !frame}
-          onClick={() => browserAction({ type: 'back' })}
-        >
-          ←
-        </Button>
-        <Button
-          aria-label="Go forward"
-          disabled={!owns || pending || !frame}
-          onClick={() => browserAction({ type: 'forward' })}
-        >
-          →
-        </Button>
-        <Button
-          aria-label="Reload page"
-          disabled={!owns || pending || !frame}
-          onClick={() => browserAction({ type: 'reload' })}
-        >
-          ↻
-        </Button>
-        <Input.Search
-          ref={addressInput}
-          aria-label="Browser address"
-          value={address}
-          disabled={!owns}
-          onChange={(event) => {
-            addressDirty.current = true;
-            setAddress(event.target.value);
-          }}
-          enterButton="Go"
-          onSearch={() => {
-            try {
-              const url = new URL(address.includes('://') ? address : `https://${address}`);
-              if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
-                throw new Error('invalid');
-              browserAction({ type: 'navigate', url: url.href });
-            } catch {
-              setMessage('Enter an HTTP or HTTPS address without credentials.');
-            }
-          }}
-        />
-      </div>
+      {frame?.surface !== 'desktop' && (
+        <>
+          <div
+            className="browser-navigation-toolbar"
+            role="toolbar"
+            aria-label="Browser navigation"
+          >
+            <Button
+              aria-label="Go back"
+              disabled={!owns || pending || !frame}
+              onClick={() => browserAction({ type: 'back' })}
+            >
+              ←
+            </Button>
+            <Button
+              aria-label="Go forward"
+              disabled={!owns || pending || !frame}
+              onClick={() => browserAction({ type: 'forward' })}
+            >
+              →
+            </Button>
+            <Button
+              aria-label="Reload page"
+              disabled={!owns || pending || !frame}
+              onClick={() => browserAction({ type: 'reload' })}
+            >
+              ↻
+            </Button>
+            <Input.Search
+              ref={addressInput}
+              aria-label="Browser address"
+              value={address}
+              disabled={!owns}
+              onChange={(event) => {
+                addressDirty.current = true;
+                setAddress(event.target.value);
+              }}
+              enterButton="Go"
+              onSearch={() => {
+                try {
+                  const url = new URL(address.includes('://') ? address : `https://${address}`);
+                  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
+                    throw new Error('invalid');
+                  browserAction({ type: 'navigate', url: url.href });
+                } catch {
+                  setMessage('Enter an HTTP or HTTPS address without credentials.');
+                }
+              }}
+            />
+          </div>
+          <Space wrap className="browser-bookmark-toolbar">
+            <Button
+              disabled={!owns || pending || !frame}
+              onClick={() => browserAction({ type: 'open_browser_page', page: 'bookmarks' })}
+            >
+              Bookmarks
+            </Button>
+            <Button
+              disabled={!owns || pending || !frame}
+              onClick={() => browserAction({ type: 'open_browser_page', page: 'account' })}
+            >
+              Chrome account
+            </Button>
+            <span className="browser-preview-meta">
+              Sign in to Chrome with the same Google account to access your saved bookmarks.
+            </span>
+          </Space>
+        </>
+      )}
       {owns && frame?.browser && (
         <div className="browser-tab-toolbar" role="toolbar" aria-label="Browser tabs">
           {frame.browser.tabs.map((tab) => (
@@ -723,7 +763,7 @@ export function InteractiveBrowserView({
         ref={viewport}
         aria-busy={pending}
         data-input-sequence={state.nextSequence}
-        className={`browser-interactive-viewport${owns ? ' browser-controlled' : ''}${zoom !== null ? ' is-zoomed' : ''}${panView ? ' is-panning' : ''}`}
+        className={`browser-interactive-viewport${owns ? ' browser-controlled' : ''}${frame?.surface === 'desktop' ? ' browser-desktop-surface' : ''}${zoom !== null ? ' is-zoomed' : ''}${panView ? ' is-panning' : ''}`}
         onScroll={() => {
           if (pointer.current) cancelPointer();
         }}
@@ -752,6 +792,11 @@ export function InteractiveBrowserView({
             <span>
               {state.available ? message : 'Start the browser to open a page and interact with it.'}
             </span>
+            {owns && (
+              <Button disabled={pending} onClick={() => browserAction({ type: 'new_tab' })}>
+                Open new tab to recover
+              </Button>
+            )}
           </div>
         )}
         {frame && (
@@ -881,7 +926,9 @@ export function InteractiveBrowserView({
                       type: 'click',
                       point,
                       button: event.button === 2 ? 'right' : event.button === 1 ? 'middle' : 'left',
-                      count: double ? 2 : 1,
+                      // The first desktop click was already delivered to X11;
+                      // a second physical click completes the double-click.
+                      count: double && picture.current.surface !== 'desktop' ? 2 : 1,
                       modifiers: [
                         ...(event.altKey ? ['alt' as const] : []),
                         ...(event.ctrlKey ? ['ctrl' as const] : []),

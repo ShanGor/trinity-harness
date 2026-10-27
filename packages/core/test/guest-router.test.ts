@@ -75,6 +75,19 @@ it('uses authenticated metadata and caps routed replies without exposing credent
   expect(init.body).not.toContain('t'.repeat(32));
   expect(f.fetcher.mock.calls[0]![0]).toEqual(new URL('https://node.example/guest'));
 });
+it('routes only browser operations to the isolated guest browser service', async () => {
+  const f = fixture();
+  await expect(f.router.call(f.meta.id, { kind: 'desktopFrame' })).rejects.toThrow();
+  await expect(
+    f.router.browser().call(f.meta.id, { kind: 'read', path: 'private', maxBytes: 10 }),
+  ).rejects.toThrow();
+  expect(f.fetcher).not.toHaveBeenCalled();
+  await f.router.browser().call(f.meta.id, { kind: 'desktopFrame' });
+  expect(f.fetcher.mock.calls[0]![0]).toEqual(new URL('https://node.example/guest-browser'));
+  f.record.state = 'stopped';
+  await expect(f.router.browser().call(f.meta.id, { kind: 'desktopFrame' })).rejects.toThrow();
+  expect(f.wake).not.toHaveBeenCalled();
+});
 it.each(['viewer', 'team', 'closed', 'foreign', 'outside'] as const)(
   'rejects %s authority before transport',
   async (mode) => {

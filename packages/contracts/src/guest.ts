@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { EnvironmentRecord } from './environments.js';
 import { skillCatalogResultSchema, skillDefinitionSchema, skillNameSchema } from './skills.js';
+import { browserHumanActionSchema } from './browser-interaction.js';
 
 export const GUEST_MAX_BYTES = 20 * 1024 * 1024;
 export const GUEST_WIRE_BYTES = 32 * 1024 * 1024;
@@ -27,6 +28,25 @@ const options = z
 const processId = z.uuid();
 export const guestOperationSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('browserOpen') }).strict(),
+  z.object({ kind: z.literal('desktopFrame') }).strict(),
+  z
+    .object({
+      kind: z.literal('desktopInput'),
+      action: browserHumanActionSchema.refine((action) =>
+        ['click', 'drag', 'scroll', 'text', 'key'].includes(action.type),
+      ),
+      target: z
+        .object({
+          width: z.number().int().positive().max(2048),
+          height: z.number().int().positive().max(2048),
+          focusRevision: z
+            .string()
+            .regex(/^[0-9]{1,20}$/)
+            .optional(),
+        })
+        .strict(),
+    })
+    .strict(),
   z
     .object({
       kind: z.literal('exec'),
@@ -134,6 +154,24 @@ export const guestValueSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('process'), processId }).strict(),
   z
     .object({
+      kind: z.literal('desktopFrame'),
+      width: z.number().int().positive().max(2048),
+      height: z.number().int().positive().max(2048),
+      capturedAt: z.iso.datetime(),
+      focusRevision: z
+        .string()
+        .regex(/^[0-9]{1,20}$/)
+        .optional(),
+      png: z
+        .string()
+        .min(1)
+        .max(2_796_204)
+        .regex(/^[A-Za-z0-9+/]+={0,2}$/),
+    })
+    .strict(),
+  z.object({ kind: z.literal('desktopInput'), effect: z.enum(['applied', 'none']) }).strict(),
+  z
+    .object({
       kind: z.literal('processOutput'),
       cursor: z.number().int().nonnegative(),
       data: base64,
@@ -154,6 +192,14 @@ export interface GuestRequestPort {
 }
 export interface GuestRelayPort {
   call(
+    environment: EnvironmentRecord,
+    request: GuestEnvelope,
+    signal?: AbortSignal,
+  ): Promise<GuestValue>;
+}
+/** A separately isolated guest browser service; no caller-selected endpoint. */
+export interface BrowserGuestRelayPort {
+  callBrowser(
     environment: EnvironmentRecord,
     request: GuestEnvelope,
     signal?: AbortSignal,

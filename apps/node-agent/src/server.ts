@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type RouteHandlerMethod } from 'fastify';
 import {
   nodeRuntimeRequestSchema,
   environmentRecordSchema,
@@ -9,6 +9,7 @@ import {
   guestResponseSchema,
   GUEST_WIRE_BYTES,
   type GuestRelayPort,
+  type BrowserGuestRelayPort,
   type SessionMetaStore,
   type UserStore,
   type EnvironmentRecord,
@@ -24,7 +25,7 @@ export function buildNodeAgent(
   nodeId: string,
   token: string,
   guest?: {
-    relay: GuestRelayPort;
+    relay: GuestRelayPort & Partial<BrowserGuestRelayPort>;
     metas: Pick<SessionMetaStore, 'get'>;
     users: Pick<UserStore, 'findById'>;
     workspaceRoot: string;
@@ -62,14 +63,31 @@ export function buildNodeAgent(
       reply.raw.removeListener('close', abort);
     }
   });
-  app.post('/guest', async (request, reply) => {
+  const guestHandler: RouteHandlerMethod = async (request, reply) => {
     if (!guest) return reply.code(503).send({ error: 'guest routing is disabled' });
+    const browser = request.routeOptions.url === '/guest-browser';
+    if (browser && !guest.relay.callBrowser)
+      return reply.code(503).send({ error: 'guest browser routing is disabled' });
     const parsed = z
       .object({ environment: environmentRecordSchema, request: guestEnvelopeSchema })
       .strict()
       .safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid guest envelope' });
     const { environment, request: envelope } = parsed.data;
+    const kind = envelope.operation.kind;
+    if (
+      (browser &&
+        ![
+          'browserOpen',
+          'processRead',
+          'processWrite',
+          'processKill',
+          'desktopFrame',
+          'desktopInput',
+        ].includes(kind)) ||
+      (!browser && (kind === 'desktopFrame' || kind === 'desktopInput'))
+    )
+      return reply.code(400).send({ error: 'invalid guest operation for route' });
     const authorized = async (
       env: EnvironmentRecord,
       rpc: GuestEnvelope,
@@ -114,7 +132,8 @@ export function buildNodeAgent(
         async (lockSignal) => {
           if (!(await authorized(environment, envelope)))
             return { ok: false, effect: 'none' } as const;
-          const value = await guest.relay.call(
+          const value = await (browser ? guest.relay.callBrowser! : guest.relay.call).call(
+            guest.relay,
             environment,
             envelope,
             AbortSignal.any([cancelled.signal, lockSignal]),
@@ -140,7 +159,9 @@ export function buildNodeAgent(
       request.raw.removeListener('aborted', abort);
       reply.raw.removeListener('close', abort);
     }
-  });
+  };
+  app.post('/guest', guestHandler);
+  app.post('/guest-browser', guestHandler);
   app.setErrorHandler((_error, _req, reply) =>
     reply.code(503).send({ error: 'node operation unavailable' }),
   );

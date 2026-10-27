@@ -43,6 +43,7 @@ export type ChatItem = {
   citationList?: AnswerCitation[];
   usage?: ModelUsage[];
   recall?: RecallReceipt;
+  removed?: boolean;
 };
 
 export type CommittedUserMessage = {
@@ -266,6 +267,18 @@ export function settleAssistantItems(
   status: 'completed' | 'aborted' | 'error' = 'completed',
   errorDetail?: string,
 ): ChatItem[] {
+  if (items.at(-1)?.role === 'user')
+    items = [
+      ...items,
+      {
+        key: newItemKey(),
+        role: 'assistant',
+        content: '',
+        streaming: true,
+        tools: [],
+        attachments: [],
+      },
+    ];
   return items.map((item) => {
     if (item.role !== 'assistant' || item !== items.at(-1)) return item;
     const pending = item.tools.some(
@@ -276,7 +289,7 @@ export function settleAssistantItems(
       !pending &&
       !item.awaitingApproval &&
       !(item.stepCommitted && !item.final) &&
-      !(status === 'error' && !item.final)
+      !(status !== 'completed')
     )
       return item;
     const base = status !== 'completed' && !item.final ? archiveAssistantStep(item) : item;
@@ -357,6 +370,7 @@ export function mergeRecallSelection(
 
 /** Same ACP projection for bounded pages and the independent detail pane. */
 export function applyTimelineEvent(items: ChatItem[], event: ServerEvent): ChatItem[] {
+  if (event.type === 'message/removed') return removeChatMessage(items, event.promptId, event.role);
   if (event.type === 'session/memory_selection') return mergeRecallSelection(items, event.receipt);
   if (event.type === 'message/committed')
     return event.message.role === 'user'
@@ -384,4 +398,19 @@ export function applyTimelineEvent(items: ChatItem[], event: ServerEvent): ChatI
   )
     return settleAssistantItems(items, event.status);
   return items;
+}
+
+/** Keep removed entries internally so late chunks still attach to their originating turn. */
+export function removeChatMessage(
+  items: readonly ChatItem[],
+  promptId: string,
+  role: 'user' | 'assistant',
+): ChatItem[] {
+  let currentPrompt: string | undefined;
+  return items.map((item) => {
+    if (item.role === 'user') currentPrompt = item.messageId;
+    return currentPrompt === promptId && item.role === role && !item.removed
+      ? { ...item, removed: true }
+      : item;
+  });
 }

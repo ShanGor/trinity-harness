@@ -12,7 +12,11 @@
     "@trinity-harness/contracts": "*",
     "@trinity-harness/core": "*",
     "fastify": "^5.12.5",
+    "pngjs": "^7.0.0",
     "tsx": "^4.23.15",
     "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/pngjs": "^6.0.5"
   }
 }

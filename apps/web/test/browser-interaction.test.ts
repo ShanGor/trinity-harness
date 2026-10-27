@@ -22,7 +22,17 @@ it('maps resized image coordinates to viewport pixels and rejects letterbox/outs
   expect(mapBrowserPoint(rect, frame, 501, 150)).toBeNull();
   expect(mapBrowserPoint({ ...rect, width: 0 }, frame, 300, 150)).toBeNull();
 });
-async function mount(initialStatus?: number) {
+it('maps fractional layout and zoom coordinates to whole desktop pixels', () => {
+  const rect = { left: 10.25, top: 20.5, width: 1137.5, height: 639.84375 };
+  const frame = { width: 1920, height: 1080 };
+  expect(mapBrowserPoint(rect, frame, 1024, 178)).toEqual({ x: 1711, y: 266 });
+  expect(mapBrowserPoint(rect, frame, rect.left, rect.top)).toEqual({ x: 0, y: 0 });
+  expect(mapBrowserPoint(rect, frame, rect.left + rect.width, rect.top + rect.height)).toEqual({
+    x: 1919,
+    y: 1079,
+  });
+});
+async function mount(initialStatus?: number, desktop = false) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('matchMedia', () => ({ matches: false, addListener() {}, removeListener() {} }));
   const container = document.createElement('div');
@@ -54,12 +64,16 @@ async function mount(initialStatus?: number) {
     width: 800,
     height: 400,
     png: 'aW1hZ2U=',
-    browser: {
-      tabs: [
-        { id: 'tab', title: 'Example', url: 'https://example.com/', active: true },
-        { id: 'other-tab', title: 'Other', url: 'https://other.example/', active: false },
-      ],
-    },
+    ...(desktop
+      ? { surface: 'desktop' as const }
+      : {
+          browser: {
+            tabs: [
+              { id: 'tab', title: 'Example', url: 'https://example.com/', active: true },
+              { id: 'other-tab', title: 'Other', url: 'https://other.example/', active: false },
+            ],
+          },
+        }),
   });
   const keyboardId = randomUUID();
   const interactBrowser = vi.fn(
@@ -85,10 +99,26 @@ async function mount(initialStatus?: number) {
         return { state: state() };
       }
       if (request.operation === 'input') {
+        if (desktop) {
+          const action = request.action;
+          const points =
+            action.type === 'drag'
+              ? [action.from, action.to]
+              : action.type === 'click' || action.type === 'scroll'
+                ? action.point
+                  ? [action.point]
+                  : []
+                : [];
+          // Match the real guest's RFB boundary instead of accepting coordinates
+          // that would quarantine control before any X11 input was sent.
+          for (const point of points) {
+            expect(Number.isInteger(point.x) && Number.isInteger(point.y)).toBe(true);
+          }
+        }
         seq++;
         return {
           state: state(),
-          ...(request.capture === false ? { keyboardId } : { frame: frame() }),
+          ...(request.capture === false ? (desktop ? {} : { keyboardId }) : { frame: frame() }),
           input: { requestId: request.requestId, effect: 'applied' },
         };
       }
@@ -100,7 +130,9 @@ async function mount(initialStatus?: number) {
       }
       return {
         state: state(),
-        ...(request.operation === 'frame' ? { frame: frame(), keyboardId } : {}),
+        ...(request.operation === 'frame'
+          ? { frame: frame(), ...(!desktop ? { keyboardId } : {}) }
+          : {}),
       };
     },
   );
@@ -126,6 +158,136 @@ async function mount(initialStatus?: number) {
   };
   return { interactBrowser, button, close, onClose, onUnsupported, root, sessionId };
 }
+it('keeps desktop control after a click on a fractionally scaled picture', async () => {
+  const f = await mount(undefined, true);
+  try {
+    await act(async () => f.button('Start browser').click());
+    const img = document.querySelector<HTMLImageElement>('.browser-preview-image')!;
+    img.getBoundingClientRect = () => ({
+      left: 10.25,
+      top: 20.5,
+      width: 563.75,
+      height: 281.875,
+      right: 574,
+      bottom: 302.375,
+      x: 10.25,
+      y: 20.5,
+      toJSON() {
+        return {};
+      },
+    });
+    await act(async () => {
+      for (const type of ['pointerdown', 'pointerup'])
+        img.dispatchEvent(
+          new MouseEvent(type, {
+            bubbles: true,
+            clientX: 511,
+            clientY: 104,
+            button: 0,
+          }),
+        );
+    });
+    const input = f.interactBrowser.mock.calls.map(([r]) => r).find((r) => r.operation === 'input');
+    expect(input).toMatchObject({ action: { type: 'click', point: { x: 711, y: 118 } } });
+    expect(document.body.textContent).toContain('You control the browser');
+    expect(document.body.textContent).not.toContain('Input outcome is unknown');
+  } finally {
+    await f.close();
+  }
+});
+it('uses the native desktop chrome and captures a fresh frame for keyboard and wheel input', async () => {
+  const f = await mount(undefined, true);
+  try {
+    await act(async () => f.button('Start browser').click());
+    expect(document.querySelector('.browser-navigation-toolbar')).toBeNull();
+    expect(document.querySelector('.browser-bookmark-toolbar')).toBeNull();
+    const img = document.querySelector<HTMLImageElement>('.browser-preview-image')!;
+    img.getBoundingClientRect = () => ({
+      left: 10,
+      top: 20,
+      width: 400,
+      height: 200,
+      right: 410,
+      bottom: 220,
+      x: 10,
+      y: 20,
+      toJSON() {
+        return {};
+      },
+    });
+    const viewport = document.querySelector<HTMLElement>('.browser-interactive-viewport')!;
+    await act(async () =>
+      viewport.dispatchEvent(
+        new WheelEvent('wheel', {
+          bubbles: true,
+          cancelable: true,
+          clientX: 110,
+          clientY: 70,
+          deltaY: 120,
+        }),
+      ),
+    );
+    expect(
+      f.interactBrowser.mock.calls
+        .map(([request]) => request)
+        .find((request) => request.operation === 'input'),
+    ).toMatchObject({
+      action: { type: 'scroll', point: { x: 200, y: 100 }, dy: 120 },
+      capture: true,
+    });
+    await act(async () =>
+      keyboardInput().dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' })),
+    );
+    const input = f.interactBrowser.mock.calls
+      .map(([request]) => request)
+      .filter((request) => request.operation === 'input')
+      .at(-1)!;
+    expect(input).toMatchObject({ action: { type: 'key', key: 'Enter' }, capture: true });
+    expect(input).not.toHaveProperty('keyboardId');
+  } finally {
+    await f.close();
+  }
+});
+it('delivers a desktop double-click as two physical clicks', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-26T00:00:00Z'));
+  const f = await mount(undefined, true);
+  try {
+    await act(async () => f.button('Start browser').click());
+    const img = document.querySelector<HTMLImageElement>('.browser-preview-image')!;
+    img.getBoundingClientRect = () => ({
+      left: 10,
+      top: 20,
+      width: 400,
+      height: 200,
+      right: 410,
+      bottom: 220,
+      x: 10,
+      y: 20,
+      toJSON() {
+        return {};
+      },
+    });
+    for (let i = 0; i < 2; i++)
+      await act(async () => {
+        img.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, clientX: 110, clientY: 70, button: 0 }),
+        );
+        img.dispatchEvent(
+          new MouseEvent('pointerup', { bubbles: true, clientX: 110, clientY: 70, button: 0 }),
+        );
+      });
+    const clicks = f.interactBrowser.mock.calls
+      .map(([request]) => request)
+      .filter((request) => request.operation === 'input');
+    expect(clicks).toHaveLength(2);
+    expect(clicks.map((request) => request.action)).toMatchObject([
+      { type: 'click', count: 1 },
+      { type: 'click', count: 1 },
+    ]);
+  } finally {
+    await f.close();
+  }
+});
 it('opens on explicit takeover and sends mapped pointer and keyboard input without changing the parent draft', async () => {
   const draft = document.createElement('textarea');
   draft.value = 'Unsent composer draft';
@@ -564,6 +726,30 @@ it('clears unavailable pictures and backs off reads while preserving control and
   }
 });
 
+it('offers explicit new-tab recovery when capture fails without resending the previous input', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const original = f.interactBrowser.getMockImplementation()!;
+    f.interactBrowser.mockImplementationOnce(async (request) => ({
+      state: (await original(request)).state,
+      error: { code: 'UNAVAILABLE', message: 'A fresh browser picture is unavailable.' },
+    }));
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(document.querySelector('.browser-preview-image')).toBeNull();
+    await act(async () => f.button('Open new tab to recover').click());
+    const sent = inputs(f);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.action).toEqual({ type: 'new_tab' });
+    expect(sent[0]?.frameId).toBeUndefined();
+    expect(document.querySelector('.browser-preview-image')).not.toBeNull();
+    expect(f.button('Open new tab to recover')).toBeUndefined();
+  } finally {
+    await f.close();
+  }
+});
+
 function inputValue(node: HTMLTextAreaElement, value: string): void {
   Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(node, value);
   node.dispatchEvent(
@@ -667,8 +853,8 @@ it('magnifies for a two-pixel remote drag, pans locally, and preserves the keybo
     });
     expect(inputs(f)[0]?.action).toMatchObject({
       type: 'drag',
-      from: { x: 25, y: 12.5 },
-      to: { x: 27, y: 12.5 },
+      from: { x: 25, y: 13 },
+      to: { x: 27, y: 13 },
     });
     const before = inputs(f).length;
     await act(async () => f.button('Pan view').click());
@@ -1072,6 +1258,51 @@ it('shows drag feedback and cancels the gesture when expanding without replacing
     expect(document.querySelector('[aria-label="Text to insert into browser"]')).toBe(draft);
     expect(draft.value).toBe('Keep this draft');
     expect(f.button('Restore view').getAttribute('aria-pressed')).toBe('true');
+  } finally {
+    await f.close();
+  }
+});
+
+it('opens native bookmarks and account settings only after taking control', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    expect(f.button('Bookmarks').disabled).toBe(true);
+    expect(f.button('Chrome account').disabled).toBe(true);
+    await act(async () => f.button('Start browser').click());
+    await act(async () => f.button('Bookmarks').click());
+    await act(async () => f.button('Chrome account').click());
+    expect(inputs(f).map((r) => r.action)).toEqual([
+      { type: 'open_browser_page', page: 'bookmarks' },
+      { type: 'open_browser_page', page: 'account' },
+    ]);
+    await act(async () => f.button('Return control to agent').click());
+    expect(f.button('Bookmarks').disabled).toBe(true);
+    expect(f.button('Chrome account').disabled).toBe(true);
+  } finally {
+    await f.close();
+  }
+});
+
+it('expands the picture in Fit mode without replacing its image or sending remote input', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    const picture = document.querySelector('.browser-picture');
+    const image = document.querySelector('.browser-preview-image');
+    const zoom = document.querySelector<HTMLSelectElement>('[aria-label="View zoom"]')!;
+    await act(async () => {
+      zoom.value = '0.5';
+      zoom.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => f.button('Expand view').click());
+    expect(zoom.value).toBe('fit');
+    expect(document.querySelector('.browser-view-expanded')).not.toBeNull();
+    expect(document.querySelector('.browser-picture')).toBe(picture);
+    expect(document.querySelector('.browser-preview-image')).toBe(image);
+    expect(document.querySelector('.browser-interactive-viewport.is-zoomed')).toBeNull();
+    expect(inputs(f)).toHaveLength(0);
   } finally {
     await f.close();
   }

@@ -7,17 +7,33 @@ import {
   environmentRecordSchema,
   guestEnvelopeSchema,
   type GuestRelayPort,
+  type BrowserGuestRelayPort,
   type EnvironmentRecord,
   type GuestEnvelope,
   type GuestValue,
 } from '@trinity-harness/contracts';
 
 /** One generation-specific vsock connection; no guest-provided network address. */
-export class FirecrackerGuestRelay implements GuestRelayPort {
+export class FirecrackerGuestRelay implements GuestRelayPort, BrowserGuestRelayPort {
   constructor(private readonly stateRoot = '/srv/trinity-node') {}
   async call(
     input: EnvironmentRecord,
     envelope: GuestEnvelope,
+    signal?: AbortSignal,
+  ): Promise<GuestValue> {
+    return this.relay(input, envelope, 4050, signal);
+  }
+  async callBrowser(
+    input: EnvironmentRecord,
+    envelope: GuestEnvelope,
+    signal?: AbortSignal,
+  ): Promise<GuestValue> {
+    return this.relay(input, envelope, 4051, signal);
+  }
+  private async relay(
+    input: EnvironmentRecord,
+    envelope: GuestEnvelope,
+    port: 4050 | 4051,
     signal?: AbortSignal,
   ): Promise<GuestValue> {
     const environment = environmentRecordSchema.parse(input);
@@ -63,7 +79,7 @@ export class FirecrackerGuestRelay implements GuestRelayPort {
         socket.resume();
       };
       socket.on('data', read);
-      socket.once('connect', () => socket.write('CONNECT 4050\n'));
+      socket.once('connect', () => socket.write(`CONNECT ${port}\n`));
       return undefined;
     };
     try {

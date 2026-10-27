@@ -39,6 +39,99 @@ function fakeFetch(routes: Record<string, (init?: RequestInit) => Response>) {
 }
 
 describe('AcpClient', () => {
+  it('waits for a terminal event after cancelling and disposes its independent stream', async () => {
+    const promptId = crypto.randomUUID();
+    const sources: FakeEventSource[] = [];
+    let cancelled!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      cancelled = resolve;
+    });
+    const client = new AcpClient({
+      baseUrl: 'http://x',
+      eventSourceFactory: (url) => {
+        const source = new FakeEventSource(url);
+        sources.push(source);
+        return source;
+      },
+    });
+    const { impl } = fakeFetch({
+      'GET http://x/api/sessions/s/timeline': () =>
+        new Response(
+          JSON.stringify({
+            events: [
+              {
+                type: 'message/committed',
+                sessionId: 's',
+                message: { role: 'user', id: promptId, content: 'Request' },
+              },
+            ],
+            nextBefore: null,
+            lastSeq: 7,
+          }),
+        ),
+      'POST http://x/api/sessions/s/cancel': () => {
+        cancelled();
+        return new Response(JSON.stringify({ ok: true, alreadyStopped: false }));
+      },
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = impl;
+    try {
+      let settled = false;
+      const waiting = client.stopAndWait('s', new AbortController().signal).then(() => {
+        settled = true;
+      });
+      await requested;
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(sources[0]!.url).toContain('afterSeq=7');
+      sources[0]!.emit(
+        { type: 'session/prompt_queue', sessionId: 's', promptId, state: 'cancelled' },
+        8,
+      );
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      sources[0]!.emit({ type: 'session/turn_status', sessionId: 's', status: 'aborted' }, 9);
+      await waiting;
+      expect(sources[0]!.closed).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('cancels Stop waiting without submitting a retry and accepts an empty deletion response', async () => {
+    const source = new FakeEventSource('fake');
+    let cancelled!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      cancelled = resolve;
+    });
+    const client = new AcpClient({ baseUrl: 'http://x', eventSourceFactory: () => source });
+    const { impl } = fakeFetch({
+      'GET http://x/api/sessions/s/timeline': () =>
+        new Response(JSON.stringify({ events: [], nextBefore: null, lastSeq: 0 })),
+      'POST http://x/api/sessions/s/cancel': () => {
+        cancelled();
+        return new Response(JSON.stringify({ ok: true, alreadyStopped: false }));
+      },
+      'DELETE http://x/api/sessions/s/messages/p/assistant': () =>
+        new Response(null, { status: 204 }),
+    });
+    const original = globalThis.fetch;
+    globalThis.fetch = impl;
+    try {
+      const controller = new AbortController();
+      const waiting = client.stopAndWait('s', controller.signal);
+      const rejected = expect(waiting).rejects.toThrow('Cancelled');
+      await requested;
+      controller.abort(new Error('Cancelled'));
+      await rejected;
+      expect(source.closed).toBe(true);
+      await expect(client.removeMessage('s', 'p', 'assistant')).resolves.toBeUndefined();
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it('loads validated settings with cancellation and saves permissions once with authentication', async () => {
     const settings = {
       sessionId: crypto.randomUUID(),

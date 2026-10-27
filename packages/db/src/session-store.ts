@@ -72,6 +72,11 @@ export class PgSessionStore implements SessionStore {
       if (events.length === 1 && events[0]?.type === 'session/created' && last)
         return { from: 1, to: 1 };
 
+      if (opts?.expectedLastSeq !== undefined && opts.expectedLastSeq !== Number(last?.seq ?? 0))
+        throw Object.assign(new Error('Conversation changed; refresh and retry.'), {
+          code: 'SESSION_CONFLICT',
+        });
+
       if (events.length === 1 && events[0]?.type === 'activity/reference') {
         const reference = events[0];
         const [prior] = await tx

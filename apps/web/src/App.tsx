@@ -50,7 +50,7 @@ import {
 import { HistorySidebar, HistoryDivider } from './history-sidebar';
 import { ChatComposer } from './chat-composer';
 import './chat-layout.css';
-import { ResponseActions } from './response-actions';
+import { MessageControls } from './message-controls';
 import { MessageTimestamp } from './message-timestamp';
 import { AnswerCitationList } from './answer-citations';
 import { UsagePanel } from './usage-panel';
@@ -64,6 +64,7 @@ import { loadTimelineWithPrompt } from './conversation-history';
 
 import {
   applyTimelineEvent,
+  removeChatMessage,
   mergeModelUsage,
   mergeRecallSelection,
   settleAssistantItems,
@@ -252,6 +253,11 @@ export default function App() {
         ? timelineHistory.current.get(sessionRef.current)
         : undefined;
       history?.events.push(event);
+      if (event.type === 'message/removed') {
+        setItems((prev) => removeChatMessage(prev, event.promptId, event.role));
+        setQueuedPrompts((prev) => prev.filter((entry) => entry.promptId !== event.promptId));
+        return;
+      }
       if (event.type === 'session/activity') {
         const id = sessionRef.current;
         if (id) {
@@ -366,7 +372,13 @@ export default function App() {
       }
       if (event.type === 'session/turn_status') {
         if (event.status === 'running' || event.status === 'awaiting_approval') {
+          setBusy(true);
           const awaitingApproval = event.status === 'awaiting_approval';
+          setItems((items) =>
+            items.at(-1)?.role === 'user'
+              ? mergeAssistantChunk(items, '', newItemKey, new Date().toISOString())
+              : items,
+          );
           setItems((items) => setAssistantApproval(items, awaitingApproval));
         }
         if (event.status === 'completed' || event.status === 'aborted') {
@@ -769,10 +781,11 @@ export default function App() {
       }));
       setStaged([]);
       setBusy(true);
+      const userKey = newItemKey();
       setItems((prev) => [
         ...prev,
         {
-          key: newItemKey(),
+          key: userKey,
           role: 'user',
           at: new Date(Date.now()).toISOString(),
           content: trimmed || '[attachments]',
@@ -800,7 +813,22 @@ export default function App() {
             attachment.uri = uploaded.uri;
           }
         }
-        await client.sendPrompt(id, trimmed || '[see attachments]', mimeList);
+        const promptId = await client.sendPrompt(id, trimmed || '[see attachments]', mimeList);
+        if (promptId && sessionRef.current === id)
+          setItems((items) =>
+            items.map((item) =>
+              item.key === userKey
+                ? {
+                    ...item,
+                    messageId: promptId,
+                    attachments: item.attachments.map((attachment, index) => ({
+                      ...attachment,
+                      uri: mimeList[index]?.uri ?? attachment.uri,
+                    })),
+                  }
+                : item,
+            ),
+          );
         for (const attachment of staged) {
           if (localFiles.current.has(attachment.uri)) {
             URL.revokeObjectURL(attachment.uri);
@@ -935,7 +963,16 @@ export default function App() {
           Load older messages
         </Button>
       )}
-      {items.length > 0 && <ChatTranscript items={items} sessionId={sessionId} />}
+      {items.length > 0 && (
+        <ChatTranscript
+          key={sessionId}
+          items={items}
+          sessionId={sessionId}
+          busy={busy}
+          onEvent={user?.role === 'viewer' ? undefined : handleEvent}
+          canAmendLast={queuedPrompts.length === 0}
+        />
+      )}
       {isMain && activities.length > 0 && (
         <div className="linked-work-cards" aria-label="Shared answers">
           {activities.slice(-8).map((entry) => (
@@ -1030,11 +1067,31 @@ export default function App() {
       {isMain && queuedPrompts.length > 0 && (
         <div className="queued-prompts" role="status">
           <Typography.Text strong>Queued · {queuedPrompts.length}</Typography.Text>
-          {queuedPrompts.map((entry) => (
-            <Typography.Paragraph key={entry.promptId} ellipsis>
-              {entry.text}
-            </Typography.Paragraph>
-          ))}
+          {queuedPrompts.map((entry, index) => {
+            const item: ChatItem = {
+              key: entry.promptId,
+              messageId: entry.promptId,
+              role: 'user',
+              content: entry.text,
+              streaming: false,
+              tools: [],
+              attachments: [],
+            };
+            return (
+              <div key={entry.promptId}>
+                <Typography.Paragraph ellipsis>{entry.text}</Typography.Paragraph>
+                <MessageControls
+                  client={client}
+                  sessionId={sessionId}
+                  item={item}
+                  prompt={item}
+                  editable={index === queuedPrompts.length - 1}
+                  busy={true}
+                  onEvent={handleEvent}
+                />
+              </div>
+            );
+          })}
         </div>
       )}
       <div className="composer-dock">
@@ -1571,42 +1628,79 @@ const bubbleRoles = {
   assistant: { placement: 'start' as const },
 };
 
-function renderChatMessage(item: ChatItem): ReactElement {
-  return <ChatMessageContent item={item} />;
+type ChatBubbleContent = { item: ChatItem; prompt?: ChatItem; editable: boolean };
+
+function renderChatMessage({ item, prompt, editable }: ChatBubbleContent): ReactElement {
+  return <ChatMessageContent item={item} prompt={prompt} editable={editable} />;
 }
 
 const BrowserSessionContext = createContext<string | null>(null);
+const MessageControlContext = createContext<{
+  sessionId: string | null;
+  busy: boolean;
+  onEvent?: (event: ServerEvent) => void;
+}>({ sessionId: null, busy: false });
 
 const ChatTranscript = memo(function ChatTranscript({
   items,
   sessionId = null,
+  busy = false,
+  onEvent,
+  canAmendLast = true,
 }: {
   items: ChatItem[];
   sessionId?: string | null;
+  busy?: boolean;
+  onEvent?: (event: ServerEvent) => void;
+  canAmendLast?: boolean;
 }): ReactElement {
-  const bubbleItems = useMemo(
-    () =>
-      items.map((item) => ({
-        key: item.key,
-        role: item.role,
-        content: item,
-        messageRender: renderChatMessage,
-      })),
-    [items],
-  );
+  const controlContext = useMemo(() => ({ sessionId, busy, onEvent }), [sessionId, busy, onEvent]);
+  const bubbleItems = useMemo(() => {
+    const lastUser = [...items].reverse().find((item) => item.role === 'user');
+    const response = lastUser ? items[items.indexOf(lastUser) + 1] : undefined;
+    let prompt: ChatItem | undefined;
+    return items.flatMap((item) => {
+      if (item.role === 'user') prompt = item;
+      return item.removed
+        ? []
+        : [
+            {
+              key: item.key,
+              role: item.role,
+              content: {
+                item,
+                prompt,
+                editable:
+                  canAmendLast &&
+                  item === lastUser &&
+                  (!response?.final || !!response.error || !!response.stopped),
+              },
+              messageRender: renderChatMessage,
+            },
+          ];
+    });
+  }, [items, canAmendLast]);
   return (
     <BrowserSessionContext.Provider value={sessionId}>
-      <Bubble.List className="chat-messages" items={bubbleItems} roles={bubbleRoles} />
+      <MessageControlContext.Provider value={controlContext}>
+        <Bubble.List className="chat-messages" items={bubbleItems} roles={bubbleRoles} />
+      </MessageControlContext.Provider>
     </BrowserSessionContext.Provider>
   );
 });
 
 const ChatMessageContent = memo(function ChatMessageContent({
   item,
+  prompt,
+  editable,
 }: {
   item: ChatItem;
+  prompt?: ChatItem;
+  editable: boolean;
 }): ReactElement {
-  if (item.role === 'assistant') return <AssistantContent item={item} content={item.content} />;
+  const controls = useContext(MessageControlContext);
+  if (item.role === 'assistant')
+    return <AssistantContent item={item} content={item.content} prompt={prompt} />;
   return (
     <div>
       <div className="user-message-heading">
@@ -1614,14 +1708,18 @@ const ChatMessageContent = memo(function ChatMessageContent({
         <MessageTimestamp at={item.at} />
       </div>
       {item.content.length > 0 && (
-        <Typography.Paragraph
-          copyable={{ text: item.content }}
-          style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}
-        >
+        <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>
           {item.content}
         </Typography.Paragraph>
       )}
       <AttachmentList attachments={item.attachments} />
+      <MessageControls
+        client={client}
+        {...controls}
+        item={item}
+        prompt={prompt}
+        editable={editable}
+      />
     </div>
   );
 });
@@ -1645,8 +1743,17 @@ function normalizeMarkdownTableHeadings(markdown: string): string {
   return lines.join('\n');
 }
 
-function AssistantContent({ item, content }: { item: ChatItem; content: string }): ReactElement {
+function AssistantContent({
+  item,
+  content,
+  prompt,
+}: {
+  item: ChatItem;
+  content: string;
+  prompt?: ChatItem;
+}): ReactElement {
   const browserSessionId = useContext(BrowserSessionContext);
+  const controls = useContext(MessageControlContext);
   const browserTools = item.tools.filter((tool) => /^browser\(/.test(tool.title));
   return (
     <article className="assistant-response" aria-label="Trinity response">
@@ -1721,7 +1828,7 @@ function AssistantContent({ item, content }: { item: ChatItem; content: string }
       )}
       {item.recall && <MemoryContextDisclosure receipt={item.recall} />}
       <UsagePanel records={item.usage ?? EMPTY_USAGE} scope="Turn" active={item.streaming} />
-      {!item.streaming && content.trim().length > 0 && <ResponseActions content={content} />}
+      <MessageControls client={client} {...controls} item={item} prompt={prompt} editable={false} />
     </article>
   );
 }

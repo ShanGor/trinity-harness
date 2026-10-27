@@ -1,4 +1,4 @@
-import { memo, useState, type ReactElement } from 'react';
+import { memo, useState, type ReactElement, type ReactNode } from 'react';
 import { Button, Tooltip } from 'antd';
 
 function ActionIcon({ name }: { name: 'copy' | 'check' | 'like' | 'dislike' }): ReactElement {
@@ -36,8 +36,12 @@ const popupContainer = (trigger: HTMLElement): HTMLElement => trigger.parentElem
 
 export const ResponseActions = memo(function ResponseActions({
   content,
+  role = 'assistant',
+  children,
 }: {
   content: string;
+  role?: 'user' | 'assistant';
+  children?: ReactNode;
 }): ReactElement {
   const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'failed'>('idle');
   const [rating, setRating] = useState<'like' | 'dislike' | null>(null);
@@ -57,39 +61,50 @@ export const ResponseActions = memo(function ResponseActions({
   };
 
   return (
-    <div className="response-actions" role="group" aria-label="Response actions">
+    <div
+      className="response-actions"
+      role="group"
+      aria-label={role === 'user' ? 'Message actions' : 'Response actions'}
+    >
       <Tooltip
         getPopupContainer={popupContainer}
         destroyOnHidden
-        title={copyState === 'copied' ? 'Copied' : 'Copy response'}
+        title={
+          copyState === 'copied' ? 'Copied' : role === 'user' ? 'Copy message' : 'Copy response'
+        }
       >
         <Button
           type="text"
-          aria-label="Copy response"
+          aria-label={role === 'user' ? 'Copy message' : 'Copy response'}
           disabled={copyState === 'copying'}
           onClick={() => void copy()}
           icon={<ActionIcon name={copyState === 'copied' ? 'check' : 'copy'} />}
         />
       </Tooltip>
-      <span className="response-action-divider" aria-hidden="true" />
-      <Tooltip getPopupContainer={popupContainer} destroyOnHidden title="Helpful">
-        <Button
-          type="text"
-          aria-label="Like response"
-          aria-pressed={rating === 'like'}
-          onClick={() => setRating((previous) => (previous === 'like' ? null : 'like'))}
-          icon={<ActionIcon name="like" />}
-        />
-      </Tooltip>
-      <Tooltip getPopupContainer={popupContainer} destroyOnHidden title="Not helpful">
-        <Button
-          type="text"
-          aria-label="Dislike response"
-          aria-pressed={rating === 'dislike'}
-          onClick={() => setRating((previous) => (previous === 'dislike' ? null : 'dislike'))}
-          icon={<ActionIcon name="dislike" />}
-        />
-      </Tooltip>
+      {role === 'assistant' && content.trim() && (
+        <>
+          <span className="response-action-divider" aria-hidden="true" />
+          <Tooltip getPopupContainer={popupContainer} destroyOnHidden title="Helpful">
+            <Button
+              type="text"
+              aria-label="Like response"
+              aria-pressed={rating === 'like'}
+              onClick={() => setRating((previous) => (previous === 'like' ? null : 'like'))}
+              icon={<ActionIcon name="like" />}
+            />
+          </Tooltip>
+          <Tooltip getPopupContainer={popupContainer} destroyOnHidden title="Not helpful">
+            <Button
+              type="text"
+              aria-label="Dislike response"
+              aria-pressed={rating === 'dislike'}
+              onClick={() => setRating((previous) => (previous === 'dislike' ? null : 'dislike'))}
+              icon={<ActionIcon name="dislike" />}
+            />
+          </Tooltip>
+        </>
+      )}
+      {children}
       <span className="response-action-status" role="status">
         {copyState === 'copied'
           ? 'Copied'

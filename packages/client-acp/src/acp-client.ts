@@ -3,6 +3,8 @@ import {
   personalFoldersResponseSchema,
   serverEventSchema,
   turnCancelResponseSchema,
+  messageRevisionSchema,
+  promptAcceptedSchema,
   memorySnapshotSchema,
   sessionSummaryListSchema,
   sessionSettingsSchema,
@@ -23,6 +25,7 @@ import type {
   SurfaceMessage,
   WorkspaceSelection,
   TurnCancelResponse,
+  MessageRevision,
   MemoryCommand,
   MemorySnapshot,
   HistoryPage,
@@ -237,6 +240,7 @@ export class AcpClient {
       ...(signal ? { signal } : {}),
     });
     if (!res.ok) throw new Error(`Request failed (${res.status})`);
+    if (res.status === 204) return undefined;
     return res.json();
   }
   async getMemory(): Promise<MemorySnapshot> {
@@ -363,10 +367,17 @@ export class AcpClient {
     await this.assistantRequest(`/api/sessions/${sessionId}/share-back`, 'POST', { eventId });
   }
 
-  async getTimeline(sessionId: string, beforeSeq?: number): Promise<TimelinePage> {
+  async getTimeline(
+    sessionId: string,
+    beforeSeq?: number,
+    signal?: AbortSignal,
+  ): Promise<TimelinePage> {
     return timelinePageSchema.parse(
       await this.assistantRequest(
         `/api/sessions/${sessionId}/timeline${beforeSeq ? `?beforeSeq=${beforeSeq}` : ''}`,
+        'GET',
+        undefined,
+        signal,
       ),
     );
   }
@@ -386,7 +397,7 @@ export class AcpClient {
     sessionId: string,
     text: string,
     attachments?: { uri: string; mimeType: string }[],
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const res = await fetch(`${this.baseUrl}/api/sessions/${sessionId}/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...this.authHeaders() },
@@ -397,6 +408,91 @@ export class AcpClient {
     });
     if (res.status !== 202) {
       throw new Error(`sendPrompt failed: ${res.status}`);
+    }
+    return promptAcceptedSchema.parse(await res.json()).promptId;
+  }
+
+  async removeMessage(
+    sessionId: string,
+    promptId: string,
+    role: 'user' | 'assistant',
+  ): Promise<void> {
+    await this.assistantRequest(
+      `/api/sessions/${sessionId}/messages/${promptId}/${role}`,
+      'DELETE',
+    );
+  }
+
+  async reviseMessage(
+    sessionId: string,
+    revision: MessageRevision,
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.assistantRequest(
+      `/api/sessions/${sessionId}/messages`,
+      'POST',
+      {
+        text,
+        revision: messageRevisionSchema.parse(revision),
+      },
+      signal,
+    );
+  }
+
+  /** Subscribe before cancelling; only a durable terminal update confirms Stop. */
+  async stopAndWait(sessionId: string, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    const page = await this.getTimeline(sessionId, undefined, signal);
+    let events = page.events;
+    let before = page.nextBefore;
+    while (
+      before !== null &&
+      !events.some((event) => event.type === 'message/committed' && event.message.role === 'user')
+    ) {
+      const older = await this.getTimeline(sessionId, before, signal);
+      signal.throwIfAborted();
+      if (older.nextBefore !== null && older.nextBefore >= before)
+        throw new Error('History cursor did not advance');
+      events = [...older.events, ...events];
+      before = older.nextBefore;
+    }
+    let active = false;
+    for (const event of events) {
+      if (event.type === 'message/committed' && event.message.role === 'user') active = true;
+      if (event.type === 'session/turn_status')
+        active = event.status === 'running' || event.status === 'awaiting_approval';
+      if (event.type === 'error') active = false;
+    }
+    signal.throwIfAborted();
+    let stream: EventStreamHandle | undefined;
+    let abort: (() => void) | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        abort = () => reject(signal.reason);
+        signal.addEventListener('abort', abort, { once: true });
+        stream = this.openEventStream(
+          sessionId,
+          {
+            onEvent: (event) => {
+              if (
+                event.type === 'error' ||
+                (event.type === 'session/turn_status' &&
+                  (event.status === 'aborted' || event.status === 'completed')) ||
+                (!active && event.type === 'session/prompt_queue' && event.state === 'cancelled')
+              )
+                resolve();
+            },
+          },
+          { afterSeq: page.lastSeq },
+        );
+        void this.cancelTurn(sessionId, signal).then((result) => {
+          if (result.alreadyStopped) resolve();
+        }, reject);
+      });
+    } finally {
+      if (abort) signal.removeEventListener('abort', abort);
+      stream?.close();
     }
   }
 
@@ -549,11 +645,12 @@ export class AcpClient {
   }
 
   /** M3: abort the in-flight turn of a session (session/cancel). */
-  async cancelTurn(sessionId: string): Promise<TurnCancelResponse> {
+  async cancelTurn(sessionId: string, signal?: AbortSignal): Promise<TurnCancelResponse> {
     const res = await fetch(`${this.baseUrl}/api/sessions/${sessionId}/cancel`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify({}),
+      ...(signal ? { signal } : {}),
     });
     if (!res.ok) {
       throw new Error(`cancelTurn failed: ${res.status}`);

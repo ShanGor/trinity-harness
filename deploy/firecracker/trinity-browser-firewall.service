@@ -1,0 +1,15 @@
+[Unit]
+DefaultDependencies=no
+Description=Protect guest Chrome debugging endpoint from workspace processes
+After=local-fs.target systemd-modules-load.service
+Before=trinity-browser.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /opt/trinity-firecracker/browser-debug-firewall.nft
+StandardOutput=journal+console
+StandardError=journal+console
+RemainAfterExit=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN

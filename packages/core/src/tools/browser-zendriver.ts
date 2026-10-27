@@ -18,6 +18,7 @@ import {
   type BrowserHumanAction,
   type BrowserFrameTarget,
   type BrowserKeyboardTarget,
+  type BrowserRecoveryTarget,
   type BrowserHumanInputResult,
   type ToolContext,
 } from '@trinity-harness/contracts';
@@ -41,6 +42,14 @@ import { ZENDRIVER_VERSION, zendriverStructured, type ZendriverClient } from './
 const ack = z.object({ ok: z.literal(true) });
 /** Chrome's internal network-error document (failed navigation, dead proxy…). */
 const CHROME_ERROR_PAGE_URL = 'chrome-error://chromewebdata/';
+const privateBrowserPages = {
+  bookmarks: 'chrome://bookmarks/',
+  account: 'chrome://settings/people',
+} as const;
+/** Native pages are available only to the controlling human, never as model evidence. */
+function isPrivateBrowserPage(url: string | undefined): boolean {
+  return url !== undefined && /^chrome:\/\/(?:bookmarks\/(?:[?#].*)?|settings\/[^\s]*)$/.test(url);
+}
 /** One instance is bound to one supervisor-owned MCP connection and generation. */
 export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessPort {
   private readonly focusKey = `__trinity_focus_${randomUUID()}`;
@@ -102,7 +111,7 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
         throw new BrowserDriverError('STALE_TARGET');
       observed = again;
     }
-    const state = this.checkedState({ ...observed.page, tabId: status.current_tab.id });
+    const state = this.checkedState({ ...observed.page, tabId: status.current_tab.id }, true);
     return { binding: this.binding(state), focus: observed.focus, surface: observed.surface };
   }
   private binding(state: BrowserDriverState): BrowserBinding {
@@ -128,24 +137,53 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
     ctx: ToolContext,
     now: () => Date = () => new Date(),
   ): Promise<BrowserHumanCapture> {
-    if (!privateView)
-      return { preview: await captureBrowserPreview(this, this, ctx, this.generation, now) };
+    if (!privateView) {
+      const preview = await captureBrowserPreview(this, this, ctx, this.generation, now);
+      if (
+        preview.state === 'unavailable' &&
+        (await this.authorizeSession(this.sessionId, ctx.signal))
+      ) {
+        try {
+          // Native pages remain unreadable to the agent. Explicit handoff may
+          // leave one active so the agent can navigate to a validated web URL.
+          if (isPrivateBrowserPage((await this.inspect(ctx.signal, true)).url))
+            return { preview, handoff: 'navigation_only' };
+        } catch {
+          ctx.signal?.throwIfAborted();
+          return { preview };
+        }
+      }
+      return { preview };
+    }
     const observed = await this.humanObservation(true, ctx.signal);
     const { binding, focus: focusBefore } = observed;
     const before = observed.surface!;
     const { width, height } = before.context;
     if (width > BROWSER_LIMITS.imageDimension || height > BROWSER_LIMITS.imageDimension)
-      return { preview: { state: 'unavailable' } };
+      return { preview: { state: 'unavailable' }, unavailableReason: 'viewport_size' };
     if ((await this.paint(binding, ctx)) !== 'ready') return { preview: { state: 'busy' } };
     const bytes = Buffer.from(await this.screenshot(binding, ctx));
     if (
       bytes.length < 24 ||
       bytes.length > BROWSER_LIMITS.image ||
-      !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ||
-      bytes.readUInt32BE(16) !== width ||
-      bytes.readUInt32BE(20) !== height
+      !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
     )
-      return { preview: { state: 'unavailable' } };
+      return { preview: { state: 'unavailable' }, unavailableReason: 'image_geometry' };
+    if (bytes.readUInt32BE(16) !== width || bytes.readUInt32BE(20) !== height) {
+      // Chrome-created tabs may settle their emulated viewport during the
+      // first capture. Discard those pixels and reobserve; never bind input
+      // coordinates to a picture from a different viewport.
+      const settled = await this.humanObservation(true, ctx.signal);
+      const context = settled.surface!.context;
+      if (
+        settled.binding.tabId !== binding.tabId ||
+        settled.binding.documentRevision !== binding.documentRevision ||
+        context.width !== width ||
+        context.height !== height
+      )
+        return { preview: { state: 'busy' } };
+      return { preview: { state: 'unavailable' }, unavailableReason: 'image_geometry' };
+    }
     PNG.sync.read(bytes);
     const updated = await this.humanObservation(true, ctx.signal);
     const { binding: current, focus: focusAfter } = updated;
@@ -213,9 +251,15 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
   }
   async humanInput(
     action: BrowserHumanAction,
-    target: BrowserFrameTarget | BrowserKeyboardTarget,
+    target: BrowserFrameTarget | BrowserKeyboardTarget | BrowserRecoveryTarget,
     ctx: ToolContext,
   ): Promise<BrowserHumanInputResult> {
+    if ('recovery' in target) {
+      if (!(await this.authorizeSession(this.sessionId, ctx.signal)))
+        throw new BrowserDriverError('NOT_AUTHORIZED');
+      if (action.type !== 'new_tab') return { effect: 'none' };
+      return this.newHumanTab(ctx.signal);
+    }
     const keyboard = !('frameId' in target);
     if (keyboard && action.type !== 'text' && action.type !== 'key') return { effect: 'none' };
     const chromeAction = [
@@ -224,6 +268,7 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
       'forward',
       'reload',
       'new_tab',
+      'open_browser_page',
       'switch_tab',
       'close_tab',
     ].includes(action.type);
@@ -253,6 +298,19 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
       await this.navigate(binding, action.url, ctx);
       return { effect: 'applied' };
     }
+    if (action.type === 'open_browser_page') {
+      // A fixed destination, not a general chrome:// navigation capability.
+      z.object({ url: z.string(), title: z.string() }).parse(
+        zendriverStructured(
+          await this.client.call(
+            'browser_goto',
+            { url: privateBrowserPages[action.page], wait_for: 'none', return_snapshot: false },
+            ctx.signal,
+          ),
+        ),
+      );
+      return { effect: 'applied' };
+    }
     if (action.type === 'back' || action.type === 'forward') {
       // Browser history controls are no-ops at either end. The upstream MCP
       // back/forward handlers throw there, incorrectly quarantining safe input.
@@ -269,37 +327,30 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
       );
       return { effect: 'applied' };
     }
-    if (action.type === 'new_tab' || action.type === 'switch_tab' || action.type === 'close_tab') {
+    if (action.type === 'new_tab') return this.newHumanTab(ctx.signal);
+    if (action.type === 'switch_tab' || action.type === 'close_tab') {
       const tabs = await this.humanTabs(ctx.signal);
-      if (action.type === 'new_tab') {
-        if (tabs.length >= 64) return { effect: 'none' };
-        z.object({ id: z.string().min(1) }).parse(
+      const tab = tabs.find((tab) => tab.id === action.tabId);
+      if (!tab || (action.type === 'close_tab' && tabs.length === 1)) return { effect: 'none' };
+      if (action.type === 'switch_tab') {
+        if (
+          tab.url !== 'about:blank' &&
+          tab.url !== CHROME_ERROR_PAGE_URL &&
+          !isPrivateBrowserPage(tab.url) &&
+          !browserUrlSchema.safeParse(tab.url).success
+        )
+          return { effect: 'none' };
+        z.object({ id: z.literal(tab.id) }).parse(
           zendriverStructured(
-            await this.client.call('browser_tab_new', { activate: true }, ctx.signal),
+            await this.client.call('browser_tab_activate', { tab_id: tab.id }, ctx.signal),
           ),
         );
       } else {
-        const tab = tabs.find((tab) => tab.id === action.tabId);
-        if (!tab || (action.type === 'close_tab' && tabs.length === 1)) return { effect: 'none' };
-        if (action.type === 'switch_tab') {
-          if (
-            tab.url !== 'about:blank' &&
-            tab.url !== CHROME_ERROR_PAGE_URL &&
-            !browserUrlSchema.safeParse(tab.url).success
-          )
-            return { effect: 'none' };
-          z.object({ id: z.literal(tab.id) }).parse(
-            zendriverStructured(
-              await this.client.call('browser_tab_activate', { tab_id: tab.id }, ctx.signal),
-            ),
-          );
-        } else {
-          z.object({ closed_id: z.literal(tab.id) }).parse(
-            zendriverStructured(
-              await this.client.call('browser_tab_close', { tab_id: tab.id }, ctx.signal),
-            ),
-          );
-        }
+        z.object({ closed_id: z.literal(tab.id) }).parse(
+          zendriverStructured(
+            await this.client.call('browser_tab_close', { tab_id: tab.id }, ctx.signal),
+          ),
+        );
       }
       return { effect: 'applied' };
     }
@@ -355,7 +406,18 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
       },
     };
   }
-  async open(signal?: AbortSignal, expectedChromeVersion = '155.0.8059.84'): Promise<void> {
+  private async newHumanTab(signal?: AbortSignal): Promise<BrowserHumanInputResult> {
+    if ((await this.humanTabs(signal)).length >= 64) return { effect: 'none' };
+    z.object({ id: z.string().min(1) }).parse(
+      zendriverStructured(await this.client.call('browser_tab_new', { activate: true }, signal)),
+    );
+    return { effect: 'applied' };
+  }
+  async open(
+    signal?: AbortSignal,
+    expectedChromeVersion = '155.0.8059.84',
+    headless = true,
+  ): Promise<void> {
     const configured = z
       .object({
         active_profile: z.literal('native'),
@@ -376,13 +438,13 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
     void configured;
     z.object({
       chrome_version: z.literal(`Chrome/${expectedChromeVersion}`),
-      headless: z.literal(true),
+      headless: z.literal(headless),
       profile: z.literal('native'),
     }).parse(
       zendriverStructured(
         await this.client.call(
           'browser_open',
-          { headless: true, stealth_profile: 'native', input_profile: 'native' },
+          { headless, stealth_profile: 'native', input_profile: 'native' },
           signal,
         ),
       ),
@@ -395,7 +457,7 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
       await this.evaluate('({width:innerWidth,height:innerHeight,scale:devicePixelRatio})', signal),
     );
   }
-  private async inspect(signal?: AbortSignal): Promise<BrowserDriverState> {
+  private async inspect(signal?: AbortSignal, privatePages = false): Promise<BrowserDriverState> {
     const status = z
       .object({
         open: z.literal(true),
@@ -423,13 +485,14 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
         throw new BrowserDriverError('STALE_TARGET');
       page = again;
     }
-    return this.checkedState({ ...page, tabId: status.current_tab.id });
+    return this.checkedState({ ...page, tabId: status.current_tab.id }, privatePages);
   }
-  private checkedState(raw: unknown): BrowserDriverState {
+  private checkedState(raw: unknown, privatePages = false): BrowserDriverState {
     const state = browserDriverStateSchema.parse(raw);
     if (
       state.url !== 'about:blank' &&
       state.url !== CHROME_ERROR_PAGE_URL &&
+      !(privatePages && isPrivateBrowserPage(state.url)) &&
       !browserUrlSchema.safeParse(state.url).success
     )
       throw new BrowserDriverError(
@@ -448,7 +511,7 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
     if (sessionId !== this.sessionId || !(await this.authorizeSession(sessionId, signal)))
       throw new BrowserDriverError('NOT_AUTHORIZED');
     if (url !== undefined) browserUrlSchema.parse(url);
-    const state = await this.inspect(signal);
+    const state = await this.inspect(signal, operation === 'navigate' && url !== undefined);
     if (state.url === CHROME_ERROR_PAGE_URL && (operation !== 'navigate' || url === undefined))
       // Only an explicit validated HTTP(S) navigation may move the owned tab
       // away from Chrome's error page; reading it cannot produce evidence.
@@ -462,7 +525,7 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
     return this.binding(state);
   }
   async verify(binding: BrowserBinding, ctx: { signal?: AbortSignal }): Promise<void> {
-    const state = await this.inspect(ctx.signal);
+    const state = await this.inspect(ctx.signal, isPrivateBrowserPage(binding.observedUrl));
     if (
       binding.driver?.runtimeGeneration !== this.generation ||
       binding.tabId !== state.tabId ||

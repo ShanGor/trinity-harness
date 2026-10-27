@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { z } from 'zod';
 import { type BrowserRuntimeRequest, type ManagedBrowserSession } from '@trinity-harness/contracts';
@@ -6,6 +6,7 @@ import {
   LocalSandbox,
   LocalBlobStore,
   ZendriverMcpConnection,
+  ZendriverOperationGate,
   ZendriverBrowserDriver,
   ManagedBrowserSupervisor,
   createBrowserTool,
@@ -130,8 +131,9 @@ async function main(): Promise<void> {
       const relative = path.relative(path.resolve(env.WORKSPACE_ROOT), root);
       if (relative.startsWith('..') || path.isAbsolute(relative))
         throw new Error('Browser workspace outside deployment root');
+      const browserGuest = env.GUEST_DESKTOP_ENABLED ? guestRouter?.browser() : undefined;
       const sandbox = guestRouter
-        ? new RemoteSandbox(guestRouter, request.sessionId)
+        ? new RemoteSandbox(browserGuest ?? guestRouter, request.sessionId)
         : new LocalSandbox(root, { envMode: 'minimal' });
       let releaseProfile: () => Promise<void> = async () => {};
       let profile: Awaited<ReturnType<typeof prepareBrowserProfile>> | undefined;
@@ -149,6 +151,7 @@ async function main(): Promise<void> {
       }
       let connection: ZendriverMcpConnection | undefined;
       let driver: ZendriverBrowserDriver | undefined;
+      let agentGate: ZendriverOperationGate | undefined;
       let disposing: Promise<void> | undefined;
       const dispose = async (): Promise<void> => {
         disposing ??= (async () => {
@@ -183,7 +186,7 @@ async function main(): Promise<void> {
                     : {}),
                 },
               );
-        connection = new ZendriverMcpConnection(process);
+        connection = new ZendriverMcpConnection(process, browserGuest ? 100_000 : 30_000);
         const opener = new ZendriverBrowserDriver(
           connection,
           request.sessionId,
@@ -192,7 +195,7 @@ async function main(): Promise<void> {
         );
         driver = opener;
         await connection.initialize(signal);
-        await opener.open(signal, env.ZENDRIVER_CHROME_VERSION);
+        await opener.open(signal, env.ZENDRIVER_CHROME_VERSION, !browserGuest);
         await store.append(request.sessionId, [
           {
             type: 'browser/runtime_bound',
@@ -215,24 +218,97 @@ async function main(): Promise<void> {
       }
       return {
         generation,
-        humanFrame: (privateView, active) =>
-          activeDriver.humanFrame(privateView, {
+        ...(browserGuest
+          ? {
+              fenceAgent: (): boolean => {
+                if (!agentGate) return false;
+                agentGate.fence();
+                return true;
+              },
+            }
+          : {}),
+        humanFrame: async (privateView, active) => {
+          if (!privateView && browserGuest) return { preview: { state: 'privacy_blocked' } };
+          if (privateView && browserGuest) {
+            const capturedAt = new Date().toISOString();
+            const desktop = await browserGuest.call(
+              request.sessionId,
+              { kind: 'desktopFrame' },
+              active,
+            );
+            if (desktop.kind !== 'desktopFrame') throw new Error('Unexpected desktop response');
+            return {
+              surface: 'desktop',
+              preview: {
+                state: 'frame',
+                generation,
+                capturedAt,
+                securityMode: 'trusted-managed',
+                width: desktop.width,
+                height: desktop.height,
+                png: desktop.png,
+              },
+              target: {
+                tabId: 'desktop',
+                documentRevision: generation,
+                fingerprint: randomBytes(32).toString('hex'),
+                width: desktop.width,
+                height: desktop.height,
+                capturedAt,
+                ...(desktop.focusRevision ? { focusRevision: desktop.focusRevision } : {}),
+              },
+            };
+          }
+          return activeDriver.humanFrame(privateView, {
             sessionId: request.sessionId,
             callId: `human-frame-${randomUUID()}`,
             sandbox,
             workspaceRoot: root,
             signal: active,
-          }),
-        humanInput: (action, target, active) =>
-          activeDriver.humanInput(action, target, {
+          });
+        },
+        ...(browserGuest
+          ? {
+              humanHandoff: async () => ({
+                preview: { state: 'unavailable' as const },
+                handoff: 'navigation_only' as const,
+              }),
+            }
+          : {}),
+        humanInput: async (action, target, active) => {
+          if (browserGuest && 'frameId' in target && target.tabId === 'desktop') {
+            if (!['click', 'drag', 'scroll', 'key', 'text'].includes(action.type))
+              return { effect: 'none' };
+            const result = await browserGuest.call(
+              request.sessionId,
+              {
+                kind: 'desktopInput',
+                action,
+                target: {
+                  width: target.width,
+                  height: target.height,
+                  ...(target.focusRevision ? { focusRevision: target.focusRevision } : {}),
+                },
+              },
+              active,
+            );
+            if (result.kind !== 'desktopInput')
+              throw new Error('Unexpected desktop input response');
+            return { effect: result.effect };
+          }
+          if (browserGuest) return { effect: 'none' };
+          return activeDriver.humanInput(action, target, {
             sessionId: request.sessionId,
             callId: `human-input-${randomUUID()}`,
             sandbox,
             workspaceRoot: root,
             signal: active,
-          }),
+          });
+        },
         preview: (active) =>
-          captureBrowserPreview(
+          browserGuest
+            ? Promise.resolve({ state: 'privacy_blocked' as const })
+            : captureBrowserPreview(
             activeDriver,
             activeDriver,
             {
@@ -257,8 +333,10 @@ async function main(): Promise<void> {
           const relativeSource = path.relative(path.resolve(env.WORKSPACE_ROOT), sourceRoot);
           if (relativeSource.startsWith('..') || path.isAbsolute(relativeSource))
             return browserRuntimeFailure(command, 'NOT_AUTHORIZED');
+          const gate = new ZendriverOperationGate(connection!);
+          agentGate = gate;
           const sourceDriver = new ZendriverBrowserDriver(
-            connection!,
+            gate,
             command.sessionId,
             generation,
             async (id, signal) =>
@@ -272,16 +350,20 @@ async function main(): Promise<void> {
             driver: sourceDriver,
             access: sourceDriver,
           });
-          return tool.execute(command.args, {
-            sessionId: command.sessionId,
-            callId: command.callId,
-            permissionGranted: command.permissionGranted,
-            sandbox: guestRouter
-              ? new RemoteSandbox(guestRouter, command.sessionId)
-              : new LocalSandbox(sourceRoot, { envMode: 'minimal' }),
-            workspaceRoot: sourceRoot,
-            signal: active,
-          });
+          try {
+            return await tool.execute(command.args, {
+              sessionId: command.sessionId,
+              callId: command.callId,
+              permissionGranted: command.permissionGranted,
+              sandbox: guestRouter
+                ? new RemoteSandbox(guestRouter, command.sessionId)
+                : new LocalSandbox(sourceRoot, { envMode: 'minimal' }),
+              workspaceRoot: sourceRoot,
+              signal: active,
+            });
+          } finally {
+            if (agentGate === gate) agentGate = undefined;
+          }
         },
         dispose,
       };

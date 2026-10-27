@@ -8,6 +8,7 @@ import type {
   BrowserHumanAction,
   BrowserFrameTarget,
   BrowserKeyboardTarget,
+  BrowserRecoveryTarget,
   BrowserHumanInputResult,
 } from './browser-interaction.js';
 
@@ -147,11 +148,15 @@ export interface BrowserRuntimeStore {
 export interface ManagedBrowserSession {
   generation: string;
   execute(request: BrowserRuntimeRequest, signal: AbortSignal): Promise<ToolResult>;
+  /** Fence further calls in an in-flight agent operation without cancelling its current call. */
+  fenceAgent?(): boolean;
   preview?(signal: AbortSignal): Promise<BrowserPreview>;
   humanFrame?(privateView: boolean, signal: AbortSignal): Promise<BrowserHumanCapture>;
+  /** A non-mutating handoff check, independent of any blocked private capture. */
+  humanHandoff?(signal: AbortSignal): Promise<BrowserHumanCapture>;
   humanInput?(
     action: BrowserHumanAction,
-    target: BrowserFrameTarget | BrowserKeyboardTarget,
+    target: BrowserFrameTarget | BrowserKeyboardTarget | BrowserRecoveryTarget,
     signal: AbortSignal,
   ): Promise<BrowserHumanInputResult | void>;
   dispose(): Promise<void>;

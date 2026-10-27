@@ -22,6 +22,7 @@ export const browserHumanActionSchema = z.discriminatedUnion('type', [
       type: z.literal('scroll'),
       dx: z.number().int().min(-2000).max(2000),
       dy: z.number().int().min(-2000).max(2000),
+      point: point.optional(),
     })
     .strict(),
   z.object({ type: z.literal('text'), text: z.string().min(1).max(4000) }).strict(),
@@ -62,6 +63,12 @@ export const browserHumanActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('new_tab') }).strict(),
   z
     .object({
+      type: z.literal('open_browser_page'),
+      page: z.enum(['bookmarks', 'account']),
+    })
+    .strict(),
+  z
+    .object({
       type: z.literal('switch_tab'),
       tabId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/),
     })
@@ -90,12 +97,16 @@ export const browserInteractionRequestSchema = z.discriminatedUnion('operation',
       operation: z.literal('input'),
       requestId: z.uuid(),
       sequence: z.number().int().positive(),
-      frameId: z.uuid(),
+      frameId: z.uuid().optional(),
       keyboardId: z.uuid().optional(),
       capture: z.boolean().optional(),
       action: browserHumanActionSchema,
     })
-    .strict(),
+    .strict()
+    .superRefine((request, ctx) => {
+      if (!request.frameId && !request.keyboardId && request.action.type !== 'new_tab')
+        ctx.addIssue({ code: 'custom', message: 'A fresh frame or keyboard binding is required.' });
+    }),
 ]);
 export type BrowserInteractionRequest = z.infer<typeof browserInteractionRequestSchema>;
 export const browserControlStateSchema = z
@@ -131,6 +142,7 @@ export const browserViewerChromeSchema = z
 export const browserInteractionFrameSchema = browserPreviewSchema.options[0].extend({
   frameId: z.uuid(),
   epoch: z.number().int().nonnegative(),
+  surface: z.literal('desktop').optional(),
   browser: browserViewerChromeSchema.optional(),
 });
 export type BrowserInteractionFrame = z.infer<typeof browserInteractionFrameSchema>;
@@ -184,6 +196,9 @@ export const browserKeyboardTargetSchema = z
   })
   .strict();
 export type BrowserKeyboardTarget = z.infer<typeof browserKeyboardTargetSchema>;
+/** Explicit new-tab recovery needs control authority, but no page/screenshot authority. */
+export const browserRecoveryTargetSchema = z.object({ recovery: z.literal('new_tab') }).strict();
+export type BrowserRecoveryTarget = z.infer<typeof browserRecoveryTargetSchema>;
 export const browserHumanInputResultSchema = z.discriminatedUnion('effect', [
   z.object({ effect: z.literal('none') }).strict(),
   z
@@ -245,6 +260,9 @@ export const browserHumanCaptureSchema = z
     preview: browserPreviewSchema,
     target: browserFrameTargetSchema.omit({ frameId: true }).optional(),
     browser: browserViewerChromeSchema.optional(),
+    surface: z.literal('desktop').optional(),
+    unavailableReason: z.enum(['viewport_size', 'image_geometry']).optional(),
+    handoff: z.literal('navigation_only').optional(),
   })
   .strict();
 export type BrowserHumanCapture = z.infer<typeof browserHumanCaptureSchema>;

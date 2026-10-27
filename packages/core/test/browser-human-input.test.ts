@@ -49,6 +49,8 @@ function setup() {
     if (name === 'browser_tab_close')
       return { content: [], structuredContent: { closed_id: 'other-tab' } };
     if (name === 'browser_tab_new') return { content: [], structuredContent: { id: 'new-tab' } };
+    if (name === 'browser_goto')
+      return { content: [], structuredContent: { url: state.url, title: 'Example' } };
     if (['browser_back', 'browser_forward', 'browser_reload'].includes(name))
       return { content: [], structuredContent: { url: state.url, title: 'Example' } };
     if (name === 'browser_status')
@@ -62,6 +64,8 @@ function setup() {
       };
     if (name === 'browser_evaluate') {
       const { expression } = z.object({ expression: z.string() }).parse(args);
+      if (expression === browserStateScript)
+        return { content: [], structuredContent: { value: state } };
       if (
         expression === '(()=>{history.back();return {ok:true}})()' ||
         expression === '(()=>{history.forward();return {ok:true}})()'
@@ -135,6 +139,7 @@ function setup() {
     first,
     second,
     state,
+    surface,
     readSurface,
     target,
     ctx,
@@ -234,6 +239,16 @@ it.each([
   ],
   [{ type: 'reload' }, 'browser_reload', { return_snapshot: false }],
   [{ type: 'new_tab' }, 'browser_tab_new', { activate: true }],
+  [
+    { type: 'open_browser_page', page: 'bookmarks' },
+    'browser_goto',
+    { url: 'chrome://bookmarks/', wait_for: 'none', return_snapshot: false },
+  ],
+  [
+    { type: 'open_browser_page', page: 'account' },
+    'browser_goto',
+    { url: 'chrome://settings/people', wait_for: 'none', return_snapshot: false },
+  ],
   [{ type: 'switch_tab', tabId: 'other-tab' }, 'browser_tab_activate', { tab_id: 'other-tab' }],
   [{ type: 'close_tab', tabId: 'other-tab' }, 'browser_tab_close', { tab_id: 'other-tab' }],
 ] as const)(
@@ -308,4 +323,110 @@ it('rechecks ownership and document identity after capture before returning priv
     return png;
   });
   await expect(f.driver.humanFrame(true, f.ctx)).rejects.toMatchObject({ code: 'NOT_AUTHORIZED' });
+});
+
+it.each(['chrome://bookmarks/', 'chrome://settings/people', 'chrome://settings/syncSetup'])(
+  'keeps %s private to the controlling user while permitting navigation back to the web',
+  async (url) => {
+    const f = setup();
+    f.state.url = url;
+    vi.spyOn(f.driver, 'paint').mockResolvedValue('ready');
+    vi.spyOn(f.driver, 'screenshot').mockResolvedValue(
+      PNG.sync.write(new PNG({ width: 800, height: 600 })),
+    );
+    expect((await f.driver.humanFrame(true, f.ctx)).preview.state).toBe('frame');
+    expect((await f.driver.humanFrame(false, f.ctx)).preview.state).toBe('unavailable');
+    for (const operation of ['read_page', 'get_page_text', 'screenshot', 'click']) {
+      await expect(f.driver.authorize(f.ctx.sessionId, operation, undefined)).rejects.toMatchObject(
+        {
+          code: 'NOT_AUTHORIZED',
+        },
+      );
+    }
+    const binding = await f.driver.authorize(f.ctx.sessionId, 'navigate', 'https://example.com/');
+    await expect(f.driver.verify(binding, f.ctx)).resolves.toBeUndefined();
+    expect(await f.driver.humanInput({ type: 'reload' }, f.target, f.ctx)).toEqual({
+      effect: 'applied',
+    });
+  },
+);
+
+it.each(['file:///etc/passwd', 'chrome://version/', 'chrome://extensions/'])(
+  'rejects unsupported native documents %s in the human view',
+  async (url) => {
+    const f = setup();
+    f.state.url = url;
+    await expect(f.driver.humanFrame(true, f.ctx)).rejects.toMatchObject({
+      code: 'NOT_AUTHORIZED',
+    });
+  },
+);
+
+it('rejects bookmark access with a keyboard token, stale document or revoked owner', async () => {
+  const f = setup();
+  const action = { type: 'open_browser_page', page: 'bookmarks' } as const;
+  expect(await f.driver.humanInput(action, await f.begin(), f.ctx)).toEqual({ effect: 'none' });
+  f.state.documentRevision = 'changed';
+  expect(await f.driver.humanInput(action, f.target, f.ctx)).toEqual({ effect: 'none' });
+  f.revoke();
+  await expect(f.driver.humanInput(action, f.target, f.ctx)).rejects.toMatchObject({
+    code: 'NOT_AUTHORIZED',
+  });
+  expect(f.call.mock.calls.some(([name]) => name === 'browser_goto')).toBe(false);
+});
+
+it('recovers to a new tab without inspecting the broken document or replaying page input', async () => {
+  const f = setup();
+  f.state.url = 'chrome://settings/people';
+  expect(await f.driver.humanInput({ type: 'new_tab' }, { recovery: 'new_tab' }, f.ctx)).toEqual({
+    effect: 'applied',
+  });
+  expect(f.call.mock.calls.map(([name]) => name)).toEqual(['browser_tab_list', 'browser_tab_new']);
+  expect(await f.driver.humanInput({ type: 'reload' }, { recovery: 'new_tab' }, f.ctx)).toEqual({
+    effect: 'none',
+  });
+  f.revoke();
+  await expect(
+    f.driver.humanInput({ type: 'new_tab' }, { recovery: 'new_tab' }, f.ctx),
+  ).rejects.toMatchObject({
+    code: 'NOT_AUTHORIZED',
+  });
+  expect(f.call.mock.calls.filter(([name]) => name === 'browser_tab_new')).toHaveLength(1);
+});
+
+it('permits navigation-only handoff from native settings without exposing pixels', async () => {
+  const f = setup();
+  f.state.url = 'chrome://settings/people';
+  expect(await f.driver.humanFrame(false, f.ctx)).toEqual({
+    preview: { state: 'unavailable' },
+    handoff: 'navigation_only',
+  });
+  f.state.url = 'file:///private';
+  expect((await f.driver.humanFrame(false, f.ctx)).handoff).toBeUndefined();
+});
+
+it('distinguishes viewport and image geometry failures without accepting mismatched pixels', async () => {
+  const f = setup();
+  vi.spyOn(f.driver, 'paint').mockResolvedValue('ready');
+  vi.spyOn(f.driver, 'screenshot').mockResolvedValue(
+    PNG.sync.write(new PNG({ width: 801, height: 600 })),
+  );
+  expect(await f.driver.humanFrame(true, f.ctx)).toEqual({
+    preview: { state: 'unavailable' },
+    unavailableReason: 'image_geometry',
+  });
+});
+
+it('discards pixels while a newly activated tab settles its viewport, then binds a fresh frame', async () => {
+  const f = setup();
+  vi.spyOn(f.driver, 'paint').mockResolvedValue('ready');
+  vi.spyOn(f.driver, 'screenshot').mockImplementation(async () => {
+    f.surface.context.width = 801;
+    return PNG.sync.write(new PNG({ width: 801, height: 600 }));
+  });
+  expect(await f.driver.humanFrame(true, f.ctx)).toEqual({ preview: { state: 'busy' } });
+  expect(await f.driver.humanFrame(true, f.ctx)).toMatchObject({
+    preview: { state: 'frame', width: 801, height: 600 },
+    target: { width: 801, height: 600 },
+  });
 });

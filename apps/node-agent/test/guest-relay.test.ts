@@ -5,7 +5,12 @@ import { createServer as createHttpServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { expect, it, vi } from 'vitest';
-import type { EnvironmentRecord, GuestEnvelope, GuestRelayPort } from '@trinity-harness/contracts';
+import type {
+  BrowserGuestRelayPort,
+  EnvironmentRecord,
+  GuestEnvelope,
+  GuestRelayPort,
+} from '@trinity-harness/contracts';
 import { FirecrackerGuestRelay } from '../src/guest-relay.js';
 import { buildNodeAgent } from '../src/server.js';
 
@@ -30,7 +35,7 @@ it.each([
       vcpus: 2,
       memoryMiB: 2048,
     };
-    const envelope: GuestEnvelope = {
+    let envelope: GuestEnvelope = {
       requestId: randomUUID(),
       environmentId: environment.id,
       generation,
@@ -39,6 +44,7 @@ it.each([
       operation: { kind: 'read', path: 'file', maxBytes: 10 },
     };
     let handshake = '';
+    let responseValue: unknown = value;
     const http = createHttpServer((request, reply) => {
       expect(request.url).toBe('/rpc');
       const chunks: Buffer[] = [];
@@ -50,7 +56,7 @@ it.each([
           JSON.stringify({
             requestId: envelope.requestId,
             generation,
-            value,
+            value: responseValue,
           }),
         );
       });
@@ -72,6 +78,16 @@ it.each([
         ),
       ).toEqual(value);
       expect(handshake).toBe('CONNECT 4050\n');
+      envelope = { ...envelope, requestId: randomUUID(), operation: { kind: 'desktopFrame' } };
+      responseValue = { kind: 'ok' };
+      expect(
+        await new FirecrackerGuestRelay(root).callBrowser(
+          environment,
+          envelope,
+          AbortSignal.timeout(3000),
+        ),
+      ).toEqual({ kind: 'ok' });
+      expect(handshake).toBe('CONNECT 4051\n');
     } finally {
       http.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -109,6 +125,7 @@ it('revalidates PG owner/workspace/generation around guest dispatch and fails cl
       content: 'private',
       truncated: false,
     })),
+    callBrowser: vi.fn<BrowserGuestRelayPort['callBrowser']>(async () => ({ kind: 'ok' })),
   };
   const authorizeNode = vi.fn(async () => true);
   const meta = {
@@ -158,6 +175,47 @@ it('revalidates PG owner/workspace/generation around guest dispatch and fails cl
       payload,
     });
   try {
+    const desktop = {
+      ...request,
+      requestId: randomUUID(),
+      operation: { kind: 'desktopFrame' as const },
+    };
+    expect((await send({ environment, request: desktop })).statusCode).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: 'POST',
+          url: '/guest-browser',
+          headers: { authorization: `Bearer ${token}` },
+          payload: { environment, request },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(relay.callBrowser).not.toHaveBeenCalled();
+    const browserResponse = await app.inject({
+      method: 'POST',
+      url: '/guest-browser',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { environment, request: desktop },
+    });
+    expect(browserResponse.statusCode).toBe(200);
+    expect(relay.callBrowser).toHaveBeenCalledTimes(1);
+    relay.callBrowser.mockResolvedValueOnce({
+      kind: 'desktopFrame',
+      width: 1,
+      height: 1,
+      capturedAt: '2026-10-27T00:00:00.000Z',
+      png: 'cHJpdmF0ZQ==',
+    });
+    authorizeNode.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const revokedDesktop = await app.inject({
+      method: 'POST',
+      url: '/guest-browser',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { environment, request: desktop },
+    });
+    expect(revokedDesktop.statusCode).toBe(409);
+    expect(revokedDesktop.body).not.toContain('cHJpdmF0ZQ==');
     expect(
       (await send({ environment, request: { ...request, workspace: 'another-user' } })).statusCode,
     ).toBe(409);

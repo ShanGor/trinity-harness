@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   browserControlRecordSchema,
+  browserInteractionRequestSchema,
   type BrowserControlRecord,
   type BrowserInputRecord,
   type BrowserInteractionStore,
@@ -136,7 +137,7 @@ function result(request: BrowserRuntimeRequest): BrowserRuntimeResult {
     },
   };
 }
-function setup(shared = false) {
+function setup(shared = false, desktop = false) {
   const sessionId = randomUUID(),
     sideId = randomUUID(),
     viewId = randomUUID(),
@@ -149,12 +150,16 @@ function setup(shared = false) {
   const revokedSessions = new Set<string>();
   let privatePage = false;
   const humanInput = vi.fn(async (): Promise<BrowserHumanInputResult | void> => undefined),
-    execute = vi.fn(async (request: BrowserRuntimeRequest) => result(request)),
+    execute = vi.fn<
+      (request: BrowserRuntimeRequest, signal: AbortSignal) => Promise<BrowserRuntimeResult>
+    >(async (request) => result(request)),
     dispose = vi.fn(async () => undefined);
+  const fenceAgent = vi.fn(() => true);
   const capture = vi.fn(async (privateView: boolean): Promise<BrowserHumanCapture> =>
     privatePage && !privateView
       ? { preview: { state: 'privacy_blocked' } }
       : {
+          ...(desktop && privateView ? { surface: 'desktop' as const } : {}),
           preview: {
             state: 'frame',
             generation,
@@ -187,6 +192,7 @@ function setup(shared = false) {
     dispose,
     humanFrame: capture,
     humanInput,
+    ...(desktop ? { fenceAgent } : {}),
   }));
   const supervisor = new ManagedBrowserSupervisor({
     store: journal,
@@ -240,6 +246,7 @@ function setup(shared = false) {
     journal,
     events,
     humanInput,
+    fenceAgent,
     execute,
     dispose,
     create,
@@ -262,6 +269,145 @@ function setup(shared = false) {
     },
   };
 }
+
+it('fences a blocked agent call while the controlling user operates the desktop', async () => {
+  const f = setup(false, true);
+  const command = f.model();
+  let finish!: (value: BrowserRuntimeResult) => void;
+  f.execute.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  let agentReturned = false;
+  const agent = f.supervisor.execute(command).then((value) => {
+    agentReturned = true;
+    return value;
+  });
+  await vi.waitFor(() => expect(f.execute).toHaveBeenCalledTimes(1));
+  const taken = await f.take();
+  expect(taken.frame?.surface).toBe('desktop');
+  expect(taken.state.mode).toBe('human');
+  expect(f.fenceAgent).toHaveBeenCalledTimes(1);
+  expect(agentReturned).toBe(false);
+  const release = {
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'release' as const,
+    generation: f.generation,
+    epoch: taken.state.epoch,
+  };
+  expect((await f.supervisor.interact(release)).error?.code).toBe('BUSY');
+  const spectator = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: randomUUID(),
+    operation: 'frame',
+  });
+  expect(spectator.frame).toBeUndefined();
+  expect(spectator.error?.code).toBe('BUSY');
+  const request = f.input(taken);
+  f.humanInput.mockImplementationOnce(async () => {
+    finish(result(command));
+    return { effect: 'applied' };
+  });
+  expect((await f.supervisor.interact(request)).input?.effect).toBe('applied');
+  expect(f.humanInput).toHaveBeenCalledTimes(1);
+  expect(agentReturned).toBe(false);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect((await f.supervisor.interact(release)).state.mode).toBe('agent');
+  expect((await agent).value).toMatchObject({ kind: 'browser-error-v1', effect: 'unknown' });
+  expect(f.dispose).not.toHaveBeenCalled();
+  expect((await f.controls.get(f.sessionId))?.needsObservation).toBe(true);
+});
+
+it('quarantines an uncertain desktop input during intervention and never repeats it', async () => {
+  const f = setup(false, true);
+  const command = f.model();
+  let finish!: (value: BrowserRuntimeResult) => void;
+  f.execute.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const agent = f.supervisor.execute(command);
+  await vi.waitFor(() => expect(f.execute).toHaveBeenCalledTimes(1));
+  const taken = await f.take();
+  const input = f.input(taken);
+  f.humanInput.mockRejectedValueOnce(new Error('desktop disconnected'));
+  expect((await f.supervisor.interact(input)).state.mode).toBe('quarantined');
+  const again = await f.take();
+  expect(again.state.mode).toBe('human');
+  expect(
+    (
+      await f.supervisor.interact({
+        ...input,
+        generation: again.state.generation!,
+        epoch: again.state.epoch,
+      })
+    ).error?.code,
+  ).toBe('INPUT_SEQUENCE');
+  expect(f.humanInput).toHaveBeenCalledTimes(1);
+  finish(result(command));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(
+    (
+      await f.supervisor.interact({
+        sessionId: f.sessionId,
+        viewId: f.viewId,
+        operation: 'release',
+        generation: f.generation,
+        epoch: again.state.epoch,
+      })
+    ).state.mode,
+  ).toBe('agent');
+  expect((await agent).value).toMatchObject({ effect: 'unknown' });
+});
+
+it('pauses expired intervention control and resolves the agent call only after it settles', async () => {
+  const f = setup(false, true);
+  const command = f.model();
+  let finish!: (value: BrowserRuntimeResult) => void;
+  f.execute.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const agent = f.supervisor.execute(command);
+  await vi.waitFor(() => expect(f.execute).toHaveBeenCalledTimes(1));
+  await f.take();
+  f.advance(15_001);
+  expect(
+    (await f.supervisor.interact({ sessionId: f.sessionId, viewId: f.viewId, operation: 'state' }))
+      .state.mode,
+  ).toBe('paused');
+  finish(result(command));
+  expect((await agent).value).toMatchObject({ effect: 'unknown' });
+  expect((await f.controls.get(f.sessionId))?.mode).toBe('paused');
+  expect((await f.supervisor.execute(f.model())).value).toMatchObject({
+    code: 'NOT_EXECUTED',
+    effect: 'none',
+  });
+});
+
+it('stops and disposes a blocked intervention when the agent operation is cancelled', async () => {
+  const f = setup(false, true);
+  const cancel = new AbortController();
+  f.execute.mockImplementationOnce(
+    async (_request, signal) =>
+      new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+      }),
+  );
+  const agent = f.supervisor.execute(f.model(), cancel.signal);
+  await vi.waitFor(() => expect(f.execute).toHaveBeenCalledTimes(1));
+  await f.take();
+  cancel.abort();
+  expect((await agent).value).toMatchObject({ effect: 'unknown' });
+  expect(f.dispose).toHaveBeenCalledTimes(1);
+});
 it('shares one browser between Main and side viewers while retaining the originating input event', async () => {
   const f = setup(true);
   const taken = await f.supervisor.interact({
@@ -470,7 +616,11 @@ it('keeps the shared browser when a side tool loses authorization before any eff
   expect((await f.supervisor.execute(f.model())).isError).toBe(false);
   expect(f.create).toHaveBeenCalledTimes(1);
 });
-it('delivers tab metadata only to the controlling view and excludes it from durable journals', async () => {
+it.each([
+  { type: 'new_tab' },
+  { type: 'open_browser_page', page: 'bookmarks' },
+  { type: 'open_browser_page', page: 'account' },
+] as const)('keeps viewer metadata private when applying %j', async (action) => {
   const f = setup();
   const taken = await f.take();
   expect(taken.frame?.browser?.tabs[0]?.title).toBe('Private title');
@@ -480,7 +630,7 @@ it('delivers tab metadata only to the controlling view and excludes it from dura
     operation: 'frame',
   });
   expect(other.frame?.browser).toBeUndefined();
-  const input = { ...f.input(taken), action: { type: 'new_tab' as const } };
+  const input = { ...f.input(taken), action };
   const applied = await f.supervisor.interact(input);
   expect(applied.input?.effect).toBe('applied');
   expect(applied.frame?.browser?.tabs[0]?.title).toBe('Private title');
@@ -808,6 +958,108 @@ it('retains an applied input receipt when its subsequent picture fails', async (
   expect(recovered.state).toMatchObject({ available: true, mode: 'human', nextSequence: 2 });
   expect((await f.supervisor.interact(input)).input?.effect).toBe('applied');
   expect(f.humanInput).toHaveBeenCalledTimes(1);
+});
+
+it('journals explicit new-tab recovery without a frame and never repeats an uncertain effect', async () => {
+  const f = setup();
+  const taken = await f.take();
+  const { frameId: _frameId, ...base } = f.input(taken);
+  void _frameId;
+  const request = { ...base, action: { type: 'new_tab' as const } };
+  // Capture previously failed and no coordinate/keyboard authority remains.
+  const record = f.controls.records.get(f.sessionId)!;
+  record.frame = null;
+  record.frames = [];
+  f.humanInput.mockRejectedValueOnce(new Error('lost acknowledgement'));
+  const result = await f.supervisor.interact(request);
+  expect(result.error?.code).toBe('UNKNOWN_EFFECT');
+  expect(f.humanInput).toHaveBeenCalledWith(
+    request.action,
+    { recovery: 'new_tab' },
+    expect.any(AbortSignal),
+  );
+  await f.supervisor.interact(request);
+  expect(f.humanInput).toHaveBeenCalledTimes(1);
+  expect((await f.controls.input(f.sessionId, request.requestId))?.effect).toBe('unknown');
+});
+
+it('requires the current controller for frame-free recovery and delivers a fresh recovered frame', async () => {
+  const f = setup();
+  const taken = await f.take();
+  const { frameId: _frameId, ...base } = f.input(taken);
+  void _frameId;
+  const request = { ...base, action: { type: 'new_tab' as const } };
+  expect((await f.supervisor.interact({ ...request, viewId: randomUUID() })).error?.code).toBe(
+    'NOT_CONTROLLER',
+  );
+  const result = await f.supervisor.interact(request);
+  expect(result.input?.effect).toBe('applied');
+  expect(result.frame).toBeDefined();
+  expect(f.humanInput).toHaveBeenCalledTimes(1);
+});
+
+it('rejects frame-free page actions at the request boundary', async () => {
+  const f = setup();
+  const { frameId: _frameId, ...base } = f.input(await f.take());
+  void _frameId;
+  for (const action of [
+    { type: 'navigate', url: 'https://example.com/' },
+    { type: 'open_browser_page', page: 'account' },
+    { type: 'reload' },
+    { type: 'text', text: 'unsafe' },
+    { type: 'click', point: { x: 1, y: 1 } },
+  ]) {
+    expect(browserInteractionRequestSchema.safeParse({ ...base, action }).success).toBe(false);
+  }
+  expect(
+    browserInteractionRequestSchema.safeParse({ ...base, action: { type: 'new_tab' } }).success,
+  ).toBe(true);
+});
+
+it('keeps capture-unavailable control leased for explicit recovery without retaining stale targets', async () => {
+  const f = setup();
+  await f.take();
+  const before = f.controls.records.get(f.sessionId)!;
+  const expires = before.expiresAt!;
+  f.advance(4000);
+  f.capture.mockResolvedValueOnce({
+    preview: { state: 'unavailable' },
+    unavailableReason: 'image_geometry',
+  });
+  const result = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'frame',
+  });
+  expect(result.error?.message).toContain('does not match the page viewport');
+  expect(Date.parse(f.controls.records.get(f.sessionId)!.expiresAt!)).toBeGreaterThan(
+    Date.parse(expires),
+  );
+  expect(f.controls.records.get(f.sessionId)).toMatchObject({
+    frame: null,
+    frames: [],
+    keyboard: null,
+  });
+});
+
+it('returns control from a verified native page with no model-visible pixels', async () => {
+  const f = setup();
+  const taken = await f.take();
+  f.capture.mockResolvedValueOnce({
+    preview: { state: 'unavailable' },
+    handoff: 'navigation_only',
+  });
+  const result = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'release',
+    generation: f.generation,
+    epoch: taken.state.epoch,
+  });
+  expect(result.error).toBeUndefined();
+  expect(result.state.mode).toBe('agent');
+  expect(result.frame).toBeUndefined();
+  expect(f.controls.records.get(f.sessionId)?.needsObservation).toBe(true);
 });
 
 it('finishes an admitted frame read on view disconnect without killing Chrome and pauses its controller', async () => {

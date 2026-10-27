@@ -552,8 +552,10 @@ export class CoreAgentLoop implements AgentLoop {
       const checkCancellation = async (): Promise<boolean> =>
         (await store.load(sessionId)).some(
           (event) =>
-            event.type === 'turn/cancel_requested' &&
-            (runOpts?.cancellationSeq ?? promptSeq) <= event.throughPromptSeq,
+            (event.type === 'turn/cancel_requested' &&
+              (runOpts?.cancellationSeq ?? promptSeq) <= event.throughPromptSeq) ||
+            ((event.type === 'message/removed' || event.type === 'prompt/discarded') &&
+              event.promptId === promptId),
         );
       if (await checkCancellation()) reason = 'aborted';
 

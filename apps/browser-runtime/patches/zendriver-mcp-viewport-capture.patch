@@ -1,0 +1,51 @@
+--- a/src/tools/snapshot.rs
++++ b/src/tools/snapshot.rs
+@@ -248,6 +248,30 @@
+         None
+     };
+ 
++    // A Chrome-created tab can initially report an emulated viewport larger
++    // than its compositor surface. Use a clipped capture only to settle that
++    // surface after an ordinary PNG proves the dimensions do not match. Normal
++    // captures must remain unclipped: Chrome omits top-layer menus and dialogs
++    // when captureBeyondViewport is enabled.
++    let viewport_clip = if !input.full_page && input.selector.is_none() && input.format == ImgFormat::Png {
++        let metrics = tab.session().call("Page.getLayoutMetrics", json!({}))
++            .await.map_err(|e| map_error(McpServerError::from(ZendriverError::from(e))))?;
++        let viewport = metrics.get("cssLayoutViewport").ok_or_else(|| {
++            ErrorData::internal_error("Missing screenshot viewport", None)
++        })?;
++        let number = |key: &str| -> Result<f64, ErrorData> {
++            viewport.get(key).and_then(serde_json::Value::as_f64)
++                .filter(|n| n.is_finite())
++                .ok_or_else(|| ErrorData::internal_error("Invalid screenshot viewport", None))
++        };
++        let (x, y, width, height) = (number("pageX")?, number("pageY")?,
++            number("clientWidth")?, number("clientHeight")?);
++        if x < 0.0 || y < 0.0 || width <= 0.0 || height <= 0.0 || width > 2048.0 || height > 2048.0 {
++            return Err(ErrorData::invalid_params("Screenshot viewport exceeds bounds", None));
++        }
++        Some(zendriver::BoundingBox { x, y, width, height })
++    } else { None };
++
+     let mut builder = tab.screenshot_builder();
+     builder = match input.format {
+         ImgFormat::Png => builder.png(),
+@@ -267,6 +291,17 @@
+         .bytes()
+         .await
+         .map_err(|e| map_error(McpServerError::from(e)))?;
++    if let Some(bbox) = viewport_clip {
++        let png_header = b"\x89PNG\r\n\x1a\n";
++        if bytes.len() >= 24 && &bytes[..8] == png_header {
++            let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
++            let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
++            if f64::from(width) != bbox.width || f64::from(height) != bbox.height {
++                let _settling_capture = tab.screenshot_builder().png().clip(bbox).bytes().await
++                    .map_err(|e| map_error(McpServerError::from(e)))?;
++            }
++        }
++    }
+ 
+     let byte_len = bytes.len();
+ 

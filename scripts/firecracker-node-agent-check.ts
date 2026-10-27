@@ -110,9 +110,25 @@ try {
     }),
   });
   assert.equal(guest.status, 409, 'unassigned guest RPC must fail closed before vsock');
+  const browser = await fetch(`${root}/guest-browser`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      environment: identity,
+      request: {
+        requestId: randomUUID(),
+        environmentId: identity.id,
+        generation: identity.generation,
+        sessionId: randomUUID(),
+        workspace: 'acceptance',
+        operation: { kind: 'desktopFrame' },
+      },
+    }),
+  });
+  assert.equal(browser.status, 409, 'unassigned desktop RPC must fail closed before vsock');
   console.log('Node Agent started with live PostgreSQL and guest routing enabled.');
   console.log(
-    'Authentication passed; unknown lifecycle and guest assignments were denied by PostgreSQL.',
+    'Authentication passed; unknown lifecycle, guest and desktop assignments were denied by PostgreSQL.',
   );
 } finally {
   await stop();

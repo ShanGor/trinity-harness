@@ -192,6 +192,36 @@ describe.skipIf(!reachable)('durable personal assistant', () => {
       pool.query('UPDATE sessions SET workspace_uri=$1 WHERE id=$2', ['/different', sessionId]),
     ).rejects.toThrow('immutable');
   });
+
+  it('excludes removed message sources from indexed history and exact cross-session recall', async () => {
+    const promptId = randomUUID();
+    const at = clock().toISOString();
+    await events.append(sessionId, [
+      {
+        type: 'message/user',
+        eventId: promptId,
+        at,
+        surfaceOp: 'append',
+        content: [{ kind: 'text', text: 'A removable indexed exchange' }],
+      },
+      {
+        type: 'message/assistant',
+        eventId: randomUUID(),
+        at,
+        surfaceOp: 'append',
+        phase: 'final',
+        content: [{ kind: 'text', text: 'An indexed answer' }],
+      },
+      { type: 'turn/end', eventId: randomUUID(), at, reason: 'completed', promptId },
+    ]);
+    expect(await history.evidence(owner, promptId)).not.toBeNull();
+    await events.append(sessionId, [
+      { type: 'message/removed', eventId: randomUUID(), at, promptId, role: 'assistant' },
+    ]);
+    expect(await history.evidence(owner, promptId)).toBeNull();
+    const page = await history.history(owner, { timezone: 'UTC', limit: 50 });
+    expect(page.episodes.some((episode) => episode.promptId === promptId)).toBe(false);
+  });
   it('searches request, outcome and revised topic text with scoped lexical recall', async () => {
     const promptId = randomUUID();
     const at = clock().toISOString();

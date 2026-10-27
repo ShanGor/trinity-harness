@@ -59,7 +59,32 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
     nodes.forEach((node) => environmentNodeSchema.parse(node));
   }
   async call(sessionId: string, input: GuestOperation, signal?: AbortSignal): Promise<GuestValue> {
+    return this.callOnRoute(sessionId, input, false, signal);
+  }
+  /** Only the browser composition root receives this restricted route. */
+  browser(): GuestRequestPort {
+    return { call: (sessionId, input, signal) => this.callOnRoute(sessionId, input, true, signal) };
+  }
+  private async callOnRoute(
+    sessionId: string,
+    input: GuestOperation,
+    browser: boolean,
+    signal?: AbortSignal,
+  ): Promise<GuestValue> {
     const operation = guestOperationSchema.parse(input);
+    if (
+      (browser &&
+        ![
+          'browserOpen',
+          'processRead',
+          'processWrite',
+          'processKill',
+          'desktopFrame',
+          'desktopInput',
+        ].includes(operation.kind)) ||
+      (!browser && (operation.kind === 'desktopFrame' || operation.kind === 'desktopInput'))
+    )
+      throw new GuestUnavailableError();
     return tracer.startActiveSpan(
       'trinity.guest.rpc',
       {
@@ -70,7 +95,7 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
         let status = 'error';
         try {
           signal?.throwIfAborted();
-          const value = await this.route(sessionId, operation, signal);
+          const value = await this.route(sessionId, operation, browser, signal);
           status = 'ok';
           return value;
         } finally {
@@ -103,6 +128,7 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
   private async route(
     sessionId: string,
     operation: GuestOperation,
+    browser: boolean,
     signal?: AbortSignal,
   ): Promise<GuestValue> {
     const { meta, user } = await this.measure(operation, 'metadata', async () => {
@@ -131,7 +157,9 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
       if (environment?.state === 'starting') environment = await this.environments.get(identity);
       if (
         (!environment || environment.state === 'stopped') &&
-        ['processRead', 'processWrite', 'processKill'].includes(operation.kind)
+        ['processRead', 'processWrite', 'processKill', 'desktopFrame', 'desktopInput'].includes(
+          operation.kind,
+        )
       )
         throw new GuestUnavailableError();
       if (!environment || environment.state === 'stopped')
@@ -152,13 +180,16 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
     const active = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(125_000)]);
     const value = await this.measure(operation, 'transport', async () => {
       try {
-        const response = await this.fetcher(new URL('/guest', node.endpoint), {
-          method: 'POST',
-          redirect: 'error',
-          signal: active,
-          headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
-          body: JSON.stringify({ environment, request }),
-        });
+        const response = await this.fetcher(
+          new URL(browser ? '/guest-browser' : '/guest', node.endpoint),
+          {
+            method: 'POST',
+            redirect: 'error',
+            signal: active,
+            headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ environment, request }),
+          },
+        );
         if (!response.ok || !response.body) {
           await response.body?.cancel();
           throw new GuestUnavailableError();

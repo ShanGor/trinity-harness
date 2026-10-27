@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { turnMessageProjection } from '@trinity-harness/contracts';
+import { turnMessageProjection, removedPromptIds } from '@trinity-harness/contracts';
 import type {
   ConversationIndexPort,
   MemoryStorePort,
@@ -69,6 +69,7 @@ export function createRecallTool(deps: {
           : null;
         if (
           !event ||
+          (sourcePrompt && removedPromptIds(events).has(sourcePrompt.eventId)) ||
           (event.type !== 'message/user' &&
             !(event.type === 'message/assistant' && finals.has(sourceIndex))) ||
           episode?.excluded ||
@@ -102,6 +103,8 @@ export function createRecallTool(deps: {
           ? await deps.index.evidence?.(identity, sourcePrompt.eventId)
           : null;
         if (
+          (sourcePrompt &&
+            removedPromptIds(await deps.store.load(ctx.sessionId)).has(sourcePrompt.eventId)) ||
           (await deps.memory.snapshot(identity)).revision !== snapshot.revision ||
           current?.excluded ||
           (snapshot.hasSuppression && (!current || !allowed(current)))
@@ -159,7 +162,12 @@ export function createRecallTool(deps: {
         };
       }
       const episode = await deps.index.evidence?.(identity, args.episodeId);
-      if (!episode || !allowed(episode) || !episode.answerSeq)
+      if (
+        !episode ||
+        !allowed(episode) ||
+        !episode.answerSeq ||
+        removedPromptIds(await deps.store.load(episode.sessionId)).has(episode.promptId)
+      )
         return {
           isError: true,
           value: { code: 'SOURCE_UNAVAILABLE', message: 'This source is unavailable for recall.' },
@@ -206,7 +214,8 @@ export function createRecallTool(deps: {
         (await deps.memory.snapshot(identity)).revision !== snapshot.revision ||
         !currentSource ||
         currentSource.excluded ||
-        !allowed(currentSource)
+        !allowed(currentSource) ||
+        removedPromptIds(await deps.store.load(episode.sessionId)).has(episode.promptId)
       )
         return {
           isError: true,

@@ -69,6 +69,22 @@ it('rejects browser proxy settings from the strict guest operation schema', () =
   ).toBe(false);
 });
 
+it('never accepts desktop operations on the workspace runtime', async () => {
+  const f = fixture();
+  try {
+    await expect(f.call({ kind: 'desktopFrame' })).rejects.toThrow('workspace endpoint');
+    await expect(
+      f.call({
+        kind: 'desktopInput',
+        action: { type: 'key', key: 'Enter', modifiers: [] },
+        target: { width: 2, height: 1, focusRevision: '1' },
+      }),
+    ).rejects.toThrow('workspace endpoint');
+  } finally {
+    await f.runtime.dispose();
+  }
+});
+
 it.each([
   ['ENOENT', 'FILE_NOT_FOUND'],
   ['EACCES', 'ACCESS_DENIED'],

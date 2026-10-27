@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+desktop=false
+guest_override=''
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --desktop) [[ "$desktop" == false ]] || exit 64; desktop=true ;;
+    --guest-root) [[ $# -ge 2 && -z "$guest_override" ]] || exit 64; guest_override="$2"; shift ;;
+    *) echo 'Usage: bash scripts/run-firecracker-guest-test.sh [--desktop] [--guest-root PATH]' >&2; exit 64 ;;
+  esac
+  shift
+done
+
 if [[ "$(id -u)" -eq 0 ]]; then
   echo "Run this as the operator user, without sudo." >&2
   exit 1
@@ -17,7 +28,10 @@ tsx_cli="$repo_root/apps/node-agent/node_modules/tsx/dist/cli.mjs"
   echo 'Install repository dependencies before running guest acceptance.' >&2
   exit 1
 }
-guest_root="$HOME/.local/share/trinity/firecracker-guest"
+guest_root="${guest_override:-$HOME/.local/share/trinity/firecracker-guest}"
+[[ "$(dirname "$guest_root")" == "$HOME/.local/share/trinity" && ! -L "$guest_root" ]] || {
+  echo 'Guest test root must be a direct Trinity directory and not a symlink.' >&2; exit 1;
+}
 images="$guest_root/images"
 runtime="$guest_root/run"
 marker="$guest_root/.trinity-development-guest"
@@ -154,7 +168,8 @@ curl --silent --show-error --fail --unix-socket "$api_socket" \
 
 ready=false
 for _ in {1..90}; do
-  if grep -Fq 'TRINITY_GUEST_RPC_READY' "$console_log"; then
+  if grep -Fq 'TRINITY_GUEST_RPC_READY' "$console_log" &&
+     { [[ "$desktop" == false ]] || grep -Fq 'TRINITY_GUEST_BROWSER_RPC_READY' "$console_log"; }; then
     ready=true
     break
   fi
@@ -167,8 +182,12 @@ if [[ "$ready" != true ]]; then
   exit 1
 fi
 
+desktop_args=()
+if [[ "$desktop" == true ]]; then
+  desktop_args=(--desktop)
+fi
 (cd "$repo_root" && "$node_binary" "$tsx_cli" "$repo_root/scripts/firecracker-guest-check.ts" \
-  "$relay_state_root" "$environment_id" "$generation" "$tenant_id" "$user_id" "$session_id" "$phase" "$runtime/preview-$generation.json")
+  "$relay_state_root" "$environment_id" "$generation" "$tenant_id" "$user_id" "$session_id" "$phase" "$runtime/preview-$generation.json" "${desktop_args[@]}")
 echo "Real guest $phase acceptance passed."
 echo "Console log: $console_log"
 
@@ -178,4 +197,7 @@ firecracker_pid=""
 rm -f "$api_socket"
 done
 echo 'Boot, actual guest RPC, persistent data across reboot and Zendriver preview passed.'
-echo 'This direct VMM development check does not validate jailer, Node Agent/PG routing or network isolation.'
+if [[ "$desktop" == true && "${TRINITY_GUEST_PG_TEST:-}" == 1 ]]; then
+  echo 'The optional Node Agent handler used synthetic assignment metadata and isolated PostgreSQL tables.'
+fi
+echo 'This direct VMM development check does not validate deployed identity routing, jailer or network isolation.'

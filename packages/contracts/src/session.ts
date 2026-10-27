@@ -7,6 +7,25 @@ export interface Message {
   citationList?: AnswerCitation[];
 }
 
+/** A removed request or answer excludes that exchange from future model context. */
+export function removedPromptIds(events: readonly SessionEvent[]): Set<string> {
+  return new Set(
+    events.flatMap((event) => (event.type === 'message/removed' ? [event.promptId] : [])),
+  );
+}
+
+/** Preserve event positions: sequence numbers remain evidence and cancellation identities. */
+export function removedTurnIndices(events: readonly SessionEvent[]): Set<number> {
+  const prompts = removedPromptIds(events);
+  const removed = new Set<number>();
+  let promptId: string | undefined;
+  events.forEach((event, index) => {
+    if (event.type === 'message/user') promptId = event.eventId;
+    if (promptId && prompts.has(promptId)) removed.add(index);
+  });
+  return removed;
+}
+
 /** One final answer per prompt; legacy logs infer progress from later tool calls. */
 export function turnMessageProjection(events: readonly SessionEvent[]): {
   closed: Set<number>;
@@ -96,6 +115,8 @@ export interface SeqRange {
 export interface AppendOptions {
   /** Who/what produced the events (e.g. user id, 'agent-worker'). Default 'system'. */
   actor?: string;
+  /** Compare under the append lock; reject stale conversation revisions. */
+  expectedLastSeq?: number;
 }
 
 /**
@@ -155,9 +176,12 @@ export interface CompactionRange {
 /** All compaction intervals in the log, in application order (M4). */
 export function compactionRanges(events: readonly SessionEvent[]): CompactionRange[] {
   const ranges: CompactionRange[] = [];
+  const removed = removedTurnIndices(events);
   events.forEach((event, i) => {
     if (event.type === 'compaction/summary') {
       if (event.checkpoint) ranges.length = 0;
+      if ([...removed].some((index) => index + 1 >= event.fromSeq && index + 1 <= event.toSeq))
+        return;
       ranges.push({
         fromSeq: event.fromSeq,
         toSeq: event.toSeq,
@@ -195,6 +219,7 @@ export function compactionSummaryText(summary: string): string {
  */
 export function foldSurface(events: readonly SessionEvent[]): SurfaceEntry[] {
   const surface: SurfaceEntry[] = [];
+  const removed = removedTurnIndices(events);
   const ranges = compactionRanges(events);
   const latestUser = events.some((event) => event.type === 'compaction/summary' && event.checkpoint)
     ? events.reduce((last, event, index) => (event.type === 'message/user' ? index : last), -1)
@@ -211,6 +236,7 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceEntry[] {
     });
   };
   events.forEach((event, i) => {
+    if (removed.has(i)) return;
     const seq = i + 1;
     // In-place summary insertion at the start of each covered range; the
     // range becomes active so its own events (starting at fromSeq) are

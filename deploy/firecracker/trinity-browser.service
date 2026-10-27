@@ -1,0 +1,29 @@
+[Unit]
+DefaultDependencies=no
+Description=Isolated Trinity guest browser and desktop supervisor
+RequiresMountsFor=/var/lib/trinity/browser
+Requires=trinity-browser-firewall.service trinity-browser-profile.service
+After=local-fs.target trinity-browser-firewall.service trinity-browser-profile.service
+
+[Service]
+Type=simple
+User=trinity-browser
+Group=trinity-browser
+RuntimeDirectory=trinity-browser
+RuntimeDirectoryMode=0710
+WorkingDirectory=/opt/trinity
+Environment=HOME=/home/trinity-browser
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/node /opt/trinity/apps/guest-runtime/node_modules/tsx/dist/cli.mjs /opt/trinity/apps/guest-runtime/src/browser-main.ts
+StandardOutput=journal+console
+StandardError=journal+console
+KillMode=control-group
+Restart=on-failure
+TimeoutStopSec=15
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

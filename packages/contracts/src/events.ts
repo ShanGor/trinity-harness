@@ -94,12 +94,18 @@ export const turnEndEventSchema = z.object({
   detail: z.string().optional(),
 });
 
+const messageRevisionProvenanceSchema = z.object({
+  promptId: z.uuid(),
+  kind: z.enum(['retry', 'amend']),
+});
+
 export const userMessageEventSchema = z.object({
   ...baseFields,
   type: z.literal('message/user'),
   surfaceOp: z.literal('append'),
   content: z.array(contentBlockSchema),
   trigger: scheduleTriggerSchema.optional(),
+  revision: messageRevisionProvenanceSchema.optional(),
 });
 
 export const assistantMessageEventSchema = z.object({
@@ -111,6 +117,14 @@ export const assistantMessageEventSchema = z.object({
   continuation: z.boolean().optional(),
   citationList: answerCitationListSchema.optional(),
   content: z.array(contentBlockSchema),
+});
+
+/** Remove one displayed message without rewriting the execution/audit log. */
+export const removedMessageEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('message/removed'),
+  promptId: z.uuid(),
+  role: z.enum(['user', 'assistant']),
 });
 
 export const toolCallEventSchema = z.object({
@@ -214,6 +228,7 @@ export const queuedPromptEventSchema = z.object({
   tenantId: z.uuid(),
   policy: permissionPolicySchema,
   trigger: scheduleTriggerSchema.optional(),
+  revision: messageRevisionProvenanceSchema.optional(),
 });
 export const discardedPromptEventSchema = z.object({
   ...baseFields,
@@ -265,6 +280,7 @@ export const sessionEventSchema = z.discriminatedUnion('type', [
   turnEndEventSchema,
   userMessageEventSchema,
   assistantMessageEventSchema,
+  removedMessageEventSchema,
   toolCallEventSchema,
   toolResultEventSchema,
   compactionSummaryEventSchema,

@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $(id -u) -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]] || {
-  echo 'Run from the operator account: sudo bash scripts/run-firecracker-jailer-test.sh' >&2
+operator_user="${SUDO_USER:-}"
+if [[ -z "$operator_user" && "${PKEXEC_UID:-}" =~ ^[1-9][0-9]*$ ]]; then
+  operator_user="$(getent passwd "$PKEXEC_UID" | cut -d: -f1)"
+fi
+[[ $(id -u) -eq 0 && -n "$operator_user" && "$operator_user" != root ]] || {
+  echo 'Run from the operator account through pkexec or sudo.' >&2
   exit 1
 }
 network_check=denied
 test_host=""
 test_port=443
-case "${1:-}" in
-  '') [[ $# -eq 0 ]] || exit 64 ;;
-  --check-network-denied) [[ $# -eq 1 ]] || exit 64 ;;
+desktop=false
+source_override=''
+network_selected=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --desktop) [[ "$desktop" == false ]] || exit 64; desktop=true ;;
+  --guest-root) [[ $# -ge 2 && -z "$source_override" ]] || exit 64; source_override="$2"; shift ;;
+  --check-network-denied) [[ "$network_selected" == false ]] || exit 64; network_selected=true ;;
   --check-network-egress)
-    [[ $# -eq 1 ]] || { echo 'Usage: sudo bash scripts/run-firecracker-jailer-test.sh [--check-network-denied|--check-network-egress]' >&2; exit 64; }
+    [[ "$network_selected" == false ]] || exit 64
+    network_selected=true
     network_check=egress
     test_host="${TRINITY_EGRESS_TEST_HOST:-}"
     test_port="${TRINITY_EGRESS_TEST_PORT:-443}"
@@ -44,14 +54,22 @@ except ValueError:
         raise SystemExit("TRINITY_EGRESS_TEST_HOST must be a DNS name or IPv4 address")
 PY
     ;;
-  *) echo 'Usage: sudo bash scripts/run-firecracker-jailer-test.sh [--check-network-denied|--check-network-egress]' >&2; exit 64 ;;
-esac
+  *) echo 'Usage: run-firecracker-jailer-test.sh [--desktop] [--guest-root PATH] [--check-network-denied|--check-network-egress]' >&2; exit 64 ;;
+  esac
+  shift
+done
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-operator_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-operator_group="$(id -gn "$SUDO_USER")"
-source_root="$operator_home/.local/share/trinity/firecracker-guest"
+operator_home="$(getent passwd "$operator_user" | cut -d: -f6)"
+operator_group="$(id -gn "$operator_user")"
+source_root="${source_override:-$operator_home/.local/share/trinity/firecracker-guest}"
+[[ "$(dirname "$source_root")" == "$operator_home/.local/share/trinity" && "$(basename "$source_root")" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && ! -L "$source_root" && ! -L "$operator_home/.local/share/trinity" ]] || {
+  echo 'Guest root must be a direct, non-symlinked operator Trinity directory.' >&2; exit 1;
+}
 base=/srv/trinity-node
 report="$operator_home/.local/share/trinity/firecracker-jailer-test"
+if [[ "$desktop" == true ]]; then
+  report="$report/desktop-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+fi
 
 for command in bridge ip nft flock systemctl journalctl sha256sum python3 jq pgrep stat; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
@@ -172,7 +190,7 @@ cleanup() {
   fi
 }
 generations=()
-install -d -o "$SUDO_USER" -g "$operator_group" -m 0700 "$report"
+install -d -o "$operator_user" -g "$operator_group" -m 0700 "$report"
 trap cleanup EXIT
 
 if [[ "$images_preinstalled" != true ]]; then
@@ -240,7 +258,8 @@ for phase in write read; do
       echo "Jailer VM failed during $phase phase (systemd state: $state)." >&2
       exit 1
     fi
-    if [[ "$state" == active ]] && journalctl -u "$unit" --output=cat --no-pager | grep -Fq 'TRINITY_GUEST_RPC_READY'; then
+    if [[ "$state" == active ]] && journalctl -u "$unit" --output=cat --no-pager | grep -Fq 'TRINITY_GUEST_RPC_READY' &&
+      { [[ "$desktop" != true ]] || journalctl -u "$unit" --output=cat --no-pager | grep -Fq 'TRINITY_GUEST_BROWSER_RPC_READY'; }; then
       ready=true
       break
     fi
@@ -256,9 +275,11 @@ for phase in write read; do
   else
     network_args=(--check-network-denied)
   fi
+  desktop_args=()
+  if [[ "$desktop" == true ]]; then desktop_args=(--desktop); fi
   (cd "$repo_root" && ./node_modules/.bin/tsx scripts/firecracker-guest-check.ts \
     "$base" "$id" "$generation" "$tenant" "$user" "$session" "$phase" \
-    "$report/preview-$generation.json" "${network_args[@]}")
+    "$report/preview-$generation.json" "${network_args[@]}" "${desktop_args[@]}")
   chmod 0644 "$report/preview-$generation.json" "$report/preview-$generation.json.png"
   systemctl stop "$unit"
   state="$(systemctl show --property=ActiveState --value "$unit")"

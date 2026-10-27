@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $(id -u) -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != root ]] || {
-  echo 'Run from the operator account: sudo bash scripts/install-firecracker-development-images.sh' >&2
+operator_user="${SUDO_USER:-}"
+if [[ -z "$operator_user" && "${PKEXEC_UID:-}" =~ ^[1-9][0-9]*$ ]]; then
+  operator_user="$(getent passwd "$PKEXEC_UID" | cut -d: -f1)"
+fi
+[[ $(id -u) -eq 0 && -n "$operator_user" && "$operator_user" != root ]] || {
+  echo 'Run from the operator account through pkexec or sudo.' >&2
   exit 1
 }
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
-operator_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+operator_home="$(getent passwd "$operator_user" | cut -d: -f6)"
 source_root="$operator_home/.local/share/trinity/firecracker-guest"
+if [[ $# -gt 0 ]]; then
+  [[ $# -eq 2 && "$1" == --guest-root ]] || { echo 'Usage: install-firecracker-development-images.sh [--guest-root PATH]' >&2; exit 64; }
+  source_root="$2"
+fi
+[[ "$(dirname "$source_root")" == "$operator_home/.local/share/trinity" && "$(basename "$source_root")" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && ! -L "$source_root" && ! -L "$operator_home/.local/share/trinity" ]] || {
+  echo 'Guest root must be a direct, non-symlinked operator Trinity directory.' >&2; exit 1;
+}
 images="$source_root/images"
 target=/srv/trinity-node/images
 base=/srv/trinity-node

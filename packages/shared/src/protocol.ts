@@ -78,7 +78,24 @@ export const surfaceMessageSchema = z.object({
 });
 export type SurfaceMessage = z.infer<typeof surfaceMessageSchema>;
 
+export const messageRevisionSchema = z.object({
+  promptId: z.uuid(),
+  operationId: z.uuid(),
+  kind: z.enum(['retry', 'amend']),
+});
+export type MessageRevision = z.infer<typeof messageRevisionSchema>;
+export const promptAcceptedSchema = z.object({
+  accepted: z.literal(true),
+  promptId: z.uuid().optional(),
+});
+
 export const serverEventSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('message/removed'),
+    sessionId: z.string(),
+    promptId: z.uuid(),
+    role: z.enum(['user', 'assistant']),
+  }),
   z.object({
     type: z.literal('session/activity'),
     sessionId: z.string(),

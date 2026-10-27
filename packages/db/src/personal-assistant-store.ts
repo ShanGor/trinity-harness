@@ -16,7 +16,13 @@ import {
   type HistoryQuery,
 } from '@trinity-harness/contracts';
 import type { Db } from './client.js';
-import { memoryEvents, conversationEpisodes, episodeChanges, sessions } from './schema.js';
+import {
+  memoryEvents,
+  conversationEpisodes,
+  episodeChanges,
+  sessions,
+  sessionEvents,
+} from './schema.js';
 
 type Transaction = Parameters<Parameters<Db['transaction']>[0]>[0];
 
@@ -181,6 +187,7 @@ export class PgConversationIndex implements ConversationIndexPort {
           eq(conversationEpisodes.userId, identity.userId),
           eq(sessions.scope, 'personal'),
           sql`${sessions.closedAt} is null`,
+          sql`not exists (select 1 from ${sessionEvents} removed where removed.session_id = ${conversationEpisodes.sessionId} and removed.type = 'message/removed' and removed.payload->>'promptId' = ${conversationEpisodes.payload}->>'promptId')`,
           sql`${conversationEpisodes.payload}->>'episodeId' = ${episodeId}`,
         ),
       )
@@ -246,6 +253,7 @@ export class PgConversationIndex implements ConversationIndexPort {
           eq(conversationEpisodes.userId, identity.userId),
           eq(sessions.scope, 'personal'),
           sql`${sessions.closedAt} is null`,
+          sql`not exists (select 1 from ${sessionEvents} removed where removed.session_id = ${conversationEpisodes.sessionId} and removed.type = 'message/removed' and removed.payload->>'promptId' = ${conversationEpisodes.payload}->>'promptId')`,
           query.before ? lt(conversationEpisodes.id, query.before) : undefined,
           terms.length
             ? or(...terms.map((term) => sql`${searchable} ilike ${`%${term}%`}`))

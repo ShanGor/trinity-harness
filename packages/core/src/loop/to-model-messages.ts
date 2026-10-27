@@ -1,6 +1,7 @@
 import {
   compactionRanges,
   turnMessageProjection,
+  removedTurnIndices,
   citationContext,
   isCompacted,
   skillResultSchema,
@@ -84,6 +85,7 @@ export function toModelMessages(events: readonly SessionEvent[]): ConversationMe
 }
 
 function assembleModelMessages(events: readonly SessionEvent[]): ConversationMessage[] {
+  const removed = removedTurnIndices(events);
   const currentPrompt = events.findLast((event) => event.type === 'message/user')?.eventId;
   const currentSelection = events.findLast(
     (event) => event.type === 'memory/selection' && event.receipt.promptId === currentPrompt,
@@ -201,6 +203,7 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
   }
   let start = -1;
   events.forEach((event, i) => {
+    if (removed.has(i)) return;
     if (event.type === 'message/user') start = i;
     if (event.type === 'turn/end' && (!event.promptId || events[start]?.eventId === event.promptId))
       start = -1;
@@ -212,6 +215,7 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
   });
   events.forEach((event, i) => {
     const seq = i + 1;
+    if (removed.has(i)) return;
     // In-place summary insertion at the start of each covered range; the
     // range becomes active so its own events (starting at fromSeq) are
     // skipped below.
@@ -238,6 +242,13 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
         break;
       }
       case 'message/user': {
+        if (event.revision)
+          messages.push({
+            role: 'user',
+            context: 'control',
+            content:
+              '[The user explicitly resubmitted an unsuccessful request. Previous tool effects are retained in the execution log and may be incomplete or unknown. Inspect current state before repeating effects; the amended/current request is authoritative.]',
+          });
         const media = mediaBlocksFromContent(event.content);
         const attachmentUris = new Set(
           event.content.flatMap((block) =>
@@ -405,12 +416,14 @@ export function personalModelMessages(
   events: readonly SessionEvent[],
   receipt: RecallReceipt,
 ): ConversationMessage[] {
+  const removed = removedTurnIndices(events);
   const start = events.findIndex(
     (event) => event.type === 'message/user' && event.eventId === receipt.promptId,
   );
   if (start < 0) throw new Error('Recall source prompt is missing');
   const active = events.map((event, index): SessionEvent => {
     const omitted: SessionEvent = { type: 'session/closed', eventId: event.eventId, at: event.at };
+    if (removed.has(index)) return omitted;
     if (event.type === 'memory/selection') return omitted;
     if (event.type === 'compaction/summary')
       return event.memoryPromptId === receipt.promptId &&
@@ -427,27 +440,29 @@ export function personalModelMessages(
     episodes: receipt.episodes,
     omitted: receipt.omitted,
     commandResult: receipt.commandResult,
-    interruptedTurns: receipt.interruptedTurns,
+    interruptedTurns: receipt.interruptedTurns?.filter((turn) => !removed.has(turn.fromSeq - 1)),
   });
-  const dialogue: ConversationMessage[] = (receipt.dialogue ?? []).flatMap((exchange) =>
-    [exchange.request, exchange.answer].map((source, index): ConversationMessage => {
-      const original = events[source.seq - 1];
-      const citations =
-        index === 1 && original?.type === 'message/assistant' && original.citationList
-          ? citationContext(original.citationList)
-          : '';
-      return {
-        role: index === 0 ? 'user' : 'assistant',
-        content:
-          source.text +
-          citations +
-          (source.attachments?.length
-            ? `\n[Original attachment metadata; use recall eventId to inspect original media or authorized workspace tools.]\n${JSON.stringify(source.attachments)}`
-            : '') +
-          `\n[Conversation source eventId=${source.eventId}, seq=${source.seq}, characters ${source.from}-${source.to}/${source.totalCharacters}${source.to < source.totalCharacters ? '; excerpt truncated, expand with recall eventId' : ''}]`,
-      };
-    }),
-  );
+  const dialogue: ConversationMessage[] = (receipt.dialogue ?? [])
+    .filter((exchange) => !removed.has(exchange.request.seq - 1))
+    .flatMap((exchange) =>
+      [exchange.request, exchange.answer].map((source, index): ConversationMessage => {
+        const original = events[source.seq - 1];
+        const citations =
+          index === 1 && original?.type === 'message/assistant' && original.citationList
+            ? citationContext(original.citationList)
+            : '';
+        return {
+          role: index === 0 ? 'user' : 'assistant',
+          content:
+            source.text +
+            citations +
+            (source.attachments?.length
+              ? `\n[Original attachment metadata; use recall eventId to inspect original media or authorized workspace tools.]\n${JSON.stringify(source.attachments)}`
+              : '') +
+            `\n[Conversation source eventId=${source.eventId}, seq=${source.seq}, characters ${source.from}-${source.to}/${source.totalCharacters}${source.to < source.totalCharacters ? '; excerpt truncated, expand with recall eventId' : ''}]`,
+        };
+      }),
+    );
   return [
     ...dialogue,
     {

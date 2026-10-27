@@ -286,6 +286,18 @@ export interface ManagedBrowserSupervisorOptions {
   now?: () => Date;
 }
 
+interface BrowserIntervention {
+  settled: boolean;
+  closed: boolean;
+  released: Promise<void>;
+  release(): void;
+}
+interface ActiveBrowserOperation {
+  stop: AbortController;
+  signal: AbortSignal;
+  intervention?: BrowserIntervention;
+}
+
 /** Stateful sandbox supervisor. Workers only hold HTTP clients. */
 export class ManagedBrowserSupervisor
   implements BrowserRuntimePort, BrowserPreviewPort, BrowserInteractionPort
@@ -295,7 +307,7 @@ export class ManagedBrowserSupervisor
   private readonly leases = new Map<string, AbortController>();
   private readonly shutdown = new AbortController();
   private allocating = 0;
-  private readonly activeOperations = new Map<string, AbortController>();
+  private readonly activeOperations = new Map<string, ActiveBrowserOperation>();
   private readonly stopping = new WeakMap<ManagedBrowserSession, Promise<void>>();
   constructor(private readonly options: ManagedBrowserSupervisorOptions) {}
   private controlState(record?: BrowserControlRecord | null, viewId?: string): BrowserControlState {
@@ -394,12 +406,21 @@ export class ManagedBrowserSupervisor
       'abort',
       () => {
         if (cancel.signal.aborted || this.shutdown.signal.aborted) return;
+        const intervention = this.activeOperations.get(record.sessionId)?.intervention;
+        const desktopLock = intervention && !intervention.closed;
         void this.options.store
           .run(
-            record.sessionId,
+            desktopLock ? `desktop:${record.sessionId}` : record.sessionId,
             async () => {
+              if (cancel.signal.aborted) return;
+              if (
+                desktopLock &&
+                this.activeOperations.get(record.sessionId)?.intervention !== intervention
+              )
+                return;
               const current = await this.control(record.sessionId);
               if (current?.mode === 'human') this.armLease(current);
+              else if (current?.mode === 'paused' && intervention?.settled) intervention.release();
             },
             this.shutdown.signal,
           )
@@ -434,6 +455,8 @@ export class ManagedBrowserSupervisor
   ): Promise<BrowserInteractionResult> {
     const request = browserInteractionRequestSchema.parse(input);
     let admitted = false;
+    let activated: BrowserIntervention | undefined;
+    let takeCommitted = false;
     const disconnected = new AbortController();
     const disconnect = (): void => {
       if (!admitted || request.operation === 'input') disconnected.abort();
@@ -460,7 +483,49 @@ export class ManagedBrowserSupervisor
     try {
       const scope = await this.scopeFor(request.sessionId, active);
       if (!scope) return failure('NOT_AUTHORIZED', 'Browser ownership is unavailable.');
-      if (['state', 'frame'].includes(request.operation) && this.activeOperations.has(scope)) {
+      const running = this.activeOperations.get(scope);
+      if (
+        running &&
+        request.operation === 'take' &&
+        !running.intervention &&
+        this.sessions.get(scope)?.fenceAgent
+      ) {
+        if (!(await this.canView(request.sessionId, scope, active)))
+          return failure('NOT_AUTHORIZED', 'Browser ownership is unavailable.');
+        const session = this.sessions.get(scope);
+        const bound = await this.options.store.binding(scope);
+        if (
+          !session ||
+          !session.fenceAgent ||
+          bound?.status !== 'active' ||
+          bound.owner !== this.options.owner ||
+          bound.generation !== session.generation ||
+          this.activeOperations.get(scope) !== running ||
+          running.signal.aborted
+        )
+          return failure('BUSY', 'The browser operation is not ready for human intervention.');
+        if (!running.intervention) {
+          if (!session.fenceAgent())
+            return failure('BUSY', 'The browser operation is not ready for human intervention.');
+          let resolve!: () => void;
+          const released = new Promise<void>((done) => {
+            resolve = done;
+          });
+          activated = {
+            settled: false,
+            closed: false,
+            released,
+            release: () => {
+              if (!activated || activated.closed) return;
+              activated.closed = true;
+              resolve();
+            },
+          };
+          running.intervention = activated;
+        }
+      }
+      const intervention = running?.intervention?.closed ? undefined : running?.intervention;
+      if (['state', 'frame'].includes(request.operation) && running && !intervention) {
         if (!(await this.canView(request.sessionId, scope, active)))
           return failure('NOT_AUTHORIZED', 'Browser ownership is unavailable.');
         const record = await this.options.interactionStore.get(scope);
@@ -478,11 +543,16 @@ export class ManagedBrowserSupervisor
         };
       }
       return await this.options.store.run(
-        scope,
+        intervention ? `desktop:${scope}` : scope,
         async (lockSignal) => {
           admitted = true;
           signal?.throwIfAborted();
-          const operationSignal = AbortSignal.any([active, lockSignal]);
+          const operationSignal = AbortSignal.any([
+            active,
+            lockSignal,
+            ...(intervention && running ? [running.signal] : []),
+          ]);
+          operationSignal.throwIfAborted();
           if (!(await this.canView(request.sessionId, scope, operationSignal)))
             return failure('NOT_AUTHORIZED', 'Browser ownership is unavailable.');
           let session = this.sessions.get(scope);
@@ -508,6 +578,7 @@ export class ManagedBrowserSupervisor
               await this.options.interactionStore!.put(record);
               await this.controlEvent(record, request.sessionId);
             }
+            intervention?.release();
             return { state: this.controlState() };
           }
           if (
@@ -595,6 +666,7 @@ export class ManagedBrowserSupervisor
               keyboard: null,
             };
             await this.options.interactionStore!.put(record);
+            takeCommitted = true;
             await this.controlEvent(record, request.sessionId);
             this.armLease(record);
           } else if (request.operation === 'heartbeat') {
@@ -605,8 +677,12 @@ export class ManagedBrowserSupervisor
             if (record.mode === 'human' && !controls)
               return fail('NOT_CONTROLLER', 'This view does not control the browser.');
             if (request.operation === 'release') {
-              const observed = await session.humanFrame(false, operationSignal);
-              if (observed.preview.state !== 'frame')
+              if (intervention && !intervention.settled)
+                return fail('BUSY', 'The earlier browser operation is still settling.');
+              const observed = session.humanHandoff
+                ? await session.humanHandoff(operationSignal)
+                : await session.humanFrame(false, operationSignal);
+              if (observed.preview.state !== 'frame' && observed.handoff !== 'navigation_only')
                 return fail(
                   observed.preview.state === 'privacy_blocked' ? 'PRIVACY_BLOCKED' : 'BUSY',
                   'The browser must have a fresh non-private view before returning control.',
@@ -628,6 +704,7 @@ export class ManagedBrowserSupervisor
             await this.controlEvent(record, request.sessionId);
             this.armLease(record);
             this.armIdle(scope);
+            if (intervention?.settled) intervention.release();
           } else if (request.operation === 'input') {
             if (!controls) return fail('NOT_CONTROLLER', 'Take control before sending input.');
             const previous = await this.options.interactionStore!.input(scope, request.requestId);
@@ -659,13 +736,17 @@ export class ManagedBrowserSupervisor
                 'INPUT_SEQUENCE',
                 'Input sequence is stale or out of order. Refresh the browser.',
               );
-            const target = request.keyboardId
-              ? (request.action.type === 'text' || request.action.type === 'key') &&
-                record.keyboard?.id === request.keyboardId
-                ? record.keyboard.target
-                : undefined
-              : (record.frames.find((frame) => frame.frameId === request.frameId) ??
-                (record.frame?.frameId === request.frameId ? record.frame : undefined));
+            const recovery =
+              request.action.type === 'new_tab' && !request.frameId && !request.keyboardId;
+            const target = recovery
+              ? { recovery: 'new_tab' as const }
+              : request.keyboardId
+                ? (request.action.type === 'text' || request.action.type === 'key') &&
+                  record.keyboard?.id === request.keyboardId
+                  ? record.keyboard.target
+                  : undefined
+                : (record.frames.find((frame) => frame.frameId === request.frameId) ??
+                  (record.frame?.frameId === request.frameId ? record.frame : undefined));
             if (
               !target ||
               ('capturedAt' in target &&
@@ -701,6 +782,7 @@ export class ManagedBrowserSupervisor
                 await this.controlEvent(record);
                 this.armLease(record);
                 this.armIdle(scope);
+                if (intervention?.settled) intervention.release();
                 return failure('NOT_AUTHORIZED', 'Browser ownership changed before input.');
               }
               const outcome = await session.humanInput(request.action, target, operationSignal);
@@ -776,18 +858,35 @@ export class ManagedBrowserSupervisor
             };
           if (['frame', 'take', 'input'].includes(request.operation)) {
             const privateView = record.mode === 'human' && record.controllerId === request.viewId;
+            if (intervention && !privateView)
+              return fail('BUSY', 'The desktop is available only to its controlling view.');
             if (privateView)
               record.expiresAt = new Date(this.now().getTime() + 15_000).toISOString();
             const captured = await session.humanFrame(privateView, operationSignal);
-            if (captured.preview.state !== 'frame')
+            if (captured.preview.state !== 'frame') {
+              // Keep the controlling view's lease alive even while capture is
+              // unavailable, so explicit recovery does not lose its authority.
+              if (privateView) {
+                if (captured.preview.state !== 'busy') {
+                  record.frame = null;
+                  record.frames = [];
+                  record.keyboard = null;
+                }
+                await this.options.interactionStore!.put(record);
+              }
               return fail(
                 captured.preview.state === 'privacy_blocked'
                   ? 'PRIVACY_BLOCKED'
                   : captured.preview.state === 'busy'
                     ? 'BUSY'
                     : 'UNAVAILABLE',
-                'A fresh browser picture is unavailable.',
+                captured.unavailableReason === 'viewport_size'
+                  ? 'The page viewport exceeds the picture size limit. Open a new tab or restart the browser to recover.'
+                  : captured.unavailableReason === 'image_geometry'
+                    ? 'The browser picture does not match the page viewport. Open a new tab or restart the browser to recover.'
+                    : 'A fresh browser picture is unavailable.',
               );
+            }
             if (
               captured.preview.generation !== record.generation ||
               (captured.target &&
@@ -817,6 +916,7 @@ export class ManagedBrowserSupervisor
                 await this.controlEvent(record, request.sessionId);
                 this.armLease(record);
                 this.armIdle(scope);
+                if (intervention?.settled) intervention.release();
               }
               return { state: this.controlState(record, request.viewId) };
             }
@@ -828,6 +928,7 @@ export class ManagedBrowserSupervisor
                 ...captured.preview,
                 frameId,
                 epoch: record.epoch,
+                ...(privateView && captured.surface ? { surface: captured.surface } : {}),
                 ...(privateView && captured.browser ? { browser: captured.browser } : {}),
               },
               ...(privateView && record.keyboard ? { keyboardId: record.keyboard.id } : {}),
@@ -841,11 +942,13 @@ export class ManagedBrowserSupervisor
         active,
       );
     } catch {
+      activated?.release();
       // A failed read/operation does not prove Chrome stopped or control was released.
       // Let the HTTP boundary report an outage so the viewer refreshes state instead
       // of alternating between a fabricated inactive state and the durable lease.
       throw new BrowserDriverError('DRIVER_FAILED', 'Managed browser interaction is unavailable.');
     } finally {
+      if (activated && !takeCommitted) activated.release();
       signal?.removeEventListener('abort', disconnect);
     }
   }
@@ -873,6 +976,7 @@ export class ManagedBrowserSupervisor
     request: BrowserRuntimeRequest,
     active: AbortSignal,
     scope: string,
+    operation: ActiveBrowserOperation,
   ): Promise<BrowserRuntimeResult> {
     active.throwIfAborted();
     if (
@@ -958,10 +1062,23 @@ export class ManagedBrowserSupervisor
       }
     }
     await this.options.store.begin(request.sessionId, request.callId, hash, session.generation);
-    const result = browserRuntimeResultSchema.parse(await session.execute(request, active));
+    let result: BrowserRuntimeResult;
+    try {
+      result = browserRuntimeResultSchema.parse(await session.execute(request, active));
+    } catch (error) {
+      if (operation.intervention) {
+        await this.settleIntervention(scope, operation.intervention, active);
+      }
+      throw error;
+    }
+    const intervention = operation.intervention;
+    if (intervention) {
+      await this.settleIntervention(scope, intervention, active);
+      result = browserRuntimeFailure(request, 'NOT_EXECUTED', 'unknown');
+    }
     active.throwIfAborted();
     await this.options.store.finish(request.sessionId, request.callId, result);
-    if (control?.needsObservation && !result.isError)
+    if (!intervention && control?.needsObservation && !result.isError)
       await this.options.interactionStore!.put({
         ...control,
         needsObservation: !!this.options.scope,
@@ -981,9 +1098,26 @@ export class ManagedBrowserSupervisor
       result.value.kind === 'browser-error-v1' &&
       result.value.code === 'NOT_AUTHORIZED' &&
       result.value.effect === 'none';
-    if (result.isError && !sourceDenied) await this.destroy(scope);
-    else this.armIdle(scope);
+    if (result.isError && !sourceDenied && !intervention) await this.destroy(scope);
+    else if (this.sessions.get(scope) === session) this.armIdle(scope);
     return result;
+  }
+  private async settleIntervention(
+    scope: string,
+    intervention: BrowserIntervention,
+    signal: AbortSignal,
+  ): Promise<void> {
+    intervention.settled = true;
+    if (!intervention.closed)
+      await this.options.store.run(
+        `desktop:${scope}`,
+        async () => {
+          const record = await this.options.interactionStore?.get(scope);
+          if (record?.mode === 'paused') intervention.release();
+        },
+        signal,
+      );
+    await intervention.released;
   }
   async execute(input: BrowserRuntimeRequest, signal?: AbortSignal): Promise<BrowserRuntimeResult> {
     const request = browserRuntimeRequestSchema.parse(input);
@@ -1000,14 +1134,18 @@ export class ManagedBrowserSupervisor
         scope,
         async (lockSignal) => {
           const stop = new AbortController();
-          this.activeOperations.set(scope, stop);
           const active = AbortSignal.any([deadline, lockSignal, stop.signal]);
+          const operation: ActiveBrowserOperation = { stop, signal: active };
+          this.activeOperations.set(scope, operation);
+          const cancelIntervention = (): void => operation.intervention?.release();
+          active.addEventListener('abort', cancelIntervention, { once: true });
           try {
-            return await this.executeLocked(request, active, scope);
+            return await this.executeLocked(request, active, scope, operation);
           } catch (err) {
             await this.destroy(scope);
             throw err;
           } finally {
+            active.removeEventListener('abort', cancelIntervention);
             this.activeOperations.delete(scope);
           }
         },
@@ -1087,7 +1225,7 @@ export class ManagedBrowserSupervisor
     }
   }
   async close(sessionId: string): Promise<void> {
-    this.activeOperations.get(sessionId)?.abort();
+    this.activeOperations.get(sessionId)?.stop.abort();
     await this.options.store.run(sessionId, async () => this.destroy(sessionId));
   }
 }

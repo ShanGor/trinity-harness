@@ -1,0 +1,12 @@
+[Unit]
+Description=Trinity browser host-only guest vsock
+Requires=trinity-browser.service
+After=trinity-browser.service
+
+[Socket]
+ListenStream=vsock::4051
+Accept=yes
+MaxConnections=32
+
+[Install]
+WantedBy=sockets.target

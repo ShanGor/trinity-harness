@@ -1,12 +1,40 @@
 import { describe, expect, it } from 'vitest';
 
-import type { SessionEvent } from '@trinity-harness/contracts';
+import { projectMessages, type SessionEvent } from '@trinity-harness/contracts';
 
 import { toModelMessages } from '../src/index.js';
 
 const id = () => crypto.randomUUID();
 const now = () => new Date().toISOString();
 const text = (t: string) => ({ kind: 'text' as const, text: t });
+
+it('excludes removed exchanges and summaries containing them while preserving event sequence identities', () => {
+  const prompt = user('Removed request');
+  const events: SessionEvent[] = [
+    prompt,
+    assistant('Removed answer'),
+    { type: 'turn/end', eventId: id(), at: now(), reason: 'completed', promptId: prompt.eventId },
+    {
+      type: 'compaction/summary',
+      eventId: id(),
+      at: now(),
+      fromSeq: 1,
+      toSeq: 3,
+      summary: 'Removed summary',
+    },
+    {
+      type: 'message/removed',
+      eventId: id(),
+      at: now(),
+      promptId: prompt.eventId,
+      role: 'assistant',
+    },
+    user('Current request'),
+  ];
+  expect(toModelMessages(events)).toEqual([{ role: 'user', content: 'Current request' }]);
+  expect(projectMessages(events)).toEqual([{ role: 'user', content: [text('Current request')] }]);
+  expect(events[0]).toBe(prompt);
+});
 
 function user(t: string): SessionEvent {
   return {

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { PNG } from 'pngjs';
 import {
   LocalSandbox,
   LocalBlobStore,
@@ -34,6 +35,11 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
     const sessionId = randomUUID();
     const server = createServer((request, response) => {
       response.setHeader('content-type', 'text/html; charset=utf-8');
+      if (request.url === '/bookmark-destination') {
+        response.end(`<!doctype html><style>body{margin:0;min-height:4000px}button{position:fixed;right:20px;bottom:20px;width:120px;height:60px}#stripe{position:absolute;left:0;top:1500px;width:100%;height:80px;background:rgb(255,0,0)}</style><div id="stripe"></div>
+          <button onclick="this.dataset.clicked=String(event.isTrusted)">Bookmark destination</button>`);
+        return;
+      }
       if (request.url === '/drag') {
         response.end(`<!doctype html><style>
           #source,#drop,#slider {position:absolute;top:40px;width:120px;height:100px}
@@ -419,6 +425,276 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
       expect(closed.target.tabId).toBe(originalId);
       expect(closed.browser!.tabs).toHaveLength(1);
       await input({ type: 'navigate', url });
+    }, 35_000);
+    it('shows native bookmarks and account settings only in private human frames', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(30_000) };
+      const frame = async () => {
+        let captured = await driver.humanFrame(true, ctx);
+        await expect
+          .poll(async () => {
+            if (captured.preview.state === 'busy') captured = await driver.humanFrame(true, ctx);
+            return captured.preview.state;
+          })
+          .toBe('frame');
+        if (!captured.target) throw new Error('Missing private frame');
+        return { ...captured.target, frameId: randomUUID() };
+      };
+      for (const page of ['bookmarks', 'account'] as const) {
+        expect(
+          await driver.humanInput({ type: 'open_browser_page', page }, await frame(), ctx),
+        ).toEqual({ effect: 'applied' });
+        await frame();
+        expect(await driver.humanFrame(false, ctx)).toEqual({
+          preview: { state: 'unavailable' },
+          handoff: 'navigation_only',
+        });
+        await expect(
+          driver.authorize(sessionId, 'read_page', undefined, ctx.signal),
+        ).rejects.toMatchObject({
+          code: 'NOT_AUTHORIZED',
+        });
+      }
+      const calls = vi.spyOn(connection, 'call');
+      try {
+        expect(await driver.humanInput({ type: 'new_tab' }, { recovery: 'new_tab' }, ctx)).toEqual({
+          effect: 'applied',
+        });
+        expect(calls.mock.calls.map(([name]) => name)).toEqual([
+          'browser_tab_list',
+          'browser_tab_new',
+        ]);
+      } finally {
+        calls.mockRestore();
+      }
+      const recovered = await frame();
+      const recoveredId = recovered.tabId;
+      expect(
+        await driver.humanInput({ type: 'close_tab', tabId: recoveredId }, recovered, ctx),
+      ).toEqual({
+        effect: 'applied',
+      });
+      // Returning control must still permit an explicit web navigation without
+      // letting native Chrome pages become model-readable evidence.
+      const recover = await driver.authorize(sessionId, 'navigate', url, ctx.signal);
+      await driver.verify(recover, ctx);
+      await driver.navigate(recover, url, ctx);
+      expect(
+        (await driver.authorize(sessionId, 'read_page', undefined, ctx.signal)).observedUrl,
+      ).toBe(url);
+    }, 35_000);
+    it('shows the native bookmark menu and opens a bookmark with a double click', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(40_000) };
+      const evaluate = async (expression: string): Promise<unknown> =>
+        (await connection.call('browser_evaluate_main', { expression }, ctx.signal))
+          .structuredContent;
+      const frame = async () => {
+        let captured = await driver.humanFrame(true, ctx);
+        await expect
+          .poll(async () => {
+            if (captured.preview.state === 'busy') captured = await driver.humanFrame(true, ctx);
+            return captured.preview.state;
+          })
+          .toBe('frame');
+        if (!captured.target || captured.preview.state !== 'frame')
+          throw new Error('Missing frame');
+        return {
+          ...captured,
+          preview: captured.preview,
+          target: { ...captured.target, frameId: randomUUID() },
+        };
+      };
+      await driver.humanInput(
+        { type: 'open_browser_page', page: 'bookmarks' },
+        (await frame()).target,
+        ctx,
+      );
+      const destination = new URL('/bookmark-destination', url).href;
+      await evaluate(
+        `new Promise(resolve=>chrome.bookmarks.create({parentId:'1',title:'Fixture bookmark',url:${JSON.stringify(destination)}},resolve))`,
+      );
+      const find = `(()=>{let item;function scan(node){for(const e of node.querySelectorAll('*')){if(e.tagName==='BOOKMARKS-ITEM'&&e.getAttribute('aria-label')==='Fixture bookmark')item=e;if(e.shadowRoot)scan(e.shadowRoot)}}scan(document);if(!item)return null;const rect=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}};return {item:rect(item),button:rect(item.shadowRoot.querySelector('#menuButton'))}})()`;
+      type Rect = { x: number; y: number; width: number; height: number };
+      type Positions = { item: Rect; button: Rect };
+      await expect
+        .poll(async () => ((await evaluate(find)) as { value: Positions | null }).value)
+        .not.toBeNull();
+      const positions = ((await evaluate(find)) as { value: Positions | null }).value;
+      if (!positions) throw new Error('Missing fixture bookmark');
+      const before = await frame();
+      const point = (r: { x: number; y: number; width: number; height: number }) => ({
+        x: r.x + r.width / 2,
+        y: r.y + r.height / 2,
+      });
+      await driver.humanInput(
+        { type: 'click', point: point(positions.button), button: 'left', count: 1, modifiers: [] },
+        before.target,
+        ctx,
+      );
+      const menu = (await evaluate(
+        `(()=>{let menu;function scan(n){for(const e of n.querySelectorAll('*')){if(e.tagName==='CR-ACTION-MENU'&&e.open)menu=e;if(e.shadowRoot)scan(e.shadowRoot)}}scan(document);if(!menu)return null;const r=menu.shadowRoot.querySelector('dialog').getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})()`,
+      )) as { value: { x: number; y: number; width: number; height: number } | null };
+      expect(menu.value).not.toBeNull();
+      const after = await frame();
+      const oldPng = PNG.sync.read(Buffer.from(before.preview.png, 'base64'));
+      const newPng = PNG.sync.read(Buffer.from(after.preview.png, 'base64'));
+      const box = menu.value!;
+      let changed = 0;
+      // Ignore the bookmark row underneath the top of the popup.
+      for (let y = Math.ceil(box.y + 45); y < Math.min(newPng.height, box.y + box.height); y++) {
+        for (let x = Math.ceil(box.x); x < Math.min(newPng.width, box.x + box.width); x++) {
+          const i = (y * newPng.width + x) * 4;
+          if (
+            Math.abs(newPng.data[i]! - oldPng.data[i]!) +
+              Math.abs(newPng.data[i + 1]! - oldPng.data[i + 1]!) +
+              Math.abs(newPng.data[i + 2]! - oldPng.data[i + 2]!) >
+            40
+          )
+            changed++;
+        }
+      }
+      expect(changed).toBeGreaterThan(300);
+      // Dismiss the popup, then use the same trusted input path for a double click.
+      await driver.humanInput(
+        { type: 'click', point: { x: 400, y: 400 }, button: 'left', count: 1, modifiers: [] },
+        after.target,
+        ctx,
+      );
+      const row = { x: positions.item.x + 80, y: positions.item.y + positions.item.height / 2 };
+      await driver.humanInput(
+        { type: 'click', point: row, button: 'left', count: 1, modifiers: [] },
+        (await frame()).target,
+        ctx,
+      );
+      await driver.humanInput(
+        { type: 'click', point: row, button: 'left', count: 2, modifiers: [] },
+        (await frame()).target,
+        ctx,
+      );
+      await expect
+        .poll(async () => (await frame()).browser?.tabs.some((tab) => tab.url === destination))
+        .toBe(true);
+      const tabs = (await frame()).browser!.tabs;
+      for (const tab of tabs.filter((tab) => tab.url === destination))
+        await driver.humanInput({ type: 'close_tab', tabId: tab.id }, (await frame()).target, ctx);
+      await driver.navigate(
+        await driver.authorize(sessionId, 'navigate', url, ctx.signal),
+        url,
+        ctx,
+      );
+    }, 45_000);
+    it('captures and clicks a background tab opened by native bookmarks, then switches back', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(30_000) };
+      const frame = async () => {
+        let captured = await driver.humanFrame(true, ctx);
+        await expect
+          .poll(async () => {
+            if (captured.preview.state === 'busy') captured = await driver.humanFrame(true, ctx);
+            return captured.preview.state;
+          })
+          .toBe('frame');
+        if (!captured.target) throw new Error('Missing private frame');
+        return { ...captured, target: { ...captured.target, frameId: randomUUID() } };
+      };
+      const original = await frame();
+      await driver.humanInput(
+        { type: 'open_browser_page', page: 'bookmarks' },
+        original.target,
+        ctx,
+      );
+      const bookmarks = await frame();
+      const destination = new URL('/bookmark-destination', url).href;
+      // Chrome's bookmark manager creates tabs through Chrome, outside the
+      // driver's browser_tab_new path. Only this disposable profile is used.
+      await connection.call(
+        'browser_evaluate_main',
+        {
+          expression: `new Promise(resolve=>chrome.tabs.create({url:${JSON.stringify(destination)},active:false},()=>resolve(true)))`,
+        },
+        ctx.signal,
+      );
+      let opened: string | undefined;
+      await expect
+        .poll(async () => {
+          const captured = await frame();
+          opened = captured.browser?.tabs.find((tab) => tab.url === destination)?.id;
+          return opened;
+        })
+        .toBeDefined();
+      try {
+        await driver.humanInput(
+          { type: 'switch_tab', tabId: opened! },
+          (await frame()).target,
+          ctx,
+        );
+        const selected = await frame();
+        expect(selected.target.tabId).toBe(opened);
+        expect(selected.preview).toMatchObject({
+          width: selected.target.width,
+          height: selected.target.height,
+        });
+        expect(
+          await driver.humanInput(
+            {
+              type: 'click',
+              point: { x: selected.target.width - 80, y: selected.target.height - 50 },
+              button: 'left',
+              count: 1,
+              modifiers: [],
+            },
+            selected.target,
+            ctx,
+          ),
+        ).toMatchObject({ effect: 'applied' });
+        expect(
+          (
+            await connection.call(
+              'browser_evaluate',
+              { expression: 'document.querySelector("button").dataset.clicked' },
+              ctx.signal,
+            )
+          ).structuredContent,
+        ).toEqual({ value: 'true' });
+        // The screenshot clip uses document coordinates after scrolling, but
+        // image pixels and human clicks remain relative to the viewport.
+        await connection.call(
+          'browser_evaluate',
+          { expression: '(()=>{scrollTo(0,1500);return true})()' },
+          ctx.signal,
+        );
+        const scrolled = await frame();
+        if (scrolled.preview.state !== 'frame') throw new Error('Missing scrolled frame');
+        const png = PNG.sync.read(Buffer.from(scrolled.preview.png, 'base64'));
+        const pixel = (20 * png.width + 100) * 4;
+        expect([...png.data.subarray(pixel, pixel + 3)]).toEqual([255, 0, 0]);
+        expect((await driver.humanFrame(false, ctx)).preview.state).toBe('frame');
+        await driver.humanInput({ type: 'new_tab' }, { recovery: 'new_tab' }, ctx);
+        const recovery = await frame();
+        expect(recovery.target.tabId).not.toBe(opened);
+        await driver.humanInput(
+          { type: 'close_tab', tabId: recovery.target.tabId },
+          recovery.target,
+          ctx,
+        );
+        const web = await frame();
+        await driver.humanInput(
+          { type: 'switch_tab', tabId: bookmarks.target.tabId },
+          web.target,
+          ctx,
+        );
+        expect((await frame()).target.tabId).toBe(bookmarks.target.tabId);
+      } finally {
+        await connection.call('browser_tab_close', { tab_id: opened! }, ctx.signal);
+        await connection.call(
+          'browser_tab_activate',
+          { tab_id: bookmarks.target.tabId },
+          ctx.signal,
+        );
+        await driver.navigate(
+          await driver.authorize(sessionId, 'navigate', url, ctx.signal),
+          url,
+          ctx,
+        );
+      }
     }, 35_000);
     it('runs the evidence pipeline and replays saved images offline', async () => {
       const store = new MemorySessionStore();

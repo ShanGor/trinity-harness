@@ -26,6 +26,10 @@ export const browserRuntimeEnvSchema = z
       .string()
       .regex(/^\d+\.\d+\.\d+\.\d+$/)
       .default('155.0.8059.84'),
+    GUEST_DESKTOP_ENABLED: z
+      .enum(['0', '1'])
+      .default('0')
+      .transform((value) => value === '1'),
     /** Host sandbox egress selection; also used by locally launched managed Chrome. */
     SANDBOX_PROXY_URL: z
       .url()
@@ -43,6 +47,12 @@ export const browserRuntimeEnvSchema = z
       .default('localhost,127.0.0.0/8,192.168.0.0/16,172.0.0.0/8,::1'),
   })
   .superRefine((env, ctx) => {
+    if (env.GUEST_DESKTOP_ENABLED && env.EXECUTION_DRIVER !== 'firecracker')
+      ctx.addIssue({
+        code: 'custom',
+        path: ['GUEST_DESKTOP_ENABLED'],
+        message: 'Guest desktop requires the Firecracker browser service',
+      });
     if (env.EXECUTION_DRIVER === 'local' && !env.BROWSER_PROFILE_DIR)
       ctx.addIssue({
         code: 'custom',

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  applyTimelineEvent,
   mergeModelUsage,
   settleAssistantItems,
   setAssistantApproval,
@@ -247,6 +248,23 @@ describe('message timestamp reconciliation', () => {
 });
 
 describe('newItemKey', () => {
+  it('replays removals and terminal errors without losing the prompt identity', () => {
+    const prompt = { ...user('question'), messageId: 'prompt' };
+    const failed = applyTimelineEvent([prompt], {
+      type: 'error',
+      sessionId: 's',
+      message: 'Fatal',
+    });
+    expect(failed[1]).toMatchObject({ role: 'assistant', error: true, streaming: false });
+    const removed = applyTimelineEvent(failed, {
+      type: 'message/removed',
+      sessionId: 's',
+      promptId: 'prompt',
+      role: 'user',
+    });
+    expect(removed[0]).toMatchObject({ messageId: 'prompt', removed: true });
+    expect(removed[1]).toBe(failed[1]);
+  });
   it('returns unique v7-shaped keys even without crypto.randomUUID (http LAN origins)', async () => {
     const original = crypto.randomUUID;
     // Plain-http LAN origins (e.g. http://sam-pc:5173) are not secure

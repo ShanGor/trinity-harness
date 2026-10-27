@@ -13,6 +13,9 @@ const fake = vi.hoisted(() => ({
   getTimeline: vi.fn<() => Promise<TimelinePage>>(),
   createSession: vi.fn<(...args: unknown[]) => Promise<string>>(async () => 'new-session'),
   sendPrompt: vi.fn(async () => undefined),
+  reviseMessage: vi.fn(async () => undefined),
+  removeMessage: vi.fn(async () => undefined),
+  stopAndWait: vi.fn(async () => undefined),
   respondApproval: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ ok: true as const, alreadyStopped: false })),
   getBrowserPreview: vi.fn(async () => ({ state: 'unavailable' as const })),
@@ -60,6 +63,9 @@ vi.mock('@trinity-harness/client-acp', () => ({
     ensureMainChat = async () => 'main-session';
     getTimeline = fake.getTimeline;
     sendPrompt = fake.sendPrompt;
+    reviseMessage = fake.reviseMessage;
+    removeMessage = fake.removeMessage;
+    stopAndWait = fake.stopAndWait;
     cancelTurn = fake.cancelTurn;
     respondApproval = fake.respondApproval;
     openEventStream(_id: string, handlers: { onEvent: (event: ServerEvent) => void }) {
@@ -127,6 +133,9 @@ beforeEach(async () => {
   fake.markdown.mockClear();
   fake.createSession.mockReset().mockResolvedValue('new-session');
   fake.sendPrompt.mockClear();
+  fake.reviseMessage.mockReset().mockResolvedValue(undefined);
+  fake.removeMessage.mockReset().mockResolvedValue(undefined);
+  fake.stopAndWait.mockReset().mockResolvedValue(undefined);
   fake.cancelTurn.mockClear();
   fake.getBrowserPreview.mockClear();
   fake.getEnvironment.mockClear();
@@ -149,6 +158,115 @@ afterEach(async () => {
 });
 
 describe('chat typing and streaming performance', () => {
+  it('retries a fatal response before any assistant text and keeps the composer draft', async () => {
+    const promptId = '019a1e10-1234-7000-8000-000000000001';
+    fake.getTimeline.mockResolvedValueOnce({
+      events: [
+        {
+          type: 'message/committed',
+          sessionId: 's0',
+          message: { role: 'user', id: promptId, content: 'Original request' },
+        },
+        { type: 'error', sessionId: 's0', message: 'Fatal provider failure' },
+      ],
+      lastSeq: 2,
+      nextBefore: null,
+    });
+    await click(container.querySelector('.history-item'));
+    const composer = container.querySelector('textarea')!;
+    await type(composer, 'Keep my follow-up draft');
+    const retry = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Retry',
+    );
+    await click(retry ?? null);
+    expect(fake.reviseMessage).toHaveBeenCalledWith(
+      's0',
+      { promptId, kind: 'retry', operationId: expect.any(String) },
+      'Original request',
+    );
+    expect(fake.stopAndWait).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')).toBe(composer);
+    expect(composer.value).toBe('Keep my follow-up draft');
+  });
+
+  it('allows editing a processing last message and waits for Stop before submitting', async () => {
+    const promptId = '019a1e10-1234-7000-8000-000000000001';
+    fake.getTimeline.mockResolvedValueOnce({
+      events: [
+        {
+          type: 'message/committed',
+          sessionId: 's0',
+          message: { role: 'user', id: promptId, content: 'Original request' },
+        },
+        { type: 'session/turn_status', sessionId: 's0', status: 'running' },
+      ],
+      lastSeq: 2,
+      nextBefore: null,
+    });
+    await click(container.querySelector('.history-item'));
+    const composer = container.querySelector('textarea')!;
+    await type(composer, 'Keep this separate draft');
+    await click(
+      [...container.querySelectorAll('button')].find((button) => button.textContent === 'Edit') ??
+        null,
+    );
+    await type(document.querySelector('[aria-label="Edit message text"]')!, 'Amended request');
+    let stopped!: () => void;
+    fake.stopAndWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          stopped = resolve;
+        }),
+    );
+    await click(
+      [...document.querySelectorAll('.ant-modal button')].find(
+        (button) => button.textContent === 'Save and retry',
+      ) ?? null,
+    );
+    expect(fake.stopAndWait).toHaveBeenCalledOnce();
+    expect(fake.reviseMessage).not.toHaveBeenCalled();
+    await act(async () => stopped());
+    expect(fake.reviseMessage).toHaveBeenCalledWith(
+      's0',
+      { promptId, kind: 'amend', operationId: expect.any(String) },
+      'Amended request',
+    );
+    expect(container.querySelector('textarea')).toBe(composer);
+    expect(composer.value).toBe('Keep this separate draft');
+  });
+
+  it('deletes either message independently and hides Edit after a successful response', async () => {
+    const promptId = '019a1e10-1234-7000-8000-000000000001';
+    fake.getTimeline.mockResolvedValueOnce({
+      events: [
+        {
+          type: 'message/committed',
+          sessionId: 's0',
+          message: { role: 'user', id: promptId, content: 'Original request' },
+        },
+        {
+          type: 'message/committed',
+          sessionId: 's0',
+          message: { role: 'assistant', phase: 'final', content: 'Successful answer' },
+        },
+        { type: 'session/turn_status', sessionId: 's0', status: 'completed' },
+      ],
+      lastSeq: 3,
+      nextBefore: null,
+    });
+    await click(container.querySelector('.history-item'));
+    expect(
+      [...container.querySelectorAll('button')].some((button) => button.textContent === 'Edit'),
+    ).toBe(false);
+    await click(container.querySelector('[aria-label="Delete response"]'));
+    expect(fake.removeMessage).toHaveBeenCalledWith('s0', promptId, 'assistant');
+    expect(container.textContent).not.toContain('Successful answer');
+    expect(container.textContent).toContain('Original request');
+    await click(container.querySelector('[aria-label="Delete message"]'));
+    expect(fake.removeMessage).toHaveBeenCalledWith('s0', promptId, 'user');
+    expect(container.textContent).not.toContain('Original request');
+  });
+
   it('opens Browser / VM from the sidebar without replacing the conversation draft', async () => {
     const composer = container.querySelector('textarea')!;
     await type(composer, 'Keep my unfinished conversation');
@@ -776,7 +894,7 @@ describe('chat typing and streaming performance', () => {
     );
   });
 
-  it('only shows response actions after streaming finishes', async () => {
+  it('uses the same action row for both roles while streaming and after completion', async () => {
     const textarea = container.querySelector('textarea')!;
     await type(textarea, 'First prompt');
     await click(container.querySelector('.ant-sender-actions-btn'));
@@ -785,10 +903,11 @@ describe('chat typing and streaming performance', () => {
       update: { kind: 'agent_message_chunk', text: 'In progress' },
     });
     expect(container.querySelector('.response-streaming')?.textContent).toBe('Working');
-    expect(container.querySelector('.response-actions')).toBeNull();
+    expect(container.querySelectorAll('.response-actions')).toHaveLength(2);
+    expect(container.querySelector('.ant-typography-copy')).toBeNull();
     await emit({ type: 'session/turn_status', status: 'completed' });
     expect(container.querySelector('.response-streaming')).toBeNull();
-    expect(container.querySelectorAll('.response-actions')).toHaveLength(1);
+    expect(container.querySelectorAll('.response-actions')).toHaveLength(2);
     await click(container.querySelector('.new-chat-button'));
     expect(container.querySelector('.response-actions')).toBeNull();
   });
@@ -985,7 +1104,7 @@ it('opens history in the main view with the original prompt and independent draf
   expect(container.querySelector('.user-message-heading')?.parentElement?.textContent).toContain(
     'Original input\nwith another line',
   );
-  expect(container.querySelector('.ant-typography-copy')).not.toBeNull();
+  expect(container.querySelector('[aria-label="Copy message"]')).not.toBeNull();
   expect(container.querySelector('.md')?.textContent).toBe('Saved answer');
   expect(fake.getTimeline).toHaveBeenCalledWith('s0', 301);
   expect(container.querySelector('textarea')).toBe(input);

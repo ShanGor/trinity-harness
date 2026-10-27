@@ -1,4 +1,9 @@
-import type { SeqRange, SessionEvent, SessionStore } from '@trinity-harness/contracts';
+import type {
+  AppendOptions,
+  SeqRange,
+  SessionEvent,
+  SessionStore,
+} from '@trinity-harness/contracts';
 import { projectMessages } from '@trinity-harness/contracts';
 
 /**
@@ -12,10 +17,14 @@ export class MemorySessionStore implements SessionStore {
   async append(
     sessionId: string,
     events: readonly SessionEvent[],
-    opts?: { actor?: string },
+    opts?: AppendOptions,
   ): Promise<SeqRange> {
     void opts; // M1 in-memory fake: actor metadata is a PG-store concern
     const log = this.logs.get(sessionId) ?? [];
+    if (opts?.expectedLastSeq !== undefined && opts.expectedLastSeq !== log.length)
+      throw Object.assign(new Error('Conversation changed; refresh and retry.'), {
+        code: 'SESSION_CONFLICT',
+      });
     log.push(...events);
     this.logs.set(sessionId, log);
     return { from: log.length - events.length + 1, to: log.length };

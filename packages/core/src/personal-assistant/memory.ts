@@ -14,6 +14,7 @@ import type {
 import {
   validateMemoryCommand,
   turnMessageProjection,
+  removedPromptIds,
   recallResultSchema,
   memoryPredicateKey as predicateKey,
 } from '@trinity-harness/contracts';
@@ -99,6 +100,13 @@ export class PersonalContext implements PersonalContextPort {
     }
     if (this.store) {
       const events = await this.store.load(meta.id);
+      const removed = removedPromptIds(events);
+      if (
+        removed.has(receipt.promptId) ||
+        receipt.dialogue?.some((exchange) => removed.has(exchange.promptId)) ||
+        receipt.interruptedTurns?.some((turn) => removed.has(turn.promptId))
+      )
+        fail();
       const start = events.findIndex((event) => event.eventId === receipt.promptId);
       if (start < 0) fail();
       const end = events.findIndex((event, i) => i > start && event.type === 'message/user');
@@ -135,6 +143,7 @@ export class PersonalContext implements PersonalContextPort {
         for (const source of parsed.data.sources ?? []) {
           if (source.sessionId !== meta.id) continue; // Cross-session expansion is fenced by episodeId above.
           const user = events.slice(0, source.seq).findLast((item) => item.type === 'message/user');
+          if (user && removed.has(user.eventId)) fail();
           const current = user ? await this.index.evidence?.(identity, user.eventId) : null;
           if (
             current?.excluded ||
@@ -229,6 +238,7 @@ export class PersonalContext implements PersonalContextPort {
     let dialogueOmitted = false;
     if (this.store) {
       const events = await this.store.load(meta.id);
+      const removed = removedPromptIds(events);
       const current = events.findIndex((event) => event.eventId === promptId);
       const { finals } = turnMessageProjection(events);
       const starts = events.flatMap((event, i) =>
@@ -260,7 +270,7 @@ export class PersonalContext implements PersonalContextPort {
       for (const start of starts.reverse()) {
         signal?.throwIfAborted();
         const user = events[start];
-        if (user?.type !== 'message/user') continue;
+        if (user?.type !== 'message/user' || removed.has(user.eventId)) continue;
         const end = events.findIndex((event, i) => i > start && event.type === 'message/user');
         const span = events.slice(start + 1, end < 0 ? current : end);
         if (
@@ -335,6 +345,7 @@ export class PersonalContext implements PersonalContextPort {
     const interruptedTurns: NonNullable<RecallReceipt['interruptedTurns']> = [];
     if (this.store) {
       const events = await this.store.load(meta.id);
+      const removed = removedPromptIds(events);
       const current = events.findIndex(
         (event) => event.type === 'message/user' && event.eventId === promptId,
       );
@@ -351,7 +362,7 @@ export class PersonalContext implements PersonalContextPort {
       for (const start of candidates) {
         signal?.throwIfAborted();
         const user = events[start];
-        if (user?.type !== 'message/user') continue;
+        if (user?.type !== 'message/user' || removed.has(user.eventId)) continue;
         const end = events.findIndex((event, i) => i > start && event.type === 'message/user');
         const span = events.slice(start + 1, end);
         const terminal = events.findLast(
