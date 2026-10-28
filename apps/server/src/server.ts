@@ -74,12 +74,14 @@ import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
+import { Readable, Transform } from 'node:stream';
 import { z } from 'zod';
 import { resolveBrowserImage } from '@trinity-harness/core';
 
 import { parsePermissionPolicy, tenantQuotaSchema, windowStart } from '@trinity-harness/contracts';
 
 import { listPersonalFolders, personalWorkspaceDir, workspaceDirFor } from './workspace.js';
+import { detectSpeechLanguage } from './speech-text.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -151,6 +153,16 @@ const eventsQuerySchema = z.object({
   afterSeq: z.coerce.number().int().nonnegative().optional(),
   token: z.string().optional(),
 });
+
+/** Voice I/O (docs/design.md §10): bounded inbound audio for STT. */
+const MAX_SPEECH_AUDIO_BYTES = 20 * 1024 * 1024;
+const speechAudioQuerySchema = z.object({
+  mime: z
+    .string()
+    .regex(/^audio\/[A-Za-z0-9.+-]{1,60}$/, 'mime must be a bare audio/* type (no parameters)'),
+});
+const speechSynthesisSchema = z.object({ text: z.string().min(1).max(50_000) });
+const asrResponseSchema = z.object({ text: z.string() });
 
 function credentialMemoryRequest(text: string): boolean {
   if (!/^(remember\b|change my\b)/iu.test(text.trim())) return false;
@@ -581,6 +593,12 @@ export interface ServerDeps {
   defaultPolicy?: PermissionPolicy;
   /** M4: attachment + spill storage (docs/design.md §10). */
   blobs?: BlobStore;
+  /**
+   * Voice I/O proxy targets (docs/design.md §10): local Fun-ASR STT and
+   * Qwen3-TTS services. Present ⇒ the /api/speech/* routes are served;
+   * absent ⇒ they answer 501.
+   */
+  speech?: { asrUrl: string; ttsUrl: string };
   /**
    * M5: token metering read side (docs/design.md §17). Powers /api/usage and
    * the admin quota endpoints; the loop-side recording/gate runs wherever
@@ -2403,6 +2421,136 @@ export async function buildServer(
         .send(Buffer.from(data));
     });
   }
+
+  // ---- Voice I/O proxies: STT (Fun-ASR) + TTS (Qwen3-TTS), design.md §10 ---
+
+  // Raw binary upload (application/octet-stream body; the audio MIME type
+  // travels in the query string so no multipart parser is needed). Shares
+  // the parser registration with the attachments endpoint above.
+  if (!app.hasContentTypeParser('application/octet-stream')) {
+    app.addContentTypeParser(
+      'application/octet-stream',
+      { parseAs: 'buffer', bodyLimit: MAX_SPEECH_AUDIO_BYTES },
+      (_req, body, done) => done(null, body),
+    );
+  }
+
+  app.post(
+    '/api/speech/transcriptions',
+    { bodyLimit: MAX_SPEECH_AUDIO_BYTES },
+    async (req, reply) => {
+      if (!deps.speech) {
+        return reply.code(501).send({ error: 'speech services are not configured' });
+      }
+      const query = speechAudioQuerySchema.safeParse(req.query);
+      if (!query.success) return reply.code(400).send({ error: 'invalid mime' });
+      const data = req.body;
+      if (!Buffer.isBuffer(data) || data.byteLength === 0) {
+        return reply.code(400).send({ error: 'binary body required (application/octet-stream)' });
+      }
+      const subtype = query.data.mime.slice('audio/'.length);
+      const form = new FormData();
+      form.append(
+        'file',
+        new Blob([new Uint8Array(data)], { type: query.data.mime }),
+        `audio.${subtype}`,
+      );
+      try {
+        const upstream = await fetch(new URL('/v1/audio/transcriptions', deps.speech.asrUrl), {
+          method: 'POST',
+          body: form,
+          signal: AbortSignal.timeout(120_000),
+        });
+        const parsed = asrResponseSchema.safeParse(await upstream.json());
+        if (!upstream.ok || !parsed.success) {
+          return reply.code(502).send({ error: 'speech recognition unavailable' });
+        }
+        return { text: parsed.data.text.trim() };
+      } catch {
+        return reply.code(502).send({ error: 'speech recognition unavailable' });
+      }
+    },
+  );
+
+  app.post('/api/speech/synthesis/stream', async (req, reply) => {
+    if (!deps.speech) {
+      return reply.code(501).send({ error: 'speech services are not configured' });
+    }
+    const body = speechSynthesisSchema.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'invalid synthesis request' });
+    const cancelled = new AbortController();
+    const abort = (): void => {
+      if (!reply.raw.writableFinished) cancelled.abort();
+    };
+    let hijacked = false;
+    req.raw.once('aborted', abort);
+    reply.raw.once('close', abort);
+    try {
+      // The TTS backend streams token-by-token (faster-qwen3-tts), so the
+      // whole text goes upstream as-is; only the detected language is added
+      // (see speech-text.ts).
+      const upstream = await fetch(new URL('/tts/stream', deps.speech.ttsUrl), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          text: body.data.text,
+          language: detectSpeechLanguage(body.data.text),
+        }),
+        signal: AbortSignal.any([cancelled.signal, AbortSignal.timeout(300_000)]),
+      });
+      if (!upstream.ok || !upstream.body) {
+        return reply.code(502).send({ error: 'speech synthesis unavailable' });
+      }
+      // Flush headers and a start event immediately. Binary download responses
+      // can be buffered wholesale by browser-facing reverse proxies (leaving
+      // the UI in "Loading voice…" until synthesis ends), whereas the existing
+      // chat path demonstrates that text/event-stream is delivered live. PCM
+      // chunks therefore travel as base64 SSE events, as in the trinity
+      // reference; Node streams preserve backpressure and cancellation.
+      const pcm = Readable.fromWeb(upstream.body);
+      const sampleRate = upstream.headers.get('x-sample-rate') ?? '24000';
+      const format = upstream.headers.get('x-format') ?? 'pcm16le';
+      const speechEvents = new Transform({
+        transform(chunk: Buffer, encoding: BufferEncoding, callback) {
+          void encoding;
+          callback(
+            null,
+            `event: speech.audio_chunk\ndata: ${JSON.stringify({ audio: chunk.toString('base64') })}\n\n`,
+          );
+        },
+        flush(callback) {
+          callback(null, 'event: speech.complete\ndata: {}\n\n');
+        },
+      });
+      hijacked = true;
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'x-sample-rate': sampleRate,
+        'x-format': format,
+        'cache-control': 'no-cache, no-store, no-transform',
+        connection: 'keep-alive',
+        'x-accel-buffering': 'no',
+      });
+      // writeHead() alone buffers: Node only ships headers with the first
+      // body chunk. flushHeaders() is what makes them arrive immediately.
+      reply.raw.flushHeaders();
+      reply.raw.write(
+        `event: speech.start\ndata: ${JSON.stringify({ sampleRate: Number(sampleRate), format })}\n\n`,
+      );
+      reply.raw.once('close', () => pcm.destroy());
+      pcm.once('error', (error) => speechEvents.destroy(error));
+      speechEvents.once('error', () => reply.raw.destroy());
+      pcm.pipe(speechEvents).pipe(reply.raw);
+      return reply;
+    } catch {
+      if (hijacked || cancelled.signal.aborted) return reply;
+      return reply.code(502).send({ error: 'speech synthesis unavailable' });
+    } finally {
+      req.raw.removeListener('aborted', abort);
+      reply.raw.removeListener('close', abort);
+    }
+  });
 
   // ---- M3: approvals, policy, cancel (REST control surface, design.md §11.1)
 

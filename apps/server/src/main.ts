@@ -562,6 +562,7 @@ async function main(): Promise<void> {
       firecrackerMaintenanceToken: env.FIRECRACKER_MAINTENANCE_TOKEN,
       usage,
       quotaAdmin: usage,
+      speech: { asrUrl: env.SPEECH_ASR_URL, ttsUrl: env.SPEECH_TTS_URL },
     },
     { logger: true },
   );

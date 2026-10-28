@@ -64,6 +64,13 @@ const serverEnvSchema = z.object({
    * The agent-worker process consumes the queue (docs/design.md §18 M2).
    */
   REDIS_URL: z.string().min(1).optional(),
+  /**
+   * Voice I/O (docs/design.md §10): base URLs of the local STT service
+   * (Fun-ASR, OpenAI-compatible /v1/audio/transcriptions) and TTS service
+   * (Qwen3-TTS, /tts + /tts/stream) proxied by /api/speech/*.
+   */
+  SPEECH_ASR_URL: z.string().url().default('http://127.0.0.1:8000'),
+  SPEECH_TTS_URL: z.string().url().default('http://127.0.0.1:8001'),
   /** M2: HMAC signing key for bearer tokens (fail-closed, AGENTS.md §5). */
   TOKEN_SECRET: z.string().min(16).optional(),
   /** Separate operator credential for host release drain/resume calls. */

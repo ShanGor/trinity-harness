@@ -30,6 +30,20 @@
   min-width: 0;
 }
 
+.chat-composer-sender {
+  flex: 1;
+  min-width: 0;
+}
+
+.message-audio-actions {
+  margin: -4px 0 8px;
+}
+
+.message-audio-actions .ant-btn {
+  color: var(--text-secondary, #626e65);
+  padding-inline: 4px;
+}
+
 .composer-dock {
   flex: none;
   width: 100%;

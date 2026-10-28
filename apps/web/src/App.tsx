@@ -37,6 +37,7 @@ import {
   Upload,
 } from 'antd';
 import { Bubble } from '@ant-design/x';
+import { CaretRightOutlined, StopOutlined } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -61,6 +62,9 @@ import { InboxIndicator } from './inbox-indicator';
 import { PersonalComputer } from './personal-computer';
 import { SessionSettingsModal } from './session-settings';
 import { loadTimelineWithPrompt } from './conversation-history';
+import { transcribeSpeechAudio, openSpeechSynthesisStream } from './speech';
+import { PcmPlayer } from './pcm-player';
+import { markdownToSpeechText } from './markdown-to-speech';
 
 import {
   applyTimelineEvent,
@@ -1154,6 +1158,7 @@ export default function App() {
                 busy={busy}
                 placeholder={mode === 'chat' ? 'Ask anything…' : 'Describe a task…'}
                 resetVersion={draftResetVersion}
+                voiceTranscribe={transcribeSpeechAudio}
                 onSubmit={onSubmit}
                 onCancel={onCancelTurn}
               />
@@ -1743,6 +1748,10 @@ function normalizeMarkdownTableHeadings(markdown: string): string {
   return lines.join('\n');
 }
 
+// The TTS backend serializes GPU generation. Starting another message's audio
+// therefore cancels the current browser stream instead of queueing behind it.
+let stopActiveSpeech: (() => void) | null = null;
+
 function AssistantContent({
   item,
   content,
@@ -1754,7 +1763,74 @@ function AssistantContent({
 }): ReactElement {
   const browserSessionId = useContext(BrowserSessionContext);
   const controls = useContext(MessageControlContext);
+  const { message } = AntdApp.useApp();
   const browserTools = item.tools.filter((tool) => /^browser\(/.test(tool.title));
+
+  // Voice output (docs/design.md §10): stream the reply through the TTS
+  // proxy and play token-decoded PCM chunks as they arrive.
+  const [speechState, setSpeechState] = useState<'idle' | 'loading' | 'playing'>('idle');
+  const pcmPlayerRef = useRef<PcmPlayer | null>(null);
+  const synthesisAbortRef = useRef<AbortController | null>(null);
+
+  const stopSpeech = useCallback(() => {
+    if (stopActiveSpeech === stopSpeech) stopActiveSpeech = null;
+    synthesisAbortRef.current?.abort();
+    synthesisAbortRef.current = null;
+    pcmPlayerRef.current?.stop();
+    pcmPlayerRef.current = null;
+    setSpeechState('idle');
+  }, []);
+
+  useEffect(() => stopSpeech, [stopSpeech]);
+
+  const toggleSpeech = useCallback(async () => {
+    if (speechState !== 'idle') {
+      stopSpeech();
+      return;
+    }
+    stopActiveSpeech?.();
+    stopActiveSpeech = stopSpeech;
+    setSpeechState('loading');
+    const abort = new AbortController();
+    synthesisAbortRef.current = abort;
+    // Create/resume audio inside the click gesture. Deferring this until after
+    // fetch() can leave Chrome's AudioContext suspended with no audible output.
+    const player = new PcmPlayer(24_000, stopSpeech);
+    pcmPlayerRef.current = player;
+    try {
+      await player.resume();
+      const { sampleRate, stream } = await openSpeechSynthesisStream(
+        markdownToSpeechText(content),
+        abort.signal,
+      );
+      if (abort.signal.aborted) return;
+      if (sampleRate !== player.sampleRate) {
+        throw new Error(`Unsupported speech sample rate (${sampleRate} Hz).`);
+      }
+      setSpeechState('playing');
+      const reader = stream.getReader();
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (abort.signal.aborted) {
+            await reader.cancel();
+            return;
+          }
+          player.append(value);
+        }
+        player.finish();
+      } finally {
+        reader.releaseLock();
+      }
+    } catch (error) {
+      if (!abort.signal.aborted) {
+        stopSpeech();
+        message.error(error instanceof Error ? error.message : 'Speech synthesis failed.');
+      }
+    }
+  }, [speechState, content, message, stopSpeech]);
+
   return (
     <article className="assistant-response" aria-label="Trinity response">
       <div className="response-heading">
@@ -1790,6 +1866,23 @@ function AssistantContent({
             {normalizeMarkdownTableHeadings(content)}
           </ReactMarkdown>
           {item.streaming ? '▋' : ''}
+        </div>
+      )}
+      {!item.streaming && content.trim() && (
+        <div className="message-audio-actions">
+          <Button
+            size="small"
+            type="text"
+            icon={speechState === 'idle' ? <CaretRightOutlined /> : <StopOutlined />}
+            onClick={() => void toggleSpeech()}
+            aria-label={speechState === 'idle' ? 'Speak this response' : 'Stop speaking'}
+          >
+            {speechState === 'idle'
+              ? 'Play'
+              : speechState === 'loading'
+                ? 'Loading voice…'
+                : 'Stop'}
+          </Button>
         </div>
       )}
       <AttachmentList attachments={item.attachments} />
