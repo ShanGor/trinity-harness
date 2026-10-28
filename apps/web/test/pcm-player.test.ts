@@ -107,4 +107,13 @@ describe('PcmPlayer', () => {
     await expect(player.resume()).rejects.toThrow('Audio playback is blocked');
     player.stop();
   });
+
+  it('leaves a shared call AudioContext open when one speech segment stops', () => {
+    const context = new FakeAudioContext({ sampleRate: 24_000 });
+    const player = new PcmPlayer(24_000, undefined, context as unknown as AudioContext);
+
+    player.stop();
+
+    expect(context.state).not.toBe('closed');
+  });
 });

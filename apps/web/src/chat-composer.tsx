@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { App as AntdApp, Button, Flex } from 'antd';
-import { AudioOutlined, StopOutlined } from '@ant-design/icons';
+import { AudioOutlined, PhoneOutlined, StopOutlined } from '@ant-design/icons';
 import { Sender } from '@ant-design/x';
 import { PretextTextArea } from './pretext-textarea';
 
@@ -27,6 +27,8 @@ export const ChatComposer = memo(function ChatComposer({
   placeholder = 'Ask anything…',
   resetVersion,
   voiceTranscribe,
+  onStartVoiceCall,
+  voiceCallDisabled = false,
   onSubmit,
   onCancel,
 }: {
@@ -44,6 +46,8 @@ export const ChatComposer = memo(function ChatComposer({
    * to the draft so the user can review/edit before sending.
    */
   voiceTranscribe?: (blob: Blob) => Promise<string>;
+  onStartVoiceCall?: () => void;
+  voiceCallDisabled?: boolean;
   onSubmit: (text: string) => void | Promise<boolean | void>;
   onCancel: () => void;
 }): ReactElement {
@@ -235,6 +239,18 @@ export const ChatComposer = memo(function ChatComposer({
           placeholder={placeholder}
         />
       </div>
+      {onStartVoiceCall && (
+        <Button
+          className="composer-call-button"
+          shape="circle"
+          type="text"
+          icon={<PhoneOutlined />}
+          onClick={onStartVoiceCall}
+          disabled={voiceCallDisabled || isRecording || isTranscribing}
+          aria-label="Start voice call"
+          title="Start voice call"
+        />
+      )}
       {voiceTranscribe && (
         <Button
           className="composer-mic-button"

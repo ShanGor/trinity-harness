@@ -13,7 +13,7 @@ function authHeaders(): Record<string, string> {
 }
 
 /** Transcribes a microphone recording via the Fun-ASR-backed proxy. */
-export async function transcribeSpeechAudio(blob: Blob): Promise<string> {
+export async function transcribeSpeechAudio(blob: Blob, signal?: AbortSignal): Promise<string> {
   // Parameters (e.g. ";codecs=opus") are stripped: the proxy validates a bare
   // audio/* MIME type, and Fun-ASR sniffs the container with ffmpeg anyway.
   const mime = (blob.type || 'audio/webm').split(';')[0]!.trim() || 'audio/webm';
@@ -21,6 +21,7 @@ export async function transcribeSpeechAudio(blob: Blob): Promise<string> {
     method: 'POST',
     headers: { 'content-type': 'application/octet-stream', ...authHeaders() },
     body: blob,
+    signal,
   });
   if (!response.ok) {
     const hint = response.status === 502 ? ' — is the ASR service running?' : '';

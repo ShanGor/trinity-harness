@@ -7,6 +7,7 @@
  */
 export class PcmPlayer {
   private readonly context: AudioContext;
+  private readonly ownsContext: boolean;
   private nextStartTime = 0;
   /** Odd trailing byte carried over until the next chunk completes the sample. */
   private carry: Uint8Array | null = null;
@@ -17,8 +18,10 @@ export class PcmPlayer {
   constructor(
     sampleRate: number,
     private readonly onEnded?: () => void,
+    context?: AudioContext,
   ) {
-    this.context = new AudioContext({ sampleRate });
+    this.context = context ?? new AudioContext({ sampleRate });
+    this.ownsContext = !context;
   }
 
   get sampleRate(): number {
@@ -83,13 +86,13 @@ export class PcmPlayer {
       }
     }
     this.sources.clear();
-    void this.context.close();
+    if (this.ownsContext) void this.context.close();
   }
 
   private drainIfDone(): void {
     if (this.stopped || !this.finished || this.sources.size > 0) return;
     this.stopped = true;
-    void this.context.close();
+    if (this.ownsContext) void this.context.close();
     this.onEnded?.();
   }
 }

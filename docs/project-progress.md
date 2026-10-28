@@ -5,6 +5,12 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Voice call mode, phase one (2026-10-28)
+
+- [x] Added the approved turn-taking voice-call layer over existing Chat/Work sessions. The Composer keeps dictation separate; the call controller uses ordinary prompt/ACP messages, stable-sentence Qwen3-TTS playback, call/utterance/response fencing, mute, explicit interruption, minimization and hangup without implicit Agent cancellation. No raw audio or ephemeral call state enters PostgreSQL. Design and undelivered phase-two boundaries are recorded in [voice-call-design.md](voice-call-design.md).
+- [x] Added deterministic controller, sentence-segmentation, player and panel tests, including late ASR/TTS results, tool-progress archive races, empty recordings and session isolation. Independent review drove regressions for asynchronous recorder stops, unstable streaming Markdown, removed responses, promptId reprojection, submission-time interruption, queued cancellation and New-session failure; follow-up review found no remaining local control-flow issue. Full repository validation passed: 1,221 tests, 23 skipped, lint, typecheck, scoped formatting and the production Web build (existing bundle-size warning). An isolated agent-browser fixture checked desktop and 390px layouts, mute/minimize/page-hidden behavior and accessibility; no real task, approval or user-owned browser session was used.
+- [ ] Exercise real Fun-ASR/Qwen3-TTS end to end with physical microphones and speakers on desktop, Android Chrome and iOS Safari, including autoplay, device interruption and latency. Phase-two streaming ASR, WebRTC, AEC/barge-in and phone-specific quotas remain unimplemented.
+
 ### Read-only desktop watching (2026-10-27)
 
 - [x] Follow-up fixed another handoff flash after a no-effect input acknowledgement: displayed pixels now have a separate reference from the cleared input target. Orphaned active runtime bindings now report persistent administrator recovery instructions on state/frame/take/reset, and reset never claims an unconfirmed browser was stopped. The local restarted runtime was blocked by its old active binding; authenticated guest process inspection confirmed all old Chrome/Zendriver/display processes absent, then the exact session/owner/generation binding was invalidated under the browser lock. Start, return and eight read-only frames succeeded on the real assigned guest without replaying page input or exposing pixels to the model. The profile and VM disk were preserved.

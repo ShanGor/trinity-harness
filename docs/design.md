@@ -515,6 +515,8 @@ Readability 仅为开发期选择器对照依赖，当前保留 semantic extract
 
 **语音 I/O 实现备注**：STT/TTS 不直连浏览器——前端经鉴权的 `/api/speech/*` 代理访问本地 Fun-ASR（`POST /v1/audio/transcriptions`，OpenAI 兼容，multipart 转发）与 Qwen3-TTS（`POST /tts/stream`，PCM16LE 流式输出）。`POST /api/speech/transcriptions` 接收 octet-stream 音频体（`?mime=audio/*`，20MB 上限）返回 `{text}`；`POST /api/speech/synthesis/stream` 接收 `{text}`（≤50k 字符），脚本检测语言（汉字/假名/谚文/西里尔 → Chinese/Japanese/Korean/Russian，否则 Auto）一并转发；浏览器入口采用 `text/event-stream`：立即发送 `speech.start`，每个 PCM 块编码为 base64 `speech.audio_chunk`，结束发送 `speech.complete`（前端增量解析还原 PCM）；普通 octet-stream 下载可能被浏览器外侧反向代理缓存到整段生成结束，而 SSE 与既有聊天实时链路一致。响应头经 `flushHeaders()` 立即下发（Node 的 `writeHead` 会缓冲至首个 body 字节），Node Transform 保留流控，客户端断开即取消上游合成。TTS 后端为 faster-qwen3-tts（CUDA graph 重放 + token 级流式解码），整段文本一次生成、实测首音 ~0.5s、RTF≈0.33（生成 3 倍快于播放），无需代理侧分句。服务地址由 `SPEECH_ASR_URL` / `SPEECH_TTS_URL` 配置（默认 `http://127.0.0.1:8000` / `:8001`）；未配置或上游故障分别返回 501/502。麦克风走 MediaRecorder（webm/opus），点击开始/停止，能量 VAD 持续静音 2 秒自动停止（另有 60 秒硬上限）；转写文本只插入 composer 草稿、不自动提交；assistant 消息的朗读文本由前端剥离 markdown 语法后派生，不改写已提交内容。浏览器按有符号 little-endian int16 解码 PCM（不可按无符号样本处理），AudioContext 在 Play 点击手势内创建并 resume；新播放取消旧播放以避免在单 GPU 后端排队，代理与上游均声明禁用缓冲。TTS worker 在实际生成期间持锁并自行释放，取消仅设置停止标志，不在事件循环或已取消的响应 finally 中等待/释放锁。
 
+**电话模式**：第一阶段产品、轮流讲话状态机与迟到结果 fencing 见 [电话模式设计](voice-call-design.md)。电话是当前 Chat/Work 上的前端语音交互层，不新增 session kind 或 Agent 业务协议；复用批量 ASR、普通 prompt/ACP 与按句流式 TTS。播放期间不采集，点按打断与挂断具有不同取消语义。流式 ASR、WebRTC、AEC/barge-in 和电话专项配额属于未交付的第二阶段，不得由现有语音 I/O 推断已经具备。
+
 ---
 
 ## 11. 前后端协议：Browser 即 ACP Client

@@ -65,6 +65,8 @@ import { loadTimelineWithPrompt } from './conversation-history';
 import { transcribeSpeechAudio, openSpeechSynthesisStream } from './speech';
 import { PcmPlayer } from './pcm-player';
 import { markdownToSpeechText } from './markdown-to-speech';
+import { useVoiceCall } from './use-voice-call';
+import { VoiceCallPanel } from './voice-call-panel';
 
 import {
   applyTimelineEvent,
@@ -205,6 +207,10 @@ export default function App() {
   currentView.current = { items, usage: usageRecords, busy, approval, staged };
   const sessionRef = useRef<string | null>(null);
   const streamRef = useRef<{ close(): void } | null>(null);
+  const stopVoiceCallRef = useRef<(() => void) | null>(null);
+  const voiceCallTerminalRef = useRef<((sessionId: string, promptId?: string) => void) | null>(
+    null,
+  );
 
   useEffect(() => {
     setSettingsOpen(false);
@@ -289,7 +295,12 @@ export default function App() {
               ? prev
               : [...prev, { promptId: event.promptId, text: event.text ?? 'Queued request' }],
           );
-        else setQueuedPrompts((prev) => prev.filter((entry) => entry.promptId !== event.promptId));
+        else {
+          setQueuedPrompts((prev) => prev.filter((entry) => entry.promptId !== event.promptId));
+          if (sessionRef.current) {
+            voiceCallTerminalRef.current?.(sessionRef.current, event.promptId);
+          }
+        }
         return;
       }
       if (event.type === 'model/usage') {
@@ -306,6 +317,7 @@ export default function App() {
         setBusy(false);
         setApproval(null);
         setItems((items) => settleAssistantItems(items, 'error', event.message));
+        if (sessionRef.current) voiceCallTerminalRef.current?.(sessionRef.current);
         return;
       }
       if (event.type === 'message/committed') {
@@ -390,6 +402,7 @@ export default function App() {
           setBusy(false);
           setApproval(null);
           setItems((items) => settleAssistantItems(items, status));
+          if (sessionRef.current) voiceCallTerminalRef.current?.(sessionRef.current);
         }
       }
     },
@@ -431,21 +444,28 @@ export default function App() {
     [approval, message],
   );
 
-  const onCancelTurn = useCallback(async () => {
-    if (!sessionRef.current) return;
-    try {
-      const sessionId = sessionRef.current;
-      const result = await client.cancelTurn(sessionId);
-      if (sessionRef.current !== sessionId) return;
-      setApproval(null);
-      if (result.alreadyStopped) {
-        setBusy(false);
-        setItems((items) => settleAssistantItems(items, 'aborted'));
+  const cancelTurn = useCallback(
+    async (throwOnError: boolean): Promise<boolean | void> => {
+      if (!sessionRef.current) return;
+      try {
+        const sessionId = sessionRef.current;
+        const result = await client.cancelTurn(sessionId);
+        if (sessionRef.current !== sessionId) return;
+        setApproval(null);
+        if (result.alreadyStopped) {
+          setBusy(false);
+          setItems((items) => settleAssistantItems(items, 'aborted'));
+        }
+        return result.alreadyStopped;
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : String(err));
+        if (throwOnError) throw err;
       }
-    } catch (err) {
-      message.error(err instanceof Error ? err.message : String(err));
-    }
-  }, [message]);
+    },
+    [message],
+  );
+  const onCancelTurn = useCallback(() => cancelTurn(false), [cancelTurn]);
+  const onVoiceCancelTurn = useCallback(() => cancelTurn(true), [cancelTurn]);
 
   useEffect(() => {
     return () => streamRef.current?.close();
@@ -490,6 +510,7 @@ export default function App() {
   );
 
   const logout = useCallback(() => {
+    stopVoiceCallRef.current?.();
     sessionStorage.removeItem(TOKEN_KEY);
     activityBySession.current.clear();
     setActivities([]);
@@ -577,6 +598,7 @@ export default function App() {
       setPage('conversation');
       void refreshSessions();
       if (id === sessionRef.current) return;
+      stopVoiceCallRef.current?.();
       saveCurrentView();
       setOlderBefore(timelineHistory.current.get(id)?.before ?? null);
       setLoadingOlder(false);
@@ -611,6 +633,7 @@ export default function App() {
   );
 
   const newChat = useCallback(() => {
+    stopVoiceCallRef.current?.();
     saveCurrentView();
     setPage('conversation');
     setOlderBefore(null);
@@ -752,7 +775,7 @@ export default function App() {
   );
 
   const onSubmit = useCallback(
-    async (text: string) => {
+    async (text: string, onPromptId?: (promptId: string) => void) => {
       const trimmed = text.trim();
       if ((!trimmed && staged.length === 0) || (busy && sessionRef.current !== mainSessionId))
         return false;
@@ -769,7 +792,12 @@ export default function App() {
               mimeType: uploaded.mimeType ?? 'application/octet-stream',
             });
           }
-          await client.sendPrompt(mainSessionId, trimmed || '[see attachments]', attachments);
+          const promptId = await client.sendPrompt(
+            mainSessionId,
+            trimmed || '[see attachments]',
+            attachments,
+          );
+          if (promptId) onPromptId?.(promptId);
           setStaged([]);
           return true;
         } catch (error) {
@@ -818,6 +846,7 @@ export default function App() {
           }
         }
         const promptId = await client.sendPrompt(id, trimmed || '[see attachments]', mimeList);
+        if (promptId) onPromptId?.(promptId);
         if (promptId && sessionRef.current === id)
           setItems((items) =>
             items.map((item) =>
@@ -851,6 +880,27 @@ export default function App() {
     },
     [mainSessionId, mode, workspaceChosen, busy, ensureSession, message, refreshSessions, staged],
   );
+
+  const voiceCall = useVoiceCall({
+    items,
+    busy,
+    approvalPending: !!approval,
+    getSessionId: () => sessionRef.current,
+    onSubmit,
+    onCancelTurn: onVoiceCancelTurn,
+    onError: (detail) => message.error(detail),
+  });
+  stopVoiceCallRef.current = voiceCall.controller.stop;
+  voiceCallTerminalRef.current = (id, promptId) =>
+    voiceCall.controller.onTurnTerminal(id, promptId);
+  const startVoiceCall = useCallback(() => {
+    voiceCall.setMinimized(false);
+    void voiceCall.controller.start();
+  }, [voiceCall.controller, voiceCall.setMinimized]);
+  const showVoiceCallText = useCallback(() => {
+    setPage('conversation');
+    voiceCall.setMinimized(true);
+  }, [voiceCall.setMinimized]);
 
   const unrecordedTurns = useMemo(() => {
     const recorded = new Set(usageRecords.map((record) => record.promptId));
@@ -1159,6 +1209,10 @@ export default function App() {
                 placeholder={mode === 'chat' ? 'Ask anything…' : 'Describe a task…'}
                 resetVersion={draftResetVersion}
                 voiceTranscribe={transcribeSpeechAudio}
+                onStartVoiceCall={startVoiceCall}
+                voiceCallDisabled={
+                  busy || !!approval || creationPending || voiceCall.snapshot.active
+                }
                 onSubmit={onSubmit}
                 onCancel={onCancelTurn}
               />
@@ -1532,6 +1586,17 @@ export default function App() {
           )}
         </Flex>
       </Layout.Content>
+      <VoiceCallPanel
+        call={voiceCall.snapshot}
+        minimized={voiceCall.minimized}
+        onMinimize={() => voiceCall.setMinimized(true)}
+        onOpen={() => voiceCall.setMinimized(false)}
+        onShowText={showVoiceCallText}
+        onToggleMute={() => voiceCall.controller.toggleMute()}
+        onInterrupt={() => voiceCall.controller.interrupt()}
+        onRetry={() => voiceCall.controller.start()}
+        onEnd={voiceCall.controller.stop}
+      />
     </Layout>
   );
 }
