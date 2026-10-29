@@ -259,32 +259,13 @@ function setupDualMode(): {
   return { ...base, webrtc, streaming };
 }
 
-/** WebRTC session with a controllable TTS downlink. */
+/** A WebRTC session may expose RTP downlink, but phone playback must not use it. */
 interface FakeDownlink {
   speak: ReturnType<typeof vi.fn>;
   stopSpeaking: ReturnType<typeof vi.fn>;
 }
 
-function fakeDownlink(autoResolve = true): FakeDownlink {
-  return {
-    speak: vi.fn(
-      (text: string, signal: AbortSignal) =>
-        new Promise<void>((resolve) => {
-          if (autoResolve) {
-            const timer = setTimeout(resolve, 10);
-            signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
-          } else {
-            // Stays pending until aborted (interruption drives resolution).
-            signal.addEventListener('abort', () => resolve(), { once: true });
-          }
-          void text;
-        }),
-    ),
-    stopSpeaking: vi.fn(),
-  };
-}
-
-function setupWebRtcDownlink(autoResolve = true): {
+function setupWebRtcDownlink(): {
   controller: VoiceCallController;
   deps: VoiceCallDependencies;
   players: FakePlayer[];
@@ -292,7 +273,10 @@ function setupWebRtcDownlink(autoResolve = true): {
   downlink: FakeDownlink;
 } {
   const webrtc = fakeStreaming();
-  const downlink = fakeDownlink(autoResolve);
+  const downlink: FakeDownlink = {
+    speak: vi.fn(async () => undefined),
+    stopSpeaking: vi.fn(),
+  };
   const base = setup({
     startWebRtcAsr: vi.fn(async (_sessionId: string, h: typeof webrtc.handlers) => {
       Object.assign(webrtc.handlers, h);
@@ -750,7 +734,7 @@ describe('VoiceCallController', () => {
       controller.stop();
     });
 
-    it('plays responses over the WebRTC TTS downlink instead of SSE synthesis', async () => {
+    it('keeps WebRTC for ASR but always plays replies through SSE TTS and PCM', async () => {
       const { controller, deps, players, webrtc, downlink } = setupWebRtcDownlink();
       await controller.start();
       webrtc.handlers.onFinal('Hello Trinity');
@@ -758,49 +742,12 @@ describe('VoiceCallController', () => {
       controller.update(responseItems('Hi there.', true), false, false);
 
       await vi.waitFor(() =>
-        expect(downlink.speak).toHaveBeenCalledWith('Hi there.', expect.anything()),
+        expect(deps.synthesize).toHaveBeenCalledWith('Hi there.', expect.anything()),
       );
-      expect(deps.synthesize).not.toHaveBeenCalled();
-      expect(players).toHaveLength(0); // no local PCM player in downlink mode
+      expect(downlink.speak).not.toHaveBeenCalled();
+      expect(players).toHaveLength(1);
       await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
       expect(webrtc.session.resume).toHaveBeenCalledTimes(2); // capture resumed after speech
-      controller.stop();
-    });
-
-    it('interrupting a downlink aborts the speak and resumes listening without SSE', async () => {
-      const { controller, deps, webrtc, downlink } = setupWebRtcDownlink(false);
-      await controller.start();
-      webrtc.handlers.onFinal('Hello Trinity');
-      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
-      controller.update(responseItems('Hi there.', false), true, false);
-      await vi.waitFor(() => expect(downlink.speak).toHaveBeenCalledOnce());
-      expect(controller.getSnapshot().status).toBe('speaking');
-
-      await controller.interrupt();
-      controller.update([], false, false); // busy clears with the turn end
-      await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
-      expect(deps.synthesize).not.toHaveBeenCalled();
-      controller.stop();
-    });
-
-    it('drops the downlink after a speak failure and falls back to SSE TTS', async () => {
-      const { controller, deps, webrtc, downlink } = setupWebRtcDownlink();
-      downlink.speak.mockRejectedValue(new Error('TTS downlink unavailable'));
-      await controller.start();
-      webrtc.handlers.onFinal('Hello Trinity');
-      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
-      controller.update(responseItems('Hi there.', true), false, false);
-      await vi.waitFor(() => expect(deps.onError).toHaveBeenCalled());
-      expect(downlink.speak).toHaveBeenCalledOnce();
-
-      // The response was invalidated by the failure; a fresh turn uses the
-      // delivered SSE synthesis path (the downlink was dropped).
-      webrtc.handlers.onFinal('Second question');
-      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledTimes(2));
-      controller.update(responseItems('Second answer.', true, 'Second question'), false, false);
-      await vi.waitFor(() =>
-        expect(deps.synthesize).toHaveBeenCalledWith('Second answer.', expect.anything()),
-      );
       controller.stop();
     });
   });

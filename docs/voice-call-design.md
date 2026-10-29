@@ -26,14 +26,14 @@ Composer 中现有麦克风入口继续保持“**语音转草稿**”：录音�
 
 ## 2. 分阶段范围
 
-| 能力       | 现有语音 I/O 基础              | 第一阶段：电话 MVP（已实现，设备验收待完成）                   | 后续（WebRTC/AEC 未交付）                                                        |
-| ---------- | ------------------------------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| 语音输入   | 批量录音识别后进入草稿         | 流式 ASR：实时 partial 字幕 + VAD final 自动提交，批量路径兜底 | 更低延迟端点检测随 WebRTC/AEC 演进                                               |
-| Agent 协议 | 普通 ACP prompt/SSE            | 完整复用，不新增电话 session kind 或私有 Agent 业务流          | 继续复用 ACP；媒体升级不改写工具与审批权限                                       |
-| 语音输出   | 单条回复朗读、Qwen3-TTS PCM 流 | Assistant 可朗读文本按句合成、按序播放和取消                   | 独立实时媒体传输与更强的播放/采集协同                                            |
-| 对话方式   | 手动录音、手动朗读             | 明确轮流讲话；合成和播放期关麦                                 | 目标为 AEC 与 barge-in 支持的近全双工体验                                        |
-| 媒体传输   | 鉴权 HTTP + SSE 语音代理       | 流式 ASR 走鉴权 WebSocket 代理；TTS 走 SSE；无 WebRTC          | WebRTC 上下行已交付（werift 适配器 + RTCPeerConnection 客户端）；TURN/AEC 未交付 |
-| 治理       | 现有模型/会话治理              | 电话专项配额已强制（并发/字节/字符/速率）+ 脱敏指标已上报      | WebRTC 媒体容量治理与媒体质量指标                                                |
+| 能力       | 现有语音 I/O 基础              | 第一阶段：电话 MVP（已实现，设备验收待完成）                   | 后续（WebRTC/AEC 未交付）                                               |
+| ---------- | ------------------------------ | -------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| 语音输入   | 批量录音识别后进入草稿         | 流式 ASR：实时 partial 字幕 + VAD final 自动提交，批量路径兜底 | 更低延迟端点检测随 WebRTC/AEC 演进                                      |
+| Agent 协议 | 普通 ACP prompt/SSE            | 完整复用，不新增电话 session kind 或私有 Agent 业务流          | 继续复用 ACP；媒体升级不改写工具与审批权限                              |
+| 语音输出   | 单条回复朗读、Qwen3-TTS PCM 流 | Assistant 可朗读文本按句合成、按序播放和取消                   | 独立实时媒体传输与更强的播放/采集协同                                   |
+| 对话方式   | 手动录音、手动朗读             | 明确轮流讲话；合成和播放期关麦                                 | 目标为 AEC 与 barge-in 支持的近全双工体验                               |
+| 媒体传输   | 鉴权 HTTP + SSE 语音代理       | 流式 ASR 走鉴权 WebSocket 代理；TTS 走 SSE；无 WebRTC          | WebRTC 上行用于识别，电话回复固定走 SSE TTS + PCM 播放；TURN/AEC 未交付 |
+| 治理       | 现有模型/会话治理              | 电话专项配额已强制（并发/字节/字符/速率）+ 脱敏指标已上报      | WebRTC 媒体容量治理与媒体质量指标                                       |
 
 第一阶段复用了现有基础设施；UI、状态 fencing 和自动化检查已经实现，但真实设备、真实语音链路和端到端延迟仍须按下文独立验收。
 
@@ -236,11 +236,11 @@ synthesizing / speaking
 
 已实现并通过：服务端代理测试（真实帧中继、配额拒绝 1013、鉴权拒绝）、控制器流式测试（partial/final、打断/静音/挂断 fencing、意外终止可重连）、上游真实冒烟（PCM 流 → partial/final/flush）。
 
-### 8.2 WebRTC 独立媒体面与短期 token（上下行已交付；TURN/AEC 未交付）
+### 8.2 WebRTC 独立媒体面与短期 token（上行用于电话；TURN/AEC 未交付）
 
-已交付（docs/webrtc-media-design.md §7）：信令契约与端口、短期 token、Signaling WebSocket、**werift 媒体网关适配器**（`packages/media-gateway`，G.711 上下行、纯 TS：上行喂 Fun-ASR，下行 `media.speak` → 配额化 Qwen3-TTS → μ-law RTP → 浏览器播放，`media.tts_ended` 结算）、**浏览器 `RTCPeerConnection` 客户端**（通话控制器按 WebRTC → 流式 ASR → 批量自动降级，下行故障回退 SSE TTS）、`concurrentMediaSessions` 配额。已通过进程内真实 RTP 双向回环测试、真实 Fun-ASR 上游冒烟与真实 Qwen3-TTS 下行冒烟。
+已交付（docs/webrtc-media-design.md §7）：信令契约与端口、短期 token、Signaling WebSocket、**werift 媒体网关适配器**（`packages/media-gateway`，G.711 上下行、纯 TS）、**浏览器 `RTCPeerConnection` 客户端**（通话控制器按 WebRTC → 流式 ASR → 批量自动降级）与 `concurrentMediaSessions` 配额。电话使用 WebRTC 麦克风上行进行识别；Assistant 回复固定使用已验证的 SSE Qwen3-TTS + PCM 逐句播放，不选择 RTP 下行。网关的 `media.speak`/μ-law RTP 下行能力保留，但不作为当前浏览器电话的播放路径，避免 `media.tts_ended` 已结算而浏览器无可听输出的情况。
 
-**仍未交付**：TURN/coturn 公网部署（当前 ICE-LITE host 候选仅覆盖 LAN/同机）、AEC/barge-in（媒体面已通，但回声消除与真实插话检出需设备验收；打断仍为显式点按）、媒体质量与前端延迟指标。通话中媒体失败进入可重连错误态；建立失败自动回退已交付路径。目标与边界以 [webrtc-media-design.md](webrtc-media-design.md) 为准。
+**仍未交付**：TURN/coturn 公网部署（当前 ICE-LITE host 候选仅覆盖 LAN/同机）、AEC/barge-in（回声消除与真实插话检出需设备验收；打断仍为显式点按）、媒体质量与前端延迟指标、WebRTC RTP 下行的真实浏览器/设备播放验收。通话中媒体失败进入可重连错误态；建立失败自动回退已交付路径。目标与边界以 [webrtc-media-design.md](webrtc-media-design.md) 为准。
 
 ### 8.3 AEC 与 barge-in（未交付）
 
@@ -316,7 +316,7 @@ synthesizing / speaking
 
 未交付（不得由上述交付推导）：
 
-- **TURN 与 AEC/barge-in**：WebRTC 上下行已交付（werift 适配器 + 浏览器客户端，webrtc-media-design.md §7），但 TURN 公网部署与 AEC/barge-in（真实插话检出，打断当前为显式点按）未交付；这些能力不得由媒体面交付推导。
+- **TURN、RTP 下行设备验收与 AEC/barge-in**：WebRTC 上行已用于电话识别，回复固定走 SSE TTS；网关 RTP 下行能力保留但尚未通过真实浏览器/设备播放验收。TURN 公网部署与 AEC/barge-in（真实插话检出，打断当前为显式点按）未交付；这些能力不得由媒体面交付推导。
 - **AEC 与 barge-in**：依赖 WebRTC 媒体面先就绪；播放期仍不采集。
 - **前端延迟类与媒体质量指标**：prompt→首音、barge-in 延迟、WebRTC 建连/丢包/抖动随 WebRTC 媒体客户端交付。
 

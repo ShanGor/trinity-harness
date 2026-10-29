@@ -1,6 +1,6 @@
 # WebRTC 媒体面与短期媒体 token 设计
 
-> 状态：**已交付（2026-10-28）：werift 媒体网关适配器（`packages/media-gateway`，G.711 上下行）、浏览器 `RTCPeerConnection` 客户端（含 TTS 下行播放）、信令契约/短期 token/Signaling 端点**；已通过进程内真实 RTP/DTLS/SRTP 回环测试、真实 Fun-ASR 上游冒烟（样例音频识别正确）与真实 Qwen3-TTS 下行冒烟（PCM→μ-law RTP→对端接收）。**未交付**：TURN/coturn 公网部署、AEC/barge-in、媒体质量与前端延迟指标、真实浏览器/设备验收。
+> 状态：**已交付（2026-10-28）：werift 媒体网关适配器（`packages/media-gateway`，G.711 上下行）、浏览器 `RTCPeerConnection` 上行客户端、信令契约/短期 token/Signaling 端点**；已通过进程内真实 RTP/DTLS/SRTP 回环测试、真实 Fun-ASR 上游冒烟（样例音频识别正确）与真实 Qwen3-TTS 下行冒烟（PCM→μ-law RTP→对端接收）。当前电话固定使用 SSE TTS + PCM 播放回复，不选择 RTP 下行。**未交付**：TURN/coturn 公网部署、AEC/barge-in、媒体质量与前端延迟指标、RTP 下行的真实浏览器/设备播放验收。
 
 ## 1. 目标与非目标
 
@@ -34,7 +34,7 @@ Browser                    Trinity Server                 Upstream
 - **音频编解码：PCMU（G.711 μ-law，8 kHz）唯一声明**。纯 TS 几十行即可解码（`packages/media-gateway/src/g711.ts`），零编解码原生依赖。Opus（opusscript）曾评估并否决：其 encode/decode 缓冲区处理在当前 Node 版本上损坏采样值。μ-law 为电话音质（64 kbit/s），满足 ASR 需要；后续若需高保真下行可再引入可靠 Opus 方案。
 - **信令**：复用现有鉴权 WSS（与流式 ASR 代理同一入口风格），消息为 JSON offer/answer/candidate/bye，不引入 SIP。
 - **ICE**：适配器以 ICE-LITE controlled 角色运行、host 候选内嵌 answer SDP（非 trickle），满足 LAN/同机部署；TURN 为公网部署的后续项。
-- **范围**：适配器覆盖**麦克风上行与 TTS 下行**。下行由信令 `media.speak` 触发：网关经服务端注入的配额化 `MediaTtsFetch` 拉取 Qwen3-TTS PCM（24 kHz），重采样到 8 kHz、μ-law 编码、20 ms 实时帧经 `transceiver.sender.replaceTrack` 注册的本地轨回送浏览器（浏览器 sendrecv m-line；远端轨拒绝 writeRtp，必须用本地轨）；完成时发 `media.tts_ended`（自然播完或 `media.stop_speaking` 打断）。SSE Qwen3-TTS 降级路径完整保留（下行失败自动回退）。
+- **范围**：适配器覆盖**麦克风上行与 TTS 下行**。下行由信令 `media.speak` 触发：网关经服务端注入的配额化 `MediaTtsFetch` 拉取 Qwen3-TTS PCM（24 kHz），重采样到 8 kHz、μ-law 编码、20 ms 实时帧经 `transceiver.sender.replaceTrack` 注册的本地轨回送浏览器（浏览器 sendrecv m-line；远端轨拒绝 writeRtp，必须用本地轨）；完成时发 `media.tts_ended`（自然播完或 `media.stop_speaking` 打断）。SSE Qwen3-TTS 路径完整保留，并作为当前电话的固定播放路径；RTP 下行待真实浏览器/设备验收后再启用。
 
 ## 3. 契约（信令消息）
 
@@ -97,7 +97,7 @@ Browser                    Trinity Server                 Upstream
 - `RedisMediaTokens`（`apps/server/src/media-token.ts`）：opaque token（非 JWT）、Redis `SET EX` + `GETDEL` 一次性消费、可撤销、后端错误 fail-closed。
 - `GET /api/media/signaling`（WebSocket）：升级时用普通登录 token 鉴权（`?token=`，与 SSE/ASR 代理同规则）；`media.hello` 一次性消费媒体 token 并校验调用者与 `sessionId` 绑定；`media.offer`/`media.ice` 中继到网关端口；网关 `asr_*` 事件以 `media.asr_*` 线上格式回传（剥离服务端会话 ID）；`bye`/断开释放网关会话与 `concurrentMediaSessions` 配额租约。
 - **werift 媒体网关适配器**（`packages/media-gateway`）：`WeriftMediaGateway implements MediaGatewayPort`——ICE-LITE/非 trickle answer、G.711 μ-law 纯 TS 解码、8 kHz→16 kHz 重采样、PCM 帧喂 Fun-ASR `/ws`（`FunAsrPipe`）、`asr_*` 事件上行；`allocate` 在上游不可用时 fail-closed。
-- **浏览器客户端**（`apps/web/src/media-client.ts`）：`RTCPeerConnection` + 一次性 token + 信令握手（hello→offer→answer→ICE trickle）；`media.asr_partial/final` 驱动与流式 ASR 完全相同的字幕/提交/fencing 语义；**下行**：远端轨接入独立 `AudioContext` 播放，`downlink.speak()` 以 `media.tts_ended` 结算（打断经 abort → `media.stop_speaking`）。通话控制器按 **WebRTC → 流式 ASR → 批量录音** 顺序自动降级；下行故障丢弃下行并回退已交付 SSE TTS，不打断当前通话。
+- **浏览器客户端**（`apps/web/src/media-client.ts`）：`RTCPeerConnection` + 一次性 token + 信令握手（hello→offer→answer→ICE trickle）；`media.asr_partial/final` 驱动与流式 ASR 完全相同的字幕/提交/fencing 语义。媒体客户端仍保留下行协议表面，但电话控制器只使用麦克风上行，回复固定走 SSE TTS + PCM 播放，避免 RTP `tts_ended` 与浏览器实际可听输出不一致。通话控制器按 **WebRTC → 流式 ASR → 批量录音** 顺序自动降级，三种识别模式共用同一 SSE TTS 播放路径。
 - 租户配额：`concurrentMediaSessions` 入 `tenantQuotaSchema`，`SpeechQuotaMeter` 新增 `media_session` 租约；配额配置不可读 → `media.error: quota`，超限 → `media.error: capacity`。
 - 指标：`trinity.media.{connections,sessions,tokens_issued,errors,session_seconds}`（bounded 属性）。
 - 测试：token 生命周期、信令全流程、配额容量、网关分配失败 fail-closed、未配置 501、G.711 编解码、**进程内真实 RTP/DTLS/SRTP 回环**（werift 对端发送 PCMU → 网关 → 假上游断言 PCM16 16 kHz 内容）、**真实 Fun-ASR 上游冒烟**（样例音频识别出正确文本）。服务器在配置 `SPEECH_ASR_URL` + Redis 时自动组合适配器（`main.ts`）。

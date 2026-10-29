@@ -13,7 +13,7 @@ import {
   type StreamingAsrHandlers,
   type StreamingAsrSession,
 } from './streaming-asr';
-import { startWebRtcAsr, type WebRtcDownlink } from './media-client';
+import { startWebRtcAsr } from './media-client';
 import { segmentSpeechText, stableMarkdownPrefix } from './voice-call-text';
 
 const SAMPLE_RATE = 24_000;
@@ -53,10 +53,8 @@ export interface VoiceCallPlayer {
   stop(): void;
 }
 
-/** WebRTC media session: streaming-ASR capture surface + TTS downlink. */
-export interface WebRtcCallSession extends StreamingAsrSession {
-  downlink?: WebRtcDownlink;
-}
+/** WebRTC media session used for microphone uplink; replies use SSE TTS. */
+export type WebRtcCallSession = StreamingAsrSession;
 
 export interface VoiceCallDependencies {
   getSessionId(): string | null;
@@ -92,8 +90,6 @@ interface CallState {
   responseEpoch: number;
   /** Streaming-ASR session when mode 'streaming'; null in batch mode. */
   streaming: StreamingAsrSession | null;
-  /** WebRTC TTS downlink (media plane); null when absent or dropped. */
-  downlink: WebRtcDownlink | null;
   /** Bumps on interrupt/mute/hangup to fence late streaming finals. */
   streamEpoch: number;
 }
@@ -133,8 +129,7 @@ interface PlaybackState {
   call: CallState;
   epoch: number;
   abort: AbortController;
-  /** Null while a WebRTC downlink owns playback (no local PCM player). */
-  player: VoiceCallPlayer | null;
+  player: VoiceCallPlayer;
   resolve: () => void;
 }
 
@@ -230,7 +225,6 @@ export class VoiceCallController {
       audioContext: null,
       responseEpoch: 0,
       streaming: null,
-      downlink: null,
       streamEpoch: 0,
     };
     this.call = call;
@@ -265,7 +259,6 @@ export class VoiceCallController {
         : null;
       if (webrtc) {
         call.streaming = webrtc;
-        call.downlink = webrtc.downlink ?? null;
       } else {
         call.streaming = (await this.deps.startStreamingAsr?.(handlers)) ?? null;
       }
@@ -831,36 +824,9 @@ export class VoiceCallController {
     const played = new Promise<void>((resolve) => {
       resolvePlayback = resolve;
     });
-    // WebRTC media plane: the gateway synthesizes and paces the audio; the
-    // promise resolves on tts_ended (or abort), replacing the player path.
-    const downlink = call.downlink;
-    if (downlink) {
-      const playback: PlaybackState = {
-        call,
-        epoch,
-        abort,
-        player: null,
-        resolve: resolvePlayback,
-      };
-      this.playback = playback;
-      try {
-        await downlink.speak(text, abort.signal);
-        return !abort.signal.aborted && this.isCurrent(call) && epoch === call.responseEpoch;
-      } catch (error) {
-        if (!abort.signal.aborted && this.isCurrent(call) && epoch === call.responseEpoch) {
-          // Drop the downlink for the rest of the call and keep the delivered
-          // SSE TTS path for subsequent speech.
-          call.downlink = null;
-          this.deps.onError(error instanceof Error ? error.message : String(error));
-          if (this.response?.call === call) this.response.invalidated = true;
-          this.speechQueue = [];
-        }
-        return false;
-      } finally {
-        if (this.playback === playback) this.playback = null;
-        resolvePlayback();
-      }
-    }
+    // Keep WebRTC for microphone uplink only. Its RTP downlink can complete
+    // media.speak/tts_ended without audible browser output, so phone replies
+    // always use the same proven SSE TTS + PCM playback path as manual Play.
     const player = this.deps.createPlayer(SAMPLE_RATE, resolvePlayback, context);
     const playback: PlaybackState = {
       call,
@@ -912,7 +878,7 @@ export class VoiceCallController {
     this.playback = null;
     if (!playback) return;
     playback.abort.abort();
-    playback.player?.stop();
+    playback.player.stop();
     playback.resolve();
   }
 
