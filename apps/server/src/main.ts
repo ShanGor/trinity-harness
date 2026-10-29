@@ -76,7 +76,14 @@ import {
   RedisTurnQueue,
 } from '@trinity-harness/redis';
 import { parsePermissionPolicy } from '@trinity-harness/contracts';
-import type { SessionStore, SandboxPort } from '@trinity-harness/contracts';
+import type {
+  MediaGatewayPort,
+  MediaTokenPort,
+  SessionStore,
+  SandboxPort,
+} from '@trinity-harness/contracts';
+import { RedisMediaTokens } from './media-token.js';
+import { WeriftMediaGateway } from '@trinity-harness/media-gateway';
 import { startTelemetry } from '@trinity-harness/otel';
 
 import { loadServerEnv } from './env.js';
@@ -384,6 +391,10 @@ async function main(): Promise<void> {
   let turnCancel: RedisTurnCancelPublisher | undefined;
   let defaultPolicy: ReturnType<typeof parsePermissionPolicy> | undefined;
   let usage: PgUsageStore | undefined;
+  // WebRTC media plane (docs/webrtc-media-design.md): composed only with the
+  // auth stack (Redis-backed media tokens) AND a configured ASR upstream.
+  let mediaTokens: MediaTokenPort | undefined;
+  let mediaGateway: MediaGatewayPort | undefined;
   let teams: PgTeamStore | undefined;
   let runPool: ReturnType<typeof createPool> | undefined;
   let sessionRuns: PgSessionRuns | undefined;
@@ -432,8 +443,12 @@ async function main(): Promise<void> {
       approvals = new RedisApprovalHub(redis);
       approvalStore = new PgApprovalStore(db);
       turnCancel = new RedisTurnCancelPublisher(redis);
+      mediaTokens = new RedisMediaTokens(redis);
       // Turns run on the agent-worker; this process only enqueues.
       createLoop = undefined;
+    }
+    if (env.SPEECH_ASR_URL && mediaTokens) {
+      mediaGateway = new WeriftMediaGateway({ asrUrl: env.SPEECH_ASR_URL });
     }
     if (env.DEFAULT_PERMISSION_POLICY) {
       defaultPolicy = parsePermissionPolicy(env.DEFAULT_PERMISSION_POLICY);
@@ -563,6 +578,8 @@ async function main(): Promise<void> {
       usage,
       quotaAdmin: usage,
       speech: { asrUrl: env.SPEECH_ASR_URL, ttsUrl: env.SPEECH_TTS_URL },
+      mediaTokens,
+      mediaGateway,
     },
     { logger: true },
   );

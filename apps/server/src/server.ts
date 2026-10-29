@@ -72,6 +72,8 @@ import {
 import type { ServerEvent } from '@trinity-harness/shared';
 import Fastify from 'fastify';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import websocketPlugin from '@fastify/websocket';
+import WebSocket from 'ws';
 import { timingSafeEqual } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { Readable, Transform } from 'node:stream';
@@ -82,6 +84,33 @@ import { parsePermissionPolicy, tenantQuotaSchema, windowStart } from '@trinity-
 
 import { listPersonalFolders, personalWorkspaceDir, workspaceDirFor } from './workspace.js';
 import { detectSpeechLanguage } from './speech-text.js';
+import { SpeechQuotaMeter, type SpeechQuotaConfig, type SpeechLease } from './speech-quota.js';
+import {
+  asrActiveStreams,
+  asrAudioBytes,
+  asrFinals,
+  asrPartials,
+  speechQuotaDenied,
+  speechRequests,
+  ttsActiveStreams,
+  ttsCharacters,
+  ttsStreamSeconds,
+} from './speech-telemetry.js';
+import {
+  mediaConnections,
+  mediaErrors,
+  mediaSessions,
+  mediaSessionSeconds,
+  mediaTokensIssued,
+} from './media-telemetry.js';
+import type {
+  MediaErrorCode,
+  MediaGatewayPort,
+  MediaTokenBinding,
+  MediaTokenPort,
+  MediaTtsFetch,
+} from '@trinity-harness/contracts';
+import { mediaClientMessageSchema } from '@trinity-harness/contracts';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -607,6 +636,17 @@ export interface ServerDeps {
   usage?: UsagePort;
   /** M5: tenant quota administration (admin-only REST endpoint). */
   quotaAdmin?: QuotaAdminPort;
+  /**
+   * WebRTC media plane (docs/webrtc-media-design.md): short-lived media-token
+   * issuance. Present ⇒ POST /api/media/token is served; absent ⇒ 501.
+   */
+  mediaTokens?: MediaTokenPort;
+  /**
+   * Media-gateway adapter (RTP termination). Present ⇒ the signaling WebSocket
+   * /api/media/signaling relays to it; absent ⇒ signaling answers 501 and
+   * calls keep using the streaming-ASR + SSE-TTS path.
+   */
+  mediaGateway?: MediaGatewayPort;
 }
 
 export interface BuildServerOptions {
@@ -626,6 +666,32 @@ function tokenFrom(req: FastifyRequest): string | null {
   // EventSource cannot set headers; the SSE endpoint accepts ?token= instead.
   const query = req.query as Record<string, unknown>;
   return typeof query['token'] === 'string' ? query['token'] : null;
+}
+
+/**
+ * Adapt a web ReadableStream of PCM16LE bytes to Int16Array chunks for the
+ * media downlink. `done` runs exactly once when iteration ends (completion,
+ * error or cancellation) so quota leases are always released.
+ */
+async function* pcmChunks(
+  body: ReadableStream<Uint8Array>,
+  done: () => void,
+): AsyncIterable<Int16Array> {
+  try {
+    const reader = body.getReader();
+    try {
+      for (;;) {
+        const { done: finished, value } = await reader.read();
+        if (finished || !value) break;
+        if (value.byteLength % 2 !== 0) continue;
+        yield new Int16Array(value.buffer as ArrayBuffer, value.byteOffset, value.byteLength / 2);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  } finally {
+    done();
+  }
 }
 
 /**
@@ -677,7 +743,15 @@ export async function buildServer(
       const token = tokenFrom(req);
       const identity = token ? await auth.tokens.verify(token) : null;
       if (!identity) {
-        return reply.code(401).send({ error: 'unauthorized' });
+        // A denied WebSocket upgrade must not leave a half-open connection:
+        // @fastify/websocket funnels upgrades through the Fastify chain, and
+        // Node otherwise keeps the socket in the server connection set, which
+        // blocks graceful drain. Flush the 401, then close the socket.
+        const denied = reply.code(401).send({ error: 'unauthorized' });
+        if ((req.headers.upgrade ?? '').toLowerCase() === 'websocket') {
+          req.raw.socket?.end();
+        }
+        return denied;
       }
       req.identity = identity;
     });
@@ -2435,6 +2509,28 @@ export async function buildServer(
     );
   }
 
+  // Per-tenant speech quota meter (docs/voice-call-design.md §8.4). Enforced
+  // at every /api/speech/* entry point; configuration comes from the existing
+  // tenant quota row via UsagePort (JSONB — no migration needed). Missing
+  // fields mean UNLIMITED; an unreadable quota row fails closed (429/1013).
+  const speechQuota = new SpeechQuotaMeter();
+  const speechQuotaOf = async (tenantId: string): Promise<SpeechQuotaConfig | null> => {
+    if (!deps.usage) return {};
+    try {
+      return await deps.usage.quotaOf(tenantId);
+    } catch {
+      return null;
+    }
+  };
+  /** Speech quota admission shared by batch routes. Null cfg ⇒ fail closed. */
+  const speechQuotaError = (
+    reply: FastifyReply,
+    reason: 'rate' | 'asr_bytes' | 'tts_characters' | 'unavailable',
+  ): FastifyReply => {
+    speechQuotaDenied.add(1, { reason });
+    return reply.code(429).send({ error: 'speech quota exceeded', reason });
+  };
+
   app.post(
     '/api/speech/transcriptions',
     { bodyLimit: MAX_SPEECH_AUDIO_BYTES },
@@ -2448,6 +2544,16 @@ export async function buildServer(
       if (!Buffer.isBuffer(data) || data.byteLength === 0) {
         return reply.code(400).send({ error: 'binary body required (application/octet-stream)' });
       }
+      const tenantId = req.identity?.tenantId;
+      if (tenantId) {
+        const cfg = await speechQuotaOf(tenantId);
+        if (cfg === null) return speechQuotaError(reply, 'unavailable');
+        if (!speechQuota.admitRequest(tenantId, cfg)) return speechQuotaError(reply, 'rate');
+        if (!speechQuota.admitAsrBytes(tenantId, data.byteLength, cfg)) {
+          return speechQuotaError(reply, 'asr_bytes');
+        }
+      }
+      asrAudioBytes.record(data.byteLength);
       const subtype = query.data.mime.slice('audio/'.length);
       const form = new FormData();
       form.append(
@@ -2463,10 +2569,13 @@ export async function buildServer(
         });
         const parsed = asrResponseSchema.safeParse(await upstream.json());
         if (!upstream.ok || !parsed.success) {
+          speechRequests.add(1, { kind: 'asr', result: 'error' });
           return reply.code(502).send({ error: 'speech recognition unavailable' });
         }
+        speechRequests.add(1, { kind: 'asr', result: 'ok' });
         return { text: parsed.data.text.trim() };
       } catch {
+        speechRequests.add(1, { kind: 'asr', result: 'error' });
         return reply.code(502).send({ error: 'speech recognition unavailable' });
       }
     },
@@ -2478,6 +2587,24 @@ export async function buildServer(
     }
     const body = speechSynthesisSchema.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'invalid synthesis request' });
+    const tenantId = req.identity?.tenantId;
+    let lease: SpeechLease | null = null;
+    if (tenantId) {
+      const cfg = await speechQuotaOf(tenantId);
+      if (cfg === null) return speechQuotaError(reply, 'unavailable');
+      if (!speechQuota.admitRequest(tenantId, cfg)) return speechQuotaError(reply, 'rate');
+      if (!speechQuota.admitTtsCharacters(tenantId, body.data.text.length, cfg)) {
+        return speechQuotaError(reply, 'tts_characters');
+      }
+      lease = speechQuota.admitTtsStream(tenantId, cfg);
+      if (!lease) {
+        speechQuotaDenied.add(1, { reason: 'concurrency' });
+        return reply.code(429).send({ error: 'speech quota exceeded', reason: 'concurrency' });
+      }
+    }
+    const openedAt = Date.now();
+    ttsCharacters.record(body.data.text.length);
+    ttsActiveStreams.add(1);
     const cancelled = new AbortController();
     const abort = (): void => {
       if (!reply.raw.writableFinished) cancelled.abort();
@@ -2499,8 +2626,10 @@ export async function buildServer(
         signal: AbortSignal.any([cancelled.signal, AbortSignal.timeout(300_000)]),
       });
       if (!upstream.ok || !upstream.body) {
+        speechRequests.add(1, { kind: 'tts', result: 'error' });
         return reply.code(502).send({ error: 'speech synthesis unavailable' });
       }
+      speechRequests.add(1, { kind: 'tts', result: 'ok' });
       // Flush headers and a start event immediately. Binary download responses
       // can be buffered wholesale by browser-facing reverse proxies (leaving
       // the UI in "Loading voice…" until synthesis ends), whereas the existing
@@ -2545,12 +2674,455 @@ export async function buildServer(
       return reply;
     } catch {
       if (hijacked || cancelled.signal.aborted) return reply;
+      speechRequests.add(1, { kind: 'tts', result: 'error' });
       return reply.code(502).send({ error: 'speech synthesis unavailable' });
     } finally {
       req.raw.removeListener('aborted', abort);
       reply.raw.removeListener('close', abort);
+      lease?.release();
+      ttsActiveStreams.add(-1);
+      ttsStreamSeconds.record((Date.now() - openedAt) / 1000);
     }
   });
+
+  // ---- Streaming ASR proxy (docs/voice-call-design.md §8.1/§8.4): browser ⇄
+  // this server ⇄ upstream Fun-ASR /ws. The browser never talks to Fun-ASR
+  // directly (design §4.2); auth is the existing onRequest hook (?token= is
+  // accepted by tokenFrom, as for SSE). Text frames (JSON config) pass through
+  // validated; binary PCM16 chunks are metered against the tenant hour window
+  // and relayed upstream; upstream JSON results are relayed back, with
+  // partial/final counters for the phone metrics.
+
+  if (deps.speech || deps.mediaGateway) {
+    // Registered lazily so builds without WebSocket routes keep no WS listener.
+    await app.register(websocketPlugin);
+  }
+
+  if (deps.speech) {
+    app.get('/api/speech/asr/stream', { websocket: true }, (socket, req) => {
+      const tenantId = req.identity?.tenantId ?? null;
+      const deny = (reason: string, code = 1013): void => {
+        speechQuotaDenied.add(1, { reason });
+        speechRequests.add(1, { kind: 'asr_stream', result: 'denied' });
+        try {
+          socket.close(code, reason);
+        } catch {
+          // Already closed; nothing to clean up.
+        }
+      };
+
+      // Client frames are accepted synchronously and buffered until the
+      // upstream pipe is ready — the browser starts sending immediately after
+      // the upgrade, long before the quota lookup and upstream handshake.
+      let cfg: SpeechQuotaConfig = {};
+      let upstream: WebSocket | null = null;
+      let closed = false;
+      let opened = false;
+      let bytesMetered = 0;
+      let lease: SpeechLease | null = null;
+      const pending: { data: WebSocket.RawData; isBinary: boolean }[] = [];
+      const MAX_PENDING = 64; // 64 × 100 ms frames ≈ 6.4 s of audio
+
+      const closeBoth = (code: number, reason: string): void => {
+        if (closed) return;
+        closed = true;
+        try {
+          socket.close(code, reason);
+        } catch {
+          // Ignore double close.
+        }
+        try {
+          upstream?.close();
+        } catch {
+          // Ignore double close.
+        }
+        lease?.release();
+        if (opened) asrActiveStreams.add(-1);
+        if (bytesMetered > 0) asrAudioBytes.record(bytesMetered);
+        opened = false;
+      };
+
+      const meterAndForward = (data: WebSocket.RawData, isBinary: boolean): boolean => {
+        if (!upstream || upstream.readyState !== WebSocket.OPEN) return false;
+        if (isBinary) {
+          const bytes = Array.isArray(data)
+            ? data.reduce((n, c) => n + c.length, 0)
+            : data.byteLength;
+          if (tenantId && !speechQuota.admitAsrBytes(tenantId, bytes, cfg)) {
+            deny('asr_bytes');
+            return true;
+          }
+          bytesMetered += bytes;
+        } else if (data.toString().length > 4096) {
+          // Config frames are operator-scoped upstream keys only; bound the
+          // size so the proxy cannot be used as an unbounded relay.
+          closeBoth(1009, 'config too large');
+          return true;
+        }
+        upstream.send(data, { binary: isBinary });
+        return true;
+      };
+
+      socket.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
+        if (closed) return;
+        if (opened) {
+          meterAndForward(data, isBinary);
+        } else if (pending.length < MAX_PENDING) {
+          pending.push({ data, isBinary });
+        } else {
+          closeBoth(1009, 'client too fast');
+        }
+      });
+      socket.on('close', () => closeBoth(1000, 'client closed'));
+      socket.on('error', () => closeBoth(1011, 'client error'));
+
+      void (async () => {
+        if (tenantId) {
+          const loaded = await speechQuotaOf(tenantId);
+          if (closed) return;
+          if (loaded === null) return deny('unavailable');
+          cfg = loaded;
+          if (!speechQuota.admitRequest(tenantId, cfg)) return deny('rate');
+        }
+        lease = tenantId ? speechQuota.admitAsrStream(tenantId, cfg) : null;
+        if (tenantId && !lease) return deny('concurrency');
+
+        const upstreamUrl = new URL('/ws', deps.speech!.asrUrl);
+        upstreamUrl.protocol = upstreamUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+        upstream = new WebSocket(upstreamUrl);
+
+        upstream.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
+          if (closed) return;
+          if (!isBinary) {
+            try {
+              const m = JSON.parse(data.toString()) as { is_final?: boolean };
+              if (m.is_final === true) asrFinals.add(1);
+              else if (m.is_final === false) asrPartials.add(1);
+            } catch {
+              // Non-JSON upstream text is relayed verbatim below.
+            }
+          }
+          if (socket.readyState === WebSocket.OPEN) socket.send(data, { binary: isBinary });
+        });
+        upstream.on('close', () => {
+          if (!closed) speechRequests.add(1, { kind: 'asr_stream', result: 'ok' });
+          closeBoth(1000, 'upstream closed');
+        });
+        upstream.on('error', () => {
+          speechRequests.add(1, { kind: 'asr_stream', result: 'error' });
+          if (socket.readyState === WebSocket.OPEN) {
+            try {
+              socket.send(JSON.stringify({ mode: '2pass', error: 'recognition unavailable' }));
+            } catch {
+              // Socket already gone.
+            }
+          }
+          closeBoth(1011, 'upstream error');
+        });
+
+        await new Promise<void>((resolve) => {
+          upstream!.once('open', () => {
+            opened = true;
+            asrActiveStreams.add(1);
+            resolve();
+          });
+          upstream!.once('error', () => resolve());
+          socket.once('close', () => resolve());
+        });
+        if (closed) return;
+        if (!opened) {
+          lease?.release();
+          lease = null;
+          return deny('unavailable', 1011);
+        }
+        for (const frame of pending.splice(0)) {
+          if (closed || !meterAndForward(frame.data, frame.isBinary)) break;
+        }
+      })();
+    });
+  }
+
+  // ---- WebRTC media plane (docs/webrtc-media-design.md §3–§5): token
+  // issuance + signaling relay. The signaling socket authenticates at upgrade
+  // with the ordinary login token (?token=, like SSE and the ASR proxy);
+  // media.hello then presents the short-lived, one-time media token bound to
+  // one Chat/Work session. Without a gateway adapter both endpoints answer
+  // 501 and calls keep using the streaming-ASR + SSE-TTS path.
+
+  const mediaTokenRequestSchema = z.object({ sessionId: z.string().min(1) });
+
+  /** Qwen3-TTS streams raw PCM16; the SSE TTS route pipes it at this rate. */
+  const TTS_PCM_SAMPLE_RATE = 24_000;
+
+  /**
+   * Quota-enforcing TTS fetcher for media downlinks: same admission rules as
+   * the SSE synthesis route (rate/characters/concurrency), released when the
+   * PCM iterable completes.
+   */
+  const mediaTtsFetch =
+    (tenantId: string | null): MediaTtsFetch =>
+    async (text, signal) => {
+      if (!tenantId || !deps.speech) return null;
+      const cfg = await speechQuotaOf(tenantId);
+      if (cfg === null) return null;
+      if (!speechQuota.admitRequest(tenantId, cfg)) return null;
+      if (!speechQuota.admitTtsCharacters(tenantId, text.length, cfg)) return null;
+      const lease = speechQuota.admitTtsStream(tenantId, cfg);
+      if (!lease) return null;
+      const openedAt = Date.now();
+      let body: ReadableStream<Uint8Array> | null = null;
+      try {
+        const upstream = await fetch(new URL('/tts/stream', deps.speech.ttsUrl), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text, language: detectSpeechLanguage(text) }),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(300_000)]),
+        });
+        if (upstream.ok && upstream.body) body = upstream.body;
+      } catch {
+        // Fall through to the shared failure path.
+      }
+      if (!body) {
+        lease.release();
+        speechRequests.add(1, { kind: 'tts_media', result: 'error' });
+        return null;
+      }
+      speechRequests.add(1, { kind: 'tts_media', result: 'ok' });
+      ttsCharacters.record(text.length);
+      ttsActiveStreams.add(1);
+      return {
+        sampleRate: TTS_PCM_SAMPLE_RATE,
+        chunks: pcmChunks(body, () => {
+          lease.release();
+          ttsActiveStreams.add(-1);
+          ttsStreamSeconds.record((Date.now() - openedAt) / 1000);
+        }),
+      };
+    };
+
+  app.post('/api/media/token', async (req, reply) => {
+    if (!deps.mediaTokens || !deps.mediaGateway) {
+      return reply.code(501).send({ error: 'media plane is not configured' });
+    }
+    const identity = req.identity;
+    if (!identity) {
+      // Media tokens are an authorization boundary; unauthenticated builds
+      // (no auth dep) cannot establish ownership of any session.
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const body = mediaTokenRequestSchema.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'invalid request' });
+    const granted = await authorizeSession(body.data.sessionId, identity, reply);
+    if (!granted) return;
+    const token = await deps.mediaTokens.issue(identity, body.data.sessionId);
+    if (token === null) {
+      return reply.code(503).send({ error: 'media tokens unavailable' });
+    }
+    mediaTokensIssued.add(1);
+    return { token };
+  });
+
+  if (!deps.mediaGateway || !deps.mediaTokens) {
+    app.get('/api/media/signaling', async (_req, reply) =>
+      reply.code(501).send({ error: 'media plane is not configured' }),
+    );
+  } else {
+    app.get('/api/media/signaling', { websocket: true }, (socket, req) => {
+      const gateway = deps.mediaGateway!;
+      const tokens = deps.mediaTokens!;
+      const identity = req.identity;
+      const openedAt = Date.now();
+      mediaConnections.add(1);
+
+      let phase: 'awaiting_hello' | 'ready' | 'closing' = 'awaiting_hello';
+      let mediaSessionId: string | null = null;
+      let boundTenantId: string | null = null;
+      let lease: SpeechLease | null = null;
+      let cleaned = false;
+
+      const fail = (code: MediaErrorCode, message: string, closeCode = 1008): void => {
+        mediaErrors.add(1, { code });
+        try {
+          socket.send(JSON.stringify({ type: 'media.error', code, message }));
+        } catch {
+          // Socket already closing.
+        }
+        try {
+          socket.close(closeCode, code);
+        } catch {
+          // Already closed.
+        }
+      };
+
+      const cleanup = (): void => {
+        if (cleaned) return;
+        cleaned = true;
+        mediaConnections.add(-1);
+        lease?.release();
+        lease = null;
+        if (mediaSessionId) {
+          void gateway.close(mediaSessionId).catch(() => {
+            // Best-effort release; the adapter owns final reaping.
+          });
+          mediaSessions.add(-1);
+          mediaSessionSeconds.record((Date.now() - openedAt) / 1000);
+        }
+        unsubscribe();
+      };
+
+      const unsubscribe = gateway.onEvent((event) => {
+        if (cleaned || event.mediaSessionId !== mediaSessionId) return;
+        if (event.type === 'ended') {
+          try {
+            socket.close(1000, 'media ended');
+          } catch {
+            // Already closed; cleanup runs from the close event.
+          }
+          return;
+        }
+        try {
+          if (event.type === 'tts_ended') {
+            socket.send(JSON.stringify({ type: 'media.tts_ended' }));
+            return;
+          }
+          // Strip the server-side session id and map the event name to the
+          // wire schema: the gateway speaks `asr_*`, clients see `media.asr_*`.
+          socket.send(
+            JSON.stringify({
+              type: event.type === 'asr_partial' ? 'media.asr_partial' : 'media.asr_final',
+              text: event.text,
+            }),
+          );
+        } catch {
+          // Socket already closing.
+        }
+      });
+
+      socket.on('message', (raw: WebSocket.RawData) => {
+        if (phase === 'closing') return;
+        const text = raw.toString();
+        if (text.length > 128 * 1024) return fail('bad_message', 'message too large', 1009);
+        let json: unknown;
+        try {
+          json = JSON.parse(text);
+        } catch {
+          return fail('bad_message', 'invalid JSON');
+        }
+        const parsed = mediaClientMessageSchema.safeParse(json);
+        if (!parsed.success) return fail('bad_message', 'invalid message');
+        const message = parsed.data;
+
+        if (message.type === 'media.hello') {
+          if (phase !== 'awaiting_hello') return fail('bad_message', 'duplicate hello');
+          void (async () => {
+            const consumed: MediaTokenBinding | null = await tokens.consume(message.token);
+            if (cleaned) return;
+            if (!consumed) {
+              return fail('token_expired', 'media token is invalid, expired or already used');
+            }
+            if (
+              !identity ||
+              consumed.userId !== identity.userId ||
+              consumed.tenantId !== identity.tenantId ||
+              consumed.sessionId !== message.sessionId
+            ) {
+              return fail('invalid_session', 'media token does not match this caller or session');
+            }
+            const cfg = await speechQuotaOf(consumed.tenantId);
+            if (cleaned) return;
+            if (cfg === null) return fail('quota', 'quota configuration unavailable');
+            lease = speechQuota.admitMediaSession(consumed.tenantId, cfg);
+            if (!lease) return fail('capacity', 'concurrent media session limit reached');
+            const session = await gateway.allocate({
+              tenantId: consumed.tenantId,
+              userId: consumed.userId,
+              sessionId: consumed.sessionId,
+            });
+            if (cleaned) {
+              lease?.release();
+              lease = null;
+              return;
+            }
+            if (!session) {
+              lease.release();
+              lease = null;
+              return fail('gateway_unavailable', 'media gateway cannot allocate a session', 1011);
+            }
+            mediaSessionId = session.mediaSessionId;
+            phase = 'ready';
+            boundTenantId = consumed.tenantId;
+            mediaSessions.add(1);
+            try {
+              socket.send(
+                JSON.stringify({
+                  type: 'media.ready',
+                  mediaSessionId: session.mediaSessionId,
+                  expiresAt: session.expiresAt,
+                }),
+              );
+            } catch {
+              // Socket closing; cleanup runs from the close event.
+            }
+          })().catch(() => {
+            if (!cleaned) fail('gateway_unavailable', 'media session setup failed', 1011);
+          });
+          return;
+        }
+
+        if (phase !== 'ready' || mediaSessionId === null) {
+          return fail('not_bound', 'send media.hello first');
+        }
+        if (message.type === 'media.offer') {
+          gateway
+            .answerOffer(mediaSessionId, message.sdp)
+            .then((answer) => {
+              if (cleaned || phase !== 'ready') return;
+              if (!answer) return fail('gateway_unavailable', 'offer rejected', 1011);
+              try {
+                socket.send(JSON.stringify({ type: 'media.answer', sdp: answer.sdp }));
+              } catch {
+                // Socket already closing.
+              }
+            })
+            .catch(() => {
+              if (!cleaned) fail('gateway_unavailable', 'offer handling failed', 1011);
+            });
+        } else if (message.type === 'media.ice') {
+          void gateway.addIceCandidate(mediaSessionId, message.candidate).catch(() => {
+            // A single candidate failure is not fatal to the peer connection.
+          });
+        } else if (message.type === 'media.speak') {
+          // Quota + upstream fetch live here (same rules as the SSE TTS
+          // route): the gateway receives an already-authorized PCM stream
+          // and only owns transcoding/pacing.
+          gateway
+            .speak(mediaSessionId, message.text, mediaTtsFetch(boundTenantId))
+            .then((ok) => {
+              if (cleaned || phase !== 'ready') return;
+              if (!ok) fail('tts_unavailable', 'TTS downlink unavailable');
+            })
+            .catch(() => {
+              if (!cleaned) fail('tts_unavailable', 'TTS downlink failed', 1011);
+            });
+        } else if (message.type === 'media.stop_speaking') {
+          void gateway.stopSpeaking(mediaSessionId).catch(() => {
+            // Best-effort stop; the downlink also ends on its own.
+          });
+        } else {
+          // media.bye: closing the socket triggers cleanup (gateway.close +
+          // quota lease release), which is exactly the bye semantics.
+          try {
+            socket.close(1000, 'bye');
+          } catch {
+            // Already closing; cleanup runs from the close event.
+          }
+        }
+      });
+
+      socket.on('close', cleanup);
+      socket.on('error', cleanup);
+    });
+  }
 
   // ---- M3: approvals, policy, cancel (REST control surface, design.md §11.1)
 

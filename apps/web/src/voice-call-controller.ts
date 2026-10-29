@@ -8,6 +8,12 @@ import {
   transcribeSpeechAudio,
   type SpeechSynthesisStream,
 } from './speech';
+import {
+  startStreamingAsr,
+  type StreamingAsrHandlers,
+  type StreamingAsrSession,
+} from './streaming-asr';
+import { startWebRtcAsr, type WebRtcDownlink } from './media-client';
 import { segmentSpeechText, stableMarkdownPrefix } from './voice-call-text';
 
 const SAMPLE_RATE = 24_000;
@@ -47,6 +53,11 @@ export interface VoiceCallPlayer {
   stop(): void;
 }
 
+/** WebRTC media session: streaming-ASR capture surface + TTS downlink. */
+export interface WebRtcCallSession extends StreamingAsrSession {
+  downlink?: WebRtcDownlink;
+}
+
 export interface VoiceCallDependencies {
   getSessionId(): string | null;
   submit(text: string, onPromptId: (promptId: string) => void): Promise<boolean | void>;
@@ -56,6 +67,21 @@ export interface VoiceCallDependencies {
   transcribe(blob: Blob, signal: AbortSignal): Promise<string>;
   synthesize(text: string, signal: AbortSignal): Promise<SpeechSynthesisStream>;
   createPlayer(sampleRate: number, onEnded: () => void, context: AudioContext): VoiceCallPlayer;
+  /**
+   * Opens the streaming-ASR session (docs/voice-call-design.md §8.1). Resolves
+   * null when the proxy/upstream cannot stream so the call falls back to the
+   * batch MediaRecorder path. Injectable for tests.
+   */
+  startStreamingAsr?(handlers: StreamingAsrHandlers): Promise<StreamingAsrSession | null>;
+  /**
+   * Opens the WebRTC media session (docs/webrtc-media-design.md): preferred
+   * over streaming ASR; resolves null so the caller tries the next mode.
+   * Injectable for tests.
+   */
+  startWebRtcAsr?(
+    sessionId: string,
+    handlers: StreamingAsrHandlers,
+  ): Promise<WebRtcCallSession | null>;
 }
 
 interface CallState {
@@ -64,6 +90,12 @@ interface CallState {
   stream: MediaStream | null;
   audioContext: AudioContext | null;
   responseEpoch: number;
+  /** Streaming-ASR session when mode 'streaming'; null in batch mode. */
+  streaming: StreamingAsrSession | null;
+  /** WebRTC TTS downlink (media plane); null when absent or dropped. */
+  downlink: WebRtcDownlink | null;
+  /** Bumps on interrupt/mute/hangup to fence late streaming finals. */
+  streamEpoch: number;
 }
 
 interface RecordingState {
@@ -101,7 +133,8 @@ interface PlaybackState {
   call: CallState;
   epoch: number;
   abort: AbortController;
-  player: VoiceCallPlayer;
+  /** Null while a WebRTC downlink owns playback (no local PCM player). */
+  player: VoiceCallPlayer | null;
   resolve: () => void;
 }
 
@@ -118,6 +151,7 @@ export class VoiceCallController {
   private readonly listeners = new Set<() => void>();
   private call: CallState | null = null;
   private recording: RecordingState | null = null;
+  private streamingActive = false;
   private asr: { id: string; call: CallState; abort: AbortController } | null = null;
   private pending: PendingSubmission | null = null;
   private response: ResponseState | null = null;
@@ -175,6 +209,7 @@ export class VoiceCallController {
       !this.response &&
       !this.pending &&
       !this.recording &&
+      !this.streamingActive &&
       !this.asr &&
       !this.playback &&
       !busy &&
@@ -194,6 +229,9 @@ export class VoiceCallController {
       stream: null,
       audioContext: null,
       responseEpoch: 0,
+      streaming: null,
+      downlink: null,
+      streamEpoch: 0,
     };
     this.call = call;
     this.setSnapshot({
@@ -217,6 +255,29 @@ export class VoiceCallController {
       if (context.state !== 'running') {
         throw new Error('Audio playback is blocked by the browser. Please try again.');
       }
+
+      // Preferred path: WebRTC media uplink (mic over RTCPeerConnection to the
+      // gateway adapter), then streaming ASR; any null ⇒ the next mode, and
+      // all null ⇒ the batch MediaRecorder path.
+      const handlers = this.streamingHandlers(call);
+      const webrtc = call.sessionId
+        ? ((await this.deps.startWebRtcAsr?.(call.sessionId, handlers)) ?? null)
+        : null;
+      if (webrtc) {
+        call.streaming = webrtc;
+        call.downlink = webrtc.downlink ?? null;
+      } else {
+        call.streaming = (await this.deps.startStreamingAsr?.(handlers)) ?? null;
+      }
+      if (!this.isCurrent(call)) {
+        call.streaming?.finish();
+        return;
+      }
+      if (call.streaming) {
+        this.beginRecording(call);
+        return;
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
@@ -231,10 +292,69 @@ export class VoiceCallController {
     }
   }
 
+  /** Handlers are fenced by call identity + streamEpoch (§8.1 late finals). */
+  private streamingHandlers(call: CallState): StreamingAsrHandlers {
+    const epoch = (): number => call.streamEpoch;
+    return {
+      onPartial: (text) => {
+        if (
+          !this.isCurrent(call) ||
+          epoch() !== call.streamEpoch ||
+          this.snapshot.muted ||
+          this.response ||
+          this.pending
+        ) {
+          return;
+        }
+        this.setSnapshot({ ...this.snapshot, userText: text });
+      },
+      onFinal: (text) => this.handleStreamingFinal(call, epoch(), text),
+      onError: (message) => this.deps.onError(message),
+      onEnd: (reason) => {
+        // Unexpected recognizer end mid-call: the call cannot keep listening.
+        // fail() finishes the session and leaves a reconnectable error state.
+        if (!this.isCurrent(call) || call.streaming === null) return;
+        this.fail(call, new Error(`Speech recognition ended (${reason}).`));
+      },
+    };
+  }
+
+  /**
+   * A VAD-endpointed final segment becomes an utterance. Identical fencing to
+   * the batch finishRecording path: never submit while another turn is live.
+   */
+  private handleStreamingFinal(call: CallState, epoch: number, text: string): void {
+    if (
+      !this.isCurrent(call) ||
+      epoch !== call.streamEpoch ||
+      this.snapshot.muted ||
+      this.response ||
+      this.pending ||
+      this.recording ||
+      this.asr ||
+      this.playback ||
+      this.busy ||
+      this.approvalPending
+    ) {
+      return;
+    }
+    const transcript = text.trim();
+    if (!transcript) return;
+    // The final IS the endpoint: stop capture until the next listening
+    // window, exactly like the batch recorder's stop event.
+    this.streamingActive = false;
+    call.streaming?.pause();
+    this.setSnapshot({ ...this.snapshot, userText: transcript, assistantText: '' });
+    this.pending = { call, utteranceId: newId(), transcript };
+    this.setStatus('thinking');
+    void this.submitPending(this.pending);
+  }
+
   /** Hangs up voice resources only; it deliberately does not cancel Agent work. */
   readonly stop = (): void => {
     const call = this.call;
     if (call) call.responseEpoch += 1;
+    if (call) call.streamEpoch += 1;
     this.call = null;
     this.pending = null;
     this.response = null;
@@ -246,6 +366,7 @@ export class VoiceCallController {
     // brand-new call. The old stop event remains fenced by CallState identity.
     this.recording = null;
     this.stopPlayback();
+    if (call?.streaming) call.streaming.finish();
     if (call?.stream) call.stream.getTracks().forEach((track) => track.stop());
     if (call?.audioContext) void call.audioContext.close();
     this.setSnapshot(IDLE_SNAPSHOT);
@@ -266,6 +387,7 @@ export class VoiceCallController {
     });
     if (muted) {
       this.pending = null;
+      call.streamEpoch += 1;
       this.cancelUtterance();
       if (!this.response && !this.playback) {
         this.setStatus(this.busy || this.approvalPending ? 'thinking' : 'listening');
@@ -285,6 +407,7 @@ export class VoiceCallController {
     if (!call || !this.snapshot.active || this.snapshot.status === 'error') return;
     const response = this.response;
     call.responseEpoch += 1;
+    call.streamEpoch += 1;
     this.speechQueue = [];
     this.stopPlayback();
     this.pending = null;
@@ -373,6 +496,7 @@ export class VoiceCallController {
     // brand-new call. The old stop event remains fenced by CallState identity.
     this.recording = null;
     this.stopPlayback();
+    if (call.streaming) call.streaming.finish();
     call.stream?.getTracks().forEach((track) => track.stop());
     if (call.audioContext) void call.audioContext.close();
     this.setSnapshot({
@@ -387,10 +511,9 @@ export class VoiceCallController {
   private beginRecording(call: CallState): void {
     if (
       !this.isCurrent(call) ||
-      !call.stream ||
-      !call.audioContext ||
       this.snapshot.muted ||
       this.recording ||
+      this.streamingActive ||
       this.asr ||
       this.response ||
       this.pending ||
@@ -401,6 +524,16 @@ export class VoiceCallController {
     ) {
       return;
     }
+    if (call.streaming) {
+      // Streaming mode: resuming capture is synchronous; upstream VAD owns
+      // endpointing, so there is no local recorder to arm.
+      if (!call.streaming.active) return;
+      call.streaming.resume();
+      this.streamingActive = true;
+      this.setSnapshot({ ...this.snapshot, status: 'listening', error: null });
+      return;
+    }
+    if (!call.stream || !call.audioContext) return;
     try {
       const stream = call.stream;
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -473,6 +606,10 @@ export class VoiceCallController {
   }
 
   private cancelRecording(): void {
+    if (this.streamingActive) {
+      this.call?.streaming?.pause();
+      this.streamingActive = false;
+    }
     if (this.recording) this.stopRecording(this.recording, true);
   }
 
@@ -694,6 +831,36 @@ export class VoiceCallController {
     const played = new Promise<void>((resolve) => {
       resolvePlayback = resolve;
     });
+    // WebRTC media plane: the gateway synthesizes and paces the audio; the
+    // promise resolves on tts_ended (or abort), replacing the player path.
+    const downlink = call.downlink;
+    if (downlink) {
+      const playback: PlaybackState = {
+        call,
+        epoch,
+        abort,
+        player: null,
+        resolve: resolvePlayback,
+      };
+      this.playback = playback;
+      try {
+        await downlink.speak(text, abort.signal);
+        return !abort.signal.aborted && this.isCurrent(call) && epoch === call.responseEpoch;
+      } catch (error) {
+        if (!abort.signal.aborted && this.isCurrent(call) && epoch === call.responseEpoch) {
+          // Drop the downlink for the rest of the call and keep the delivered
+          // SSE TTS path for subsequent speech.
+          call.downlink = null;
+          this.deps.onError(error instanceof Error ? error.message : String(error));
+          if (this.response?.call === call) this.response.invalidated = true;
+          this.speechQueue = [];
+        }
+        return false;
+      } finally {
+        if (this.playback === playback) this.playback = null;
+        resolvePlayback();
+      }
+    }
     const player = this.deps.createPlayer(SAMPLE_RATE, resolvePlayback, context);
     const playback: PlaybackState = {
       call,
@@ -745,7 +912,7 @@ export class VoiceCallController {
     this.playback = null;
     if (!playback) return;
     playback.abort.abort();
-    playback.player.stop();
+    playback.player?.stop();
     playback.resolve();
   }
 
@@ -774,4 +941,10 @@ export const defaultVoiceCallDependencies = {
   synthesize: openSpeechSynthesisStream,
   createPlayer: (sampleRate: number, onEnded: () => void, context: AudioContext): VoiceCallPlayer =>
     new PcmPlayer(sampleRate, onEnded, context),
+  startStreamingAsr: (handlers: StreamingAsrHandlers): Promise<StreamingAsrSession | null> =>
+    startStreamingAsr(handlers),
+  startWebRtcAsr: (
+    sessionId: string,
+    handlers: StreamingAsrHandlers,
+  ): Promise<StreamingAsrSession | null> => startWebRtcAsr(sessionId, handlers),
 };

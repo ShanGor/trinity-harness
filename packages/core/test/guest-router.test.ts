@@ -38,6 +38,7 @@ function fixture() {
     state: 'running',
   };
   const get = vi.fn(async () => record);
+  const environmentGet = vi.fn(async () => record);
   const fetcher = vi.fn<typeof fetch>(async (_url, options) => {
     const body = JSON.parse(options!.body as string) as {
       request: { requestId: string; generation: string };
@@ -51,7 +52,7 @@ function fixture() {
     );
   });
   const wake = vi.fn(async () => record);
-  const environment: EnvironmentPort = { wake, get, suspend: vi.fn() };
+  const environment: EnvironmentPort = { wake, get: environmentGet, suspend: vi.fn() };
   const router = new FirecrackerGuestRouter(
     environment,
     { get },
@@ -62,7 +63,7 @@ function fixture() {
     '/workspace',
     fetcher,
   );
-  return { router, user, meta, record, get, fetcher, wake };
+  return { router, user, meta, record, get, environmentGet, fetcher, wake };
 }
 it('uses authenticated metadata and caps routed replies without exposing credentials to the guest', async () => {
   const f = fixture();
@@ -340,4 +341,28 @@ it('never accepts a read failure as acknowledgement of a mutation', async () => 
     f.router.call(f.meta.id, { kind: 'write', path: 'file', content: 'effect' }),
   ).rejects.toMatchObject({ code: 'GUEST_UNAVAILABLE' });
   expect(f.fetcher).toHaveBeenCalledOnce();
+});
+
+it('reconciles with the owning node after a transport failure without retrying the operation', async () => {
+  const f = fixture();
+  f.fetcher.mockRejectedValueOnce(new Error('vsock disappeared after host reboot'));
+  await expect(f.router.call(f.meta.id, { kind: 'skillsList' })).rejects.toThrow(
+    'unknown effect',
+  );
+  expect(f.fetcher).toHaveBeenCalledTimes(1);
+  // The router asks the node for the real unit state so a dead VM lands on
+  // 'stopped' (next call wakes a fresh generation) instead of failing forever.
+  expect(f.environmentGet).toHaveBeenCalledTimes(1);
+});
+
+it('still reports guest unavailability when the reconciling probe fails too', async () => {
+  const f = fixture();
+  f.fetcher.mockRejectedValueOnce(new Error('vsock disappeared'));
+  f.environmentGet.mockRejectedValueOnce(new Error('node operation unavailable'));
+  await expect(f.router.call(f.meta.id, { kind: 'skillsList' })).rejects.toMatchObject({
+    code: 'GUEST_UNAVAILABLE',
+    message: expect.stringContaining('unknown effect'),
+  });
+  expect(f.fetcher).toHaveBeenCalledTimes(1);
+  expect(f.environmentGet).toHaveBeenCalledTimes(1);
 });

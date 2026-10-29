@@ -222,6 +222,15 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
         }
       } catch {
         signal?.throwIfAborted();
+        // The transport failed. Reconcile once with the owning node so a dead
+        // VM is not retried blindly: environments.get() probes the real unit
+        // state and lands a confirmed-dead VM on 'stopped' (the next call wakes
+        // a fresh generation) or an unresponsive node on 'quarantined'. The
+        // operation itself is never retried here — a lost response can have an
+        // unknown effect.
+        await this.environments
+          .get(identity, AbortSignal.timeout(30_000))
+          .catch(() => undefined);
         throw new GuestUnavailableError();
       }
     });

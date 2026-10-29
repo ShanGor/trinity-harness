@@ -10,6 +10,7 @@ import {
 import { FirecrackerGuestRelay } from './guest-relay.js';
 import { parseNodeAgentEnv } from './env.js';
 import { SystemdNodeRuntime } from './runtime.js';
+import { reconcileNodeEnvironments } from './reconcile.js';
 import { buildNodeAgent } from './server.js';
 
 async function main(): Promise<void> {
@@ -19,9 +20,25 @@ async function main(): Promise<void> {
     query_timeout: 10_000,
   });
   const sandbox = new LocalSandbox(env.NODE_STATE_DIR, { envMode: 'minimal' });
+  const environmentStore = new PgEnvironmentStore(createDb(pool), pool);
+  const runtime = new SystemdNodeRuntime(sandbox);
+  // Boot reconciliation converges stale durable state after a host reboot
+  // before serving lifecycle commands (docs/design.md §21.4).
+  try {
+    const { reconciled } = await reconcileNodeEnvironments(environmentStore, runtime, env.NODE_ID);
+    if (reconciled > 0) {
+      console.log(`[node-agent] reconciled ${reconciled} environment(s) with host reality`);
+    }
+  } catch (error) {
+    // Reconciliation is best-effort at startup: a failed scan must not prevent
+    // the node agent from serving lifecycle commands, and the next status probe
+    // reconciles again. Serving with stale state is safe because every wake and
+    // guest route still verifies state through this node.
+    console.error('[node-agent] environment reconciliation failed:', error);
+  }
   const app = buildNodeAgent(
-    new SystemdNodeRuntime(sandbox),
-    new PgEnvironmentStore(createDb(pool), pool),
+    runtime,
+    environmentStore,
     env.NODE_ID,
     env.NODE_RUNTIME_TOKEN,
     env.NODE_GUEST_ROUTING === 'true'

@@ -138,13 +138,13 @@ function audioStream(): ReadableStream<Uint8Array> {
   });
 }
 
-function responseItems(content: string, final: boolean): ChatItem[] {
+function responseItems(content: string, final: boolean, transcript = 'Hello Trinity'): ChatItem[] {
   return [
     {
       key: 'user',
       messageId: 'prompt-1',
       role: 'user',
-      content: 'Hello Trinity',
+      content: transcript,
       streaming: false,
       tools: [],
       attachments: [],
@@ -187,6 +187,119 @@ function setup(overrides: Partial<VoiceCallDependencies> = {}): {
     ...overrides,
   };
   return { controller: new VoiceCallController(deps), deps, players, session };
+}
+
+/** Controllable streaming-ASR session double for controller tests. */
+interface FakeStreaming {
+  session: {
+    resume: ReturnType<typeof vi.fn>;
+    pause: ReturnType<typeof vi.fn>;
+    finish: ReturnType<typeof vi.fn>;
+    active: boolean;
+  };
+  handlers: {
+    onPartial: (text: string) => void;
+    onFinal: (text: string) => void;
+    onError: (message: string) => void;
+    onEnd: (reason: string) => void;
+  };
+}
+
+function fakeStreaming(): FakeStreaming {
+  const handlers = {
+    onPartial: (): void => undefined,
+    onFinal: (): void => undefined,
+    onError: (): void => undefined,
+    onEnd: (): void => undefined,
+  };
+  const session = {
+    resume: vi.fn(),
+    pause: vi.fn(),
+    finish: vi.fn(),
+    active: true,
+  };
+  return { session, handlers };
+}
+
+function setupStreaming(): {
+  controller: VoiceCallController;
+  deps: VoiceCallDependencies;
+  players: FakePlayer[];
+  streaming: FakeStreaming;
+} {
+  const streaming = fakeStreaming();
+  const base = setup({
+    startStreamingAsr: vi.fn(async (h) => {
+      Object.assign(streaming.handlers, h);
+      return streaming.session;
+    }),
+  });
+  return { ...base, streaming };
+}
+
+/** Both media modes faked; lets tests assert WebRTC precedence and fallback. */
+function setupDualMode(): {
+  controller: VoiceCallController;
+  deps: VoiceCallDependencies;
+  webrtc: FakeStreaming;
+  streaming: FakeStreaming;
+} {
+  const webrtc = fakeStreaming();
+  const streaming = fakeStreaming();
+  const base = setup({
+    startWebRtcAsr: vi.fn(async (_sessionId: string, h: typeof webrtc.handlers) => {
+      Object.assign(webrtc.handlers, h);
+      return webrtc.session;
+    }),
+    startStreamingAsr: vi.fn(async (h) => {
+      Object.assign(streaming.handlers, h);
+      return streaming.session;
+    }),
+  });
+  return { ...base, webrtc, streaming };
+}
+
+/** WebRTC session with a controllable TTS downlink. */
+interface FakeDownlink {
+  speak: ReturnType<typeof vi.fn>;
+  stopSpeaking: ReturnType<typeof vi.fn>;
+}
+
+function fakeDownlink(autoResolve = true): FakeDownlink {
+  return {
+    speak: vi.fn(
+      (text: string, signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          if (autoResolve) {
+            const timer = setTimeout(resolve, 10);
+            signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
+          } else {
+            // Stays pending until aborted (interruption drives resolution).
+            signal.addEventListener('abort', () => resolve(), { once: true });
+          }
+          void text;
+        }),
+    ),
+    stopSpeaking: vi.fn(),
+  };
+}
+
+function setupWebRtcDownlink(autoResolve = true): {
+  controller: VoiceCallController;
+  deps: VoiceCallDependencies;
+  players: FakePlayer[];
+  webrtc: FakeStreaming;
+  downlink: FakeDownlink;
+} {
+  const webrtc = fakeStreaming();
+  const downlink = fakeDownlink(autoResolve);
+  const base = setup({
+    startWebRtcAsr: vi.fn(async (_sessionId: string, h: typeof webrtc.handlers) => {
+      Object.assign(webrtc.handlers, h);
+      return { ...webrtc.session, downlink };
+    }),
+  });
+  return { ...base, webrtc, downlink };
 }
 
 let mediaDevicesDescriptor: PropertyDescriptor | undefined;
@@ -506,5 +619,189 @@ describe('VoiceCallController', () => {
 
     expect(controller.getSnapshot().active).toBe(false);
     expect(FakeMediaRecorder.instances[0]!.state).toBe('inactive');
+  });
+
+  describe('streaming ASR mode (docs/voice-call-design.md §8.1)', () => {
+    it('drives a full turn from VAD final to spoken answer and back to listening', async () => {
+      const { controller, deps, players, streaming } = setupStreaming();
+      await controller.start();
+      expect(streaming.session.resume).toHaveBeenCalled();
+      expect(FakeMediaRecorder.instances).toHaveLength(0); // no batch recorder
+
+      streaming.handlers.onPartial('Hello Trin');
+      expect(controller.getSnapshot().userText).toBe('Hello Trin');
+
+      streaming.handlers.onFinal('Hello Trinity');
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+      controller.update(responseItems('Hi there.', true), false, false);
+      await vi.waitFor(() =>
+        expect(deps.synthesize).toHaveBeenCalledWith('Hi there.', expect.anything()),
+      );
+      await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
+      // Capture paused while the answer played, then resumed.
+      expect(streaming.session.pause).toHaveBeenCalled();
+      expect(streaming.session.resume).toHaveBeenCalledTimes(2);
+      expect(players).toHaveLength(1);
+      controller.stop();
+    });
+
+    it('drops late finals after interruption and fences them by streamEpoch', async () => {
+      const { controller, deps, streaming } = setupStreaming();
+      await controller.start();
+      streaming.handlers.onFinal('First question');
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+      controller.update(responseItems('First answer.', false), true, false);
+      await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('speaking'));
+
+      await controller.interrupt();
+      streaming.handlers.onFinal('Late utterance');
+      expect(deps.submit).toHaveBeenCalledOnce();
+
+      controller.update([], false, false);
+      await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
+      streaming.handlers.onFinal('Second question');
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledTimes(2));
+      controller.stop();
+    });
+
+    it('mute pauses capture and fences finals while muted; unmute resumes', async () => {
+      const { controller, deps, streaming } = setupStreaming();
+      await controller.start();
+      controller.toggleMute();
+      expect(streaming.session.pause).toHaveBeenCalled();
+      streaming.handlers.onFinal('spoken while muted');
+      expect(deps.submit).not.toHaveBeenCalled();
+
+      controller.toggleMute();
+      expect(streaming.session.resume).toHaveBeenCalledTimes(2);
+      streaming.handlers.onFinal('Second question');
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+      controller.stop();
+    });
+
+    it('finishes the streaming session on hangup and ignores late finals', async () => {
+      const { controller, deps, streaming } = setupStreaming();
+      await controller.start();
+      controller.stop();
+      expect(streaming.session.finish).toHaveBeenCalled();
+      streaming.handlers.onFinal('Too late');
+      expect(deps.submit).not.toHaveBeenCalled();
+      expect(controller.getSnapshot().active).toBe(false);
+    });
+
+    it('unexpected recognizer end fails the call into a reconnectable error', async () => {
+      const { controller, deps, streaming } = setupStreaming();
+      await controller.start();
+      streaming.handlers.onEnd('upstream closed');
+      await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('error'));
+      expect(streaming.session.finish).toHaveBeenCalled();
+      expect(deps.onError).not.toHaveBeenCalled();
+      expect(controller.getSnapshot().active).toBe(true);
+      controller.stop();
+    });
+
+    it('falls back to the batch recorder path when streaming is unavailable', async () => {
+      const { controller, deps } = setup({
+        startStreamingAsr: vi.fn(async () => null),
+      });
+      await controller.start();
+      expect(FakeMediaRecorder.instances).toHaveLength(1);
+      FakeMediaRecorder.instances[0]!.stop();
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+      controller.stop();
+    });
+
+    it('prefers WebRTC media uplink over streaming ASR (docs/webrtc-media-design.md)', async () => {
+      const { controller, deps, webrtc, streaming } = setupDualMode();
+      await controller.start();
+      expect(deps.startWebRtcAsr).toHaveBeenCalledWith('session-a', expect.anything());
+      expect(deps.startStreamingAsr).not.toHaveBeenCalled();
+      expect(webrtc.session.resume).toHaveBeenCalled();
+      expect(streaming.session.resume).not.toHaveBeenCalled();
+
+      webrtc.handlers.onPartial('hello');
+      expect(controller.getSnapshot().userText).toBe('hello');
+      webrtc.handlers.onFinal('Hello Trinity');
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+      controller.stop();
+      expect(webrtc.session.finish).toHaveBeenCalled();
+    });
+
+    it('falls back to streaming ASR when WebRTC is unavailable', async () => {
+      const { controller, deps, webrtc, streaming } = setupDualMode();
+      // Simulate an unconfigured media plane (501 on /api/media/token).
+      deps.startWebRtcAsr = vi.fn(async () => null);
+      await controller.start();
+      expect(webrtc.session.resume).not.toHaveBeenCalled();
+      expect(streaming.session.resume).toHaveBeenCalled();
+
+      streaming.handlers.onFinal('Hello Trinity');
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+      controller.stop();
+    });
+
+    it('skips WebRTC when no session is bound yet (New draft)', async () => {
+      const { controller, deps, webrtc, streaming, session } = setupDualMode();
+      session.id = null;
+      await controller.start();
+      expect(deps.startWebRtcAsr).not.toHaveBeenCalled();
+      expect(webrtc.session.resume).not.toHaveBeenCalled();
+      expect(streaming.session.resume).toHaveBeenCalled();
+      controller.stop();
+    });
+
+    it('plays responses over the WebRTC TTS downlink instead of SSE synthesis', async () => {
+      const { controller, deps, players, webrtc, downlink } = setupWebRtcDownlink();
+      await controller.start();
+      webrtc.handlers.onFinal('Hello Trinity');
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+      controller.update(responseItems('Hi there.', true), false, false);
+
+      await vi.waitFor(() =>
+        expect(downlink.speak).toHaveBeenCalledWith('Hi there.', expect.anything()),
+      );
+      expect(deps.synthesize).not.toHaveBeenCalled();
+      expect(players).toHaveLength(0); // no local PCM player in downlink mode
+      await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
+      expect(webrtc.session.resume).toHaveBeenCalledTimes(2); // capture resumed after speech
+      controller.stop();
+    });
+
+    it('interrupting a downlink aborts the speak and resumes listening without SSE', async () => {
+      const { controller, deps, webrtc, downlink } = setupWebRtcDownlink(false);
+      await controller.start();
+      webrtc.handlers.onFinal('Hello Trinity');
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+      controller.update(responseItems('Hi there.', false), true, false);
+      await vi.waitFor(() => expect(downlink.speak).toHaveBeenCalledOnce());
+      expect(controller.getSnapshot().status).toBe('speaking');
+
+      await controller.interrupt();
+      controller.update([], false, false); // busy clears with the turn end
+      await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
+      expect(deps.synthesize).not.toHaveBeenCalled();
+      controller.stop();
+    });
+
+    it('drops the downlink after a speak failure and falls back to SSE TTS', async () => {
+      const { controller, deps, webrtc, downlink } = setupWebRtcDownlink();
+      downlink.speak.mockRejectedValue(new Error('TTS downlink unavailable'));
+      await controller.start();
+      webrtc.handlers.onFinal('Hello Trinity');
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+      controller.update(responseItems('Hi there.', true), false, false);
+      await vi.waitFor(() => expect(deps.onError).toHaveBeenCalled());
+      expect(downlink.speak).toHaveBeenCalledOnce();
+
+      // The response was invalidated by the failure; a fresh turn uses the
+      // delivered SSE synthesis path (the downlink was dropped).
+      webrtc.handlers.onFinal('Second question');
+      await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledTimes(2));
+      controller.update(responseItems('Second answer.', true, 'Second question'), false, false);
+      await vi.waitFor(() =>
+        expect(deps.synthesize).toHaveBeenCalledWith('Second answer.', expect.anything()),
+      );
+      controller.stop();
+    });
   });
 });

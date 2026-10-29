@@ -84,6 +84,20 @@ export const tenantQuotaSchema = z.object({
   dailyTokens: z.number().int().positive().optional(),
   /** Calendar-month window (1st 00:00 UTC). */
   monthlyTokens: z.number().int().positive().optional(),
+  /** Phone/speech quotas (docs/voice-call-design.md §8.4): max concurrent
+   *  streaming ASR connections per tenant. */
+  concurrentAsrStreams: z.number().int().positive().optional(),
+  /** WebRTC media sessions per tenant (docs/webrtc-media-design.md §5);
+   *  enforced when the media gateway adapter is composed. */
+  concurrentMediaSessions: z.number().int().positive().optional(),
+  /** Max concurrent TTS synthesis streams per tenant. */
+  concurrentTtsStreams: z.number().int().positive().optional(),
+  /** Uploaded/transcribed audio bytes per rolling hour (batch + streaming). */
+  hourlyAsrBytes: z.number().int().positive().optional(),
+  /** Synthesized characters per rolling hour. */
+  hourlyTtsCharacters: z.number().int().positive().optional(),
+  /** Combined speech API requests (batch + stream opens) per rolling minute. */
+  speechRequestsPerMinute: z.number().int().positive().optional(),
 });
 export type TenantQuota = z.infer<typeof tenantQuotaSchema>;
 

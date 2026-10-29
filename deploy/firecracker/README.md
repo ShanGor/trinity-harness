@@ -8,7 +8,7 @@ This is the opt-in host power/capacity layer for the [personal runtime proposal]
 - A root-owned filesystem at `/srv/trinity-node`, mode `0700`, with an explicit storage policy. Production requires `NODE_STORAGE_ENCRYPTION=host-managed` or `provider-managed`; both are operator attestations, not automatic encryption detection. `none` is accepted only with `NODE_DEPLOYMENT_MODE=development`.
 - Approved `images/vmlinux` and read-only `images/rootfs.ext4`. The guest image must support the supplied virtio disks/network, booting a read-only root and mounting its private data disk. No image is downloaded or manufactured automatically.
 - A per-environment `volumes/<environment-id>/data.ext4` and root-owned `runtime.json`, containing unique non-root numeric `uid` and `gid` (both at least 100000). Reserve those IDs per environment. Backing files and images must reside on the same filesystem because the launcher uses hard links. Production storage must be encrypted at the host or provider layer; explicit development mode may use unencrypted local storage and does not establish tenant isolation.
-- An operator-provisioned `/run/netns/trinity-<environment-id>` containing `tap0`, isolated from other users. Development egress is optional and remains disabled until the host gateway is installed. The guest receives no proxy URL or credentials. The namespace's existence is a prerequisite, not proof that its firewall is correct.
+- An operator-provisioned `/run/netns/trinity-<environment-id>` containing `tap0`, isolated from other users. Development egress is optional and remains disabled until the host gateway is installed. The guest receives no proxy URL or credentials. The namespace's existence is a prerequisite, not proof that its firewall is correct. A namespace/TAP lost to a host reboot is reconstructed automatically on the next start by the installed egress helper; only the data disk and runtime identity must already exist.
 
 The node ID, endpoint and admitted CPU/memory capacity must agree with the server's `FIRECRACKER_NODES`. Never point this inventory at a user-controlled endpoint. Remote management requires an operator-authenticated TLS/mTLS proxy; the Node Agent itself listens only on loopback. Keep CDP, Firecracker API sockets and guest RPC off the public network.
 
@@ -80,13 +80,15 @@ The adapter uses generic [tun2proxy v0.8.6](https://github.com/tun2proxy/tun2pro
 
 The installer stages dependencies/configuration before changing services, installs persistent files under `/etc/trinity/sandbox-egress` and `/usr/local/libexec`, and enables `trinity-sandbox-egress.service`. It retires only the owned earlier `operator-guest-*` installation. It keeps the active-VM guard, the existing dnsmasq relay, FD-owned TUN validation and a guest-only policy table. Configured proxy failure blocks guest startup or egress rather than silently using direct routing. Removing `SANDBOX_PROXY_URL` on a subsequent release disables these services and restores direct routing; old installed settings never override the current deployment setting. No guest image rebuild is needed for this host-only change.
 
-Fresh development provisioning configures the guest TAP route automatically. Existing stopped environments are configured automatically on their next authenticated wake when the host gateway is active. The helper can also be invoked directly for operator recovery:
+Fresh development provisioning configures the guest TAP route automatically. Existing stopped environments are configured automatically on their next authenticated wake when the host gateway is active, and a namespace/TAP lost to a host reboot is reconstructed automatically on the next start (see below). The helper can also be invoked directly for operator recovery:
 
 ```bash
 sudo bash scripts/configure-firecracker-guest-egress.sh <environment-id>
 ```
 
-After a host reboot, `/run/netns` and its TAP/veth devices can be absent while the existing data disk and `network.json` remain. Do not rerun the fresh provisioner or replace the user's volume. For an existing `development-unencrypted` environment, first ensure the configured gateway, proxy (when enabled) and DNS relay are active, then run the repair through the maintenance gate:
+After a host reboot, `/run/netns` and its TAP/veth devices can be absent while the existing data disk and `network.json` remain. Do not rerun the fresh provisioner or replace the user's volume. The next authenticated wake/start repairs this automatically: the VM launcher (host mount namespace) requires provisioned host storage, the existing data disk and valid runtime UID/GID, archives the old network metadata under the provisioning lock, recreates only the namespace/TAP, and then runs the idempotent egress helper — preserving the data disk, runtime identity and immutable images in every storage mode. Existing namespaces without their egress, active or unconfirmed VMMs, missing storage or data disks, and invalid runtime identity still fail closed. The sandboxed egress unit defers namespace reconstruction to the launcher (bind mounts do not propagate out of its isolated mount namespace).
+
+For ambiguous failures that fail closed, an explicit repair remains available through the maintenance gate (for `development-unencrypted` environments):
 
 ```bash
 FIRECRACKER_MAINTENANCE_URL=http://127.0.0.1:3000 \
@@ -94,7 +96,7 @@ FIRECRACKER_MAINTENANCE_URL=http://127.0.0.1:3000 \
   pkexec /usr/bin/bash "$PWD/scripts/recover-firecracker-development-network.sh" <environment-id>
 ```
 
-Supply the existing maintenance token through the operator environment. The repair requires the original protected volume/runtime/network metadata, confirms there is no active VMM or existing namespace/interface, archives the old network metadata, and recreates only the namespace/TAP through the installed egress helper. It preserves the data disk, runtime UID/GID and immutable images. Failed or ambiguous repairs retain artifacts for inspection. After a successful repair/resume, wake the environment for a fresh generation and separately verify guest RPC and browser frames. This is an explicit development recovery procedure; automatic host-reboot network restoration remains a deployment gate.
+Supply the existing maintenance token through the operator environment. The explicit repair requires the original protected volume/runtime/network metadata, confirms there is no active VMM or existing namespace/interface, archives the old network metadata, and recreates only the namespace/TAP through the installed egress helper. Failed or ambiguous repairs retain artifacts for inspection. After a successful explicit repair/resume, wake the environment for a fresh generation and separately verify guest RPC and browser frames.
 
 Rebuild the development guest rootfs after changing its network configuration, preserve the per-environment writable data disk, and start a fresh generation. This is a development NAT path, not a production isolation guarantee or a domain allowlist. `SANDBOX_PROXY_URL` selects whole-guest egress on the host.
 

@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $(id -u) -eq 0 && $# -eq 1 ]] || {
-  echo 'Usage: sudo bash scripts/configure-firecracker-guest-egress.sh <environment-uuid>' >&2
+[[ $(id -u) -eq 0 ]] || {
+  echo 'Usage: sudo bash scripts/configure-firecracker-guest-egress.sh <environment-uuid> [generation-uuid]' >&2
   exit 64
 }
 id="$1"
+launch_generation="${2:-}"
 uuid_pattern='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 [[ "$id" =~ $uuid_pattern ]] || { echo 'Invalid environment UUID.' >&2; exit 64; }
+[[ -z "$launch_generation" || "$launch_generation" =~ $uuid_pattern ]] || {
+  echo 'Invalid generation UUID.' >&2; exit 64
+}
 
 base=/srv/trinity-node
 namespace="trinity-$id"
@@ -24,13 +28,12 @@ complete=false
 tap_address_added=false
 default_route_added=false
 
-for command in awk bridge cut flock grep ip jq nft python3 stat systemctl; do
+for command in awk bridge cp cut flock grep ip jq mktemp nft python3 readlink rm stat systemctl; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
 [[ -d "$base/volumes" && ! -L "$base/volumes" && -d "$volume" && ! -L "$volume" &&
-   -f "$volume/runtime.json" && ! -L "$volume/runtime.json" &&
-   -e "/run/netns/$namespace" && ! -L "/run/netns/$namespace" ]] || {
-  echo 'The environment volume, runtime metadata, or network namespace is missing or unsafe.' >&2
+   -f "$volume/runtime.json" && ! -L "$volume/runtime.json" ]] || {
+  echo 'The environment volume or runtime metadata is missing or unsafe.' >&2
   exit 1
 }
 [[ $(stat -c %u "$volume") == 0 && $(stat -c %a "$volume") == 700 &&
@@ -54,10 +57,58 @@ ip -o -4 address show dev "$bridge" | grep -Fq 'inet 172.29.240.1/20 ' || {
 
 for unit in $(systemctl list-units --type=service --state=active --no-legend --plain 'trinity-vm@*.service' | awk '{print $1}'); do
   case "$unit" in
-    "trinity-vm@$id-"*) echo 'The environment VMM is active; stop it and confirm shutdown first.' >&2; exit 1 ;;
+    "trinity-vm@$id-"*)
+      # The VM launcher invokes this helper while starting this very instance
+      # (it passes the generation as the second argument, never settable from
+      # the sandboxed unit); any other active VMM for the environment is
+      # refused before reconfiguration.
+      [[ -n "$launch_generation" && "$unit" == "trinity-vm@$id-$launch_generation.service" ]] && continue
+      echo 'The environment VMM is active; stop it and confirm shutdown first.' >&2; exit 1 ;;
   esac
 done
-if ip netns pids "$namespace" | grep -q .; then
+
+if [[ ! -e "/run/netns/$namespace" ]]; then
+  if [[ "$(readlink /proc/self/ns/mnt)" != "$(readlink /proc/1/ns/mnt)" ]]; then
+    # A bind mount created inside an isolated mount namespace (e.g. this
+    # sandboxed egress unit) would vanish with the namespace and leave a stale
+    # namespace file behind. The VM launcher runs in the host mount namespace
+    # and performs the reconstruction before starting the VMM.
+    echo 'Isolated mount namespace: deferring namespace reconstruction to the VM launcher.' >&2
+    exit 0
+  fi
+  # Ephemeral network reconstruction (e.g. after a host reboot): the persistent
+  # volume, runtime identity and data disk are required and never modified;
+  # only the ephemeral namespace/tap are rebuilt. The same guards as the explicit
+  # recovery script keep both paths convergent, and the fresh-volume provisioner
+  # remains the only code allowed to create a data disk.
+  [[ -f "$base/.trinity-storage-mode" && ! -L "$base/.trinity-storage-mode" ]] || {
+    echo 'Host storage is not provisioned; refusing automatic network reconstruction.' >&2
+    exit 1
+  }
+  [[ -f "$volume/data.ext4" && ! -L "$volume/data.ext4" ]] || {
+    echo 'The existing data disk is required for network reconstruction; no volume will be created.' >&2
+    exit 1
+  }
+  guest_uid="$(jq -er '.uid | select(type == "number" and . >= 100000 and . <= 2147483647 and floor == .)' "$volume/runtime.json")"
+  guest_gid="$(jq -er '.gid | select(type == "number" and . >= 100000 and . <= 2147483647 and floor == .)' "$volume/runtime.json")"
+  exec 8>/run/lock/trinity-firecracker-provision.lock
+  flock -n 8 || { echo 'Another provisioning or recovery operation is active.' >&2; exit 1; }
+  [[ ! -e "/run/netns/$namespace" && ! -L "/run/netns/$namespace" ]] || {
+    echo 'A network namespace appeared concurrently; aborting reconstruction.' >&2
+    exit 1
+  }
+  if [[ -f "$network_file" && ! -L "$network_file" ]]; then
+    backup="$(mktemp "$volume/network.pre-reboot.XXXXXXXX.json")"
+    cp -p -- "$network_file" "$backup"
+    rm -- "$network_file"
+  fi
+  ip netns add "$namespace"
+  ip -n "$namespace" link set lo up
+  ip netns exec "$namespace" ip tuntap add name tap0 mode tap user "$guest_uid" group "$guest_gid"
+  ip -n "$namespace" link set tap0 up
+  echo "Reconstructed the ephemeral network namespace for $id; user data disk and runtime identity were preserved." >&2
+fi
+if ip netns pids "$namespace" 2>/dev/null | grep -q .; then
   echo 'The environment network namespace still has a process; stop and confirm it before reconfiguration.' >&2
   exit 1
 fi

@@ -16,17 +16,22 @@
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
+    "@fastify/websocket": "^11.3.4",
+    "@opentelemetry/api": "^1.10.0",
     "@trinity-harness/contracts": "*",
     "@trinity-harness/core": "*",
     "@trinity-harness/db": "*",
+    "@trinity-harness/media-gateway": "*",
     "@trinity-harness/otel": "*",
     "@trinity-harness/redis": "*",
     "@trinity-harness/shared": "*",
     "fastify": "^5.12.5",
+    "ws": "^8.22.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1",
+    "@types/ws": "^8.18.2",
     "dotenv": "^18.0.4",
     "pg": "^8.23.0",
     "tsx": "^4.23.15"

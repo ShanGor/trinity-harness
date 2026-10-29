@@ -9,8 +9,10 @@ export default defineConfig({
     allowedHosts: ['sam-pc'],
     proxy: {
       // Browser talks only to the vite dev server; API calls are forwarded.
+      // WebSocket upgrades (streaming ASR) need explicit proxying too.
       '/api': {
         target: 'http://127.0.0.1:3000',
+        ws: true,
         configure(proxy) {
           proxy.on('proxyRes', (upstream, _request, response) => {
             // An interrupted upstream SSE response must close the downstream

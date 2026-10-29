@@ -1,8 +1,8 @@
 # 电话模式设计
 
-> 状态：**第一阶段（轮流讲话 MVP）已实现并通过自动化与隔离浏览器检查，真实设备端到端验收待完成；第二阶段（流式识别与独立实时媒体面）未交付。**
+> 状态：**第一阶段（轮流讲话 MVP）已实现并通过自动化与隔离浏览器检查；流式 ASR（`/api/speech/asr/stream` WebSocket 代理 + provisional/final 字幕 + VAD 端点提交）与电话配额/指标已实现并通过自动化与真实上游冒烟；WebRTC 独立媒体面与 AEC/barge-in 未交付。**
 >
-> 本文记录已确认的产品、技术设计与当前交付边界。第一阶段不得描述为已经完成真实手机/桌面设备验收；第二阶段列出的能力均不得由现有语音输入、单条回复朗读或第一阶段电话界面推导为已经具备。
+> 本文记录已确认的产品、技术设计与当前交付边界。已交付部分不得描述为已经完成真实手机/桌面设备验收（物理麦克风/扬声器、iOS Safari/Android Chrome 与端到端延迟仍待验收）；未交付能力均不得由现有实现推导为已经具备。
 
 ## 1. 目标与产品定位
 
@@ -26,14 +26,14 @@ Composer 中现有麦克风入口继续保持“**语音转草稿**”：录音�
 
 ## 2. 分阶段范围
 
-| 能力       | 现有语音 I/O 基础              | 第一阶段：电话 MVP（已实现，设备验收待完成）            | 第二阶段（未交付）                            |
-| ---------- | ------------------------------ | ------------------------------------------------------- | --------------------------------------------- |
-| 语音输入   | 批量录音识别后进入草稿         | 电话内按 utterance 批量识别，并进入同一现有 prompt 流程 | 流式 ASR、部分/最终识别结果和更低延迟端点检测 |
-| Agent 协议 | 普通 ACP prompt/SSE            | 完整复用，不新增电话 session kind 或私有 Agent 业务流   | 继续复用 ACP；媒体升级不改写工具与审批权限    |
-| 语音输出   | 单条回复朗读、Qwen3-TTS PCM 流 | Assistant 可朗读文本按句合成、按序播放和取消            | 独立实时媒体传输与更强的播放/采集协同         |
-| 对话方式   | 手动录音、手动朗读             | 明确轮流讲话；合成和播放期关麦                          | 目标为 AEC 与 barge-in 支持的近全双工体验     |
-| 媒体传输   | 鉴权 HTTP + SSE 语音代理       | 继续复用现有语音代理，无 WebRTC                         | WebRTC 独立媒体面、短期媒体 token             |
-| 治理       | 现有模型/会话治理              | 沿用现有治理，不宣称已有电话专项配额和指标              | 电话专项配额、媒体容量治理和指标              |
+| 能力       | 现有语音 I/O 基础              | 第一阶段：电话 MVP（已实现，设备验收待完成）                   | 后续（WebRTC/AEC 未交付）                                                        |
+| ---------- | ------------------------------ | -------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| 语音输入   | 批量录音识别后进入草稿         | 流式 ASR：实时 partial 字幕 + VAD final 自动提交，批量路径兜底 | 更低延迟端点检测随 WebRTC/AEC 演进                                               |
+| Agent 协议 | 普通 ACP prompt/SSE            | 完整复用，不新增电话 session kind 或私有 Agent 业务流          | 继续复用 ACP；媒体升级不改写工具与审批权限                                       |
+| 语音输出   | 单条回复朗读、Qwen3-TTS PCM 流 | Assistant 可朗读文本按句合成、按序播放和取消                   | 独立实时媒体传输与更强的播放/采集协同                                            |
+| 对话方式   | 手动录音、手动朗读             | 明确轮流讲话；合成和播放期关麦                                 | 目标为 AEC 与 barge-in 支持的近全双工体验                                        |
+| 媒体传输   | 鉴权 HTTP + SSE 语音代理       | 流式 ASR 走鉴权 WebSocket 代理；TTS 走 SSE；无 WebRTC          | WebRTC 上下行已交付（werift 适配器 + RTCPeerConnection 客户端）；TURN/AEC 未交付 |
+| 治理       | 现有模型/会话治理              | 电话专项配额已强制（并发/字节/字符/速率）+ 脱敏指标已上报      | WebRTC 媒体容量治理与媒体质量指标                                                |
 
 第一阶段复用了现有基础设施；UI、状态 fencing 和自动化检查已经实现，但真实设备、真实语音链路和端到端延迟仍须按下文独立验收。
 
@@ -105,9 +105,9 @@ flowchart LR
 ### 4.2 一轮轮流讲话
 
 1. **进入电话**：在当前 Chat/Work 上创建新的本地 `callId` 并绑定其 `sessionId`，初始化 `responseEpoch`；New 草稿在首个有效 prompt 的原有创建流程后完成绑定。用户手势内准备麦克风和 AudioContext。
-2. **采集 utterance**：仅在页面可见、未静音且处于可采集状态时开麦，为本次录音创建新的 `utteranceId`。使用现有有界 MediaRecorder/静音检测能力形成一次完整录音。
-3. **批量识别**：停止采集后，将完整音频经现有代理交给批量 Fun-ASR。此阶段没有流式部分转写；返回前后都检查电话与 utterance 是否仍有效。
-4. **提交普通 prompt**：有效且非空的识别文本通过现有 `session/prompt` 进入绑定的 `sessionId`。这是电话模式与“语音转草稿”入口的差别；提交仍使用现有请求 ID、幂等、排队和错误恢复语义，不新增电话专用 Agent 方法。服务端返回的 `promptId` 是当前语音响应的稳定关联身份。
+2. **采集 utterance**：仅在页面可见、未静音且处于可采集状态时开麦，为本次录音创建新的 `utteranceId`。首选流式路径：AudioWorklet 采集 16 kHz PCM16 经鉴权 WebSocket 代理持续上送，上游 VAD 端点产出 final；代理不可用则回退 MediaRecorder 批量录音 + 本地静音检测。
+3. **识别**：流式模式下 upstream 返回 partial（仅字幕）与 final（端点，即 utterance 文本），返回前后都检查电话与 epoch 是否仍有效；批量模式下停止采集后经现有代理交给批量 Fun-ASR。
+4. **提交普通 prompt**：有效且非空的识别文本（流式 final 或批量转写）通过现有 `session/prompt` 进入绑定的 `sessionId`。这是电话模式与“语音转草稿”入口的差别；提交仍使用现有请求 ID、幂等、排队和错误恢复语义，不新增电话专用 Agent 方法。服务端返回的 `promptId` 是当前语音响应的稳定关联身份。
 5. **接收会话更新**：消息、工具进度、审批和终止状态继续经 `packages/client-acp` 与 ACP SSE 到达。电话文字记录与普通会话显示同一份内容。
 6. **逐句合成**：只把 Assistant 主响应中的稳定、可朗读文本按句切分，不把工具输出、执行详情或审批决定当作普通回答朗读。未闭合的 Markdown 链接、行内代码、代码块和裸 URL 所在尾部等待最终快照，不能朗读半截 URL/代码；流式文本发生非追加式修订时停止旧播报，并在最终快照按正确文本恢复。每句独立调用 Qwen3-TTS 的现有流式合成路径，句内可流式接收 PCM，句间按既定顺序播放。
 7. **关麦播放**：从进入合成/播放阶段起不采集麦克风，因此不会把扬声器声音作为下一句话识别，也不存在第一阶段的同时说话检测。
@@ -175,6 +175,7 @@ synthesizing / speaking
 | `sessionId`     | 进入时绑定的现有 Chat/Work ID；用于确认结果仍属于当前授权会话。不得在电话中途因 UI 导航把旧回调静默路由到另一会话。                    |
 | `utteranceId`   | 每次录音生成的 ID；关联录音、批量 ASR 结果和随后的本地提交尝试，防止旧识别文本覆盖或提交为新一句话。                                   |
 | `promptId`      | 普通 prompt 提交返回的服务端稳定身份；优先用它关联用户/Assistant 投影，历史分页重建临时 React key 后也不能回退到较早的同文本问答。     |
+| `streamEpoch`   | 流式 ASR 会话代数；静音、打断、挂断递增，迟到 final 依此失效，防止暂停窗口外的识别文本进入新轮次。                                     |
 | `responseEpoch` | 当前电话内单调递增的本地响应代数；新响应、点按打断、挂断及其他使播放失效的操作推进代数，用于淘汰旧 TTS Promise、SSE 音频块和排队句子。 |
 
 具体要求：
@@ -213,58 +214,61 @@ synthesizing / speaking
 - ACP/SSE 重连继续按已交付游标和 PG 修复缺口。电话模式不得建立独立的组件级 EventSource 或绕过现有 committed/live chunk 规则。
 - 播放取消、打断或失败不自动重放有未知效果的工具，也不自动重发结果未知的 prompt。
 
-### 7.3 第一阶段明确不具备
+### 7.3 仍然不具备
 
-- 流式 ASR 部分结果、低延迟流式端点检测。
-- 播放期间持续采集、AEC、声学 barge-in 或全双工对话。
+- 播放期间持续采集、AEC、声学 barge-in 或全双工对话（流式 ASR 不改变轮流讲话约束：播放/思考期间仍暂停采集）。
 - WebRTC 媒体连接、TURN、独立媒体网关或短期媒体 token。
 - 后台持续录音、跨页面刷新恢复原电话媒体状态。
 - 语音审批、语音授予工具权限或挂断自动取消 Agent。
-- 电话专项配额、媒体容量配额和完整电话指标体系。
+- WebRTC 相关的媒体容量配额与媒体质量指标（建连/丢包/抖动/barge-in 延迟）；已交付的配额与指标见 §8.4。
 
-## 8. 第二阶段设计方向（全部未交付）
+## 8. 后续能力交付状态
 
-第二阶段是后续演进目标，不是第一阶段已经隐藏实现的能力。实施前仍需独立完成契约、安全审查、部署设计与验收。
+### 8.1 流式 ASR（已交付）
 
-### 8.1 流式 ASR
+电话模式现在首选流式识别：
 
-目标是将音频分片持续送入识别通道，区分 provisional/final 文本，并以明确端点提交最终 utterance。需要处理重连、乱序、重复分片、识别修订和迟到 final；provisional 字幕不能直接成为 prompt，也不能覆盖更新的人工更正。
+1. **链路**：浏览器 AudioWorklet 采集 16 kHz PCM16 → 100 ms 帧 → 鉴权 `GET /api/speech/asr/stream`（WebSocket，`?token=` 与 SSE 同规则）→ 服务端代理至 Fun-ASR `/ws` → 结果回传。浏览器不直连 Fun-ASR；代理做租户级配额（连接数/字节/速率，见 §8.4）与帧大小约束。
+2. **字幕**：upstream `is_final:false` 为 provisional，只更新电话字幕，永不成 prompt；`is_final:true` 为 VAD 端点后的最终段，走与批量识别完全相同的提交流程与 fencing。`append_to_previous`（标点回插）不入 prompt。
+3. **端点**：VAD 端点检测在上游（`split_silence_ms`，默认 700ms）；采集暂停期间不上送音频，恢复后继续识别。
+4. **fencing**：迟到 final 由 `callId + streamEpoch + 通话状态门禁` 隔离；静音、打断、挂断使其失效。
+5. **兜底**：代理不可用/升级被拒/无 speech 配置时自动回退批量 MediaRecorder 路径（composer 语音转草稿始终走批量）。
 
-在流式 ASR 真正交付前，第一阶段只能展示批量识别状态和最终文本，不得宣称“实时听懂”或展示伪造的逐字结果。
+已实现并通过：服务端代理测试（真实帧中继、配额拒绝 1013、鉴权拒绝）、控制器流式测试（partial/final、打断/静音/挂断 fencing、意外终止可重连）、上游真实冒烟（PCM 流 → partial/final/flush）。
 
-### 8.2 WebRTC 独立媒体面与短期 token
+### 8.2 WebRTC 独立媒体面与短期 token（上下行已交付；TURN/AEC 未交付）
 
-目标是使用经鉴权的 WebRTC 媒体通道承载实时麦克风/播放音频，ACP POST + SSE 继续承载 prompt、文本、工具和审批业务：
+已交付（docs/webrtc-media-design.md §7）：信令契约与端口、短期 token、Signaling WebSocket、**werift 媒体网关适配器**（`packages/media-gateway`，G.711 上下行、纯 TS：上行喂 Fun-ASR，下行 `media.speak` → 配额化 Qwen3-TTS → μ-law RTP → 浏览器播放，`media.tts_ended` 结算）、**浏览器 `RTCPeerConnection` 客户端**（通话控制器按 WebRTC → 流式 ASR → 批量自动降级，下行故障回退 SSE TTS）、`concurrentMediaSessions` 配额。已通过进程内真实 RTP 双向回环测试、真实 Fun-ASR 上游冒烟与真实 Qwen3-TTS 下行冒烟。
 
-- 音频帧不进入 ACP 文本流，也不逐帧写入 PG。
-- 信令与媒体访问需要明确的认证、授权、过期和撤销机制。
-- 短期 token 应限定用途、受众和有效期，并绑定经过服务端确认的媒体会话范围；不得把长期登录 token 放入媒体 URL、日志或不可信客户端配置。
-- 媒体 token 不等于会话所有权、工具权限或审批授权；每个 Agent 业务操作仍走原有鉴权。
-- NAT/TURN、断线重连、媒体网关容量和浏览器兼容性均是独立交付门槛。
+**仍未交付**：TURN/coturn 公网部署（当前 ICE-LITE host 候选仅覆盖 LAN/同机）、AEC/barge-in（媒体面已通，但回声消除与真实插话检出需设备验收；打断仍为显式点按）、媒体质量与前端延迟指标。通话中媒体失败进入可重连错误态；建立失败自动回退已交付路径。目标与边界以 [webrtc-media-design.md](webrtc-media-design.md) 为准。
 
-当前没有因此获得 WebRTC 或短期媒体 token 能力。
+### 8.3 AEC 与 barge-in（未交付）
 
-### 8.3 AEC 与 barge-in
+目标维持原设计。流式 ASR 期间仍“播放期不采集”，该约束不能被解释为已经实现 AEC 或 barge-in。
 
-目标是引入声学回声消除、可靠的播放参考信号、采集/播放时钟协同和语音活动判断，使用户在 Assistant 播放时开口能够被识别并触发受控打断。必须区分回声、环境噪声和真实用户语音，并定义误打断、重复utterance及识别修订的处理。
+### 8.4 配额和指标（已交付服务端部分）
 
-第一阶段通过“播放期不采集”回避该问题，这一约束不能被解释为已经实现 AEC 或 barge-in。
+**配额**（`tenantQuotaSchema` 扩展字段，存于既有 `tenants.quota` JSONB 列，无需迁移；服务端进程内滑动窗口强制，未配置字段=不限量，配额读取失败拒绝请求）：
 
-### 8.4 配额和指标
+- `concurrentAsrStreams`：每租户并发流式 ASR 连接数（超出关闭 1013）；
+- `concurrentTtsStreams`：每租户并发 TTS 流数（超出 429）；
+- `hourlyAsrBytes`：每租户滚动一小时识别音频字节（批量体 + 流式帧累计，超出 429/1013）；
+- `hourlyTtsCharacters`：每租户滚动一小时合成字符数（超出 429）；
+- `speechRequestsPerMinute`：每租户滚动一分钟语音请求速率（批量 + 流式握手，超出 429/1013）。
 
-第二阶段目标包括电话/媒体专项配额与容量治理，例如按租户或部署策略限制并发媒体会话、ASR 音频时长、TTS 字符/合成时长、请求速率和媒体资源占用，并保留现有模型配额与 usage 语义。
+被拒绝的请求不消耗 bytes/characters 窗口（速率窗口仍计数防刷）。无 `UsagePort` 或未认证部署不做语音配额（与既有 opt-in 语义一致）。
 
-目标指标至少覆盖：
+**指标**（OTel，无 SDK 时 no-op；属性仅有 `kind`/`reason`，不含租户/会话/utterance）：
 
-- 麦克风授权与呼叫建立成功率；
-- ASR 首个部分结果、最终结果和失败延迟；
-- prompt 到首个可播放音频的端到端延迟；
-- TTS 首音、句间停顿、播放 underrun 和取消延迟；
-- WebRTC 建连、重连、丢包/抖动及媒体质量；
-- barge-in 检出与停止播放延迟、误打断率；
-- 活跃媒体会话、ASR/TTS 使用量、配额拒绝和上游容量。
+- `trinity.speech.requests`（asr/tts/asr_stream × ok/error/denied）
+- `trinity.speech.asr_audio_bytes`、`trinity.speech.tts_characters`
+- `trinity.speech.asr_partials`、`trinity.speech.asr_finals`
+- `trinity.speech.tts_stream_seconds`、`trinity.speech.{tts,asr}_active_streams`
+- `trinity.speech.quota_denied`（按 reason）
 
-指标不得包含原始音频、prompt/识别文本、用户身份、会话路径或其他秘密；不得使用 `callId`、`sessionId`、`utteranceId` 等高基数字段作为普通指标标签。上述专项配额和指标目前均未交付，不能以现有通用 turn/tool 指标冒充。
+前端延迟类指标（prompt→首音、barge-in 延迟）与 WebRTC 媒体质量指标随 WebRTC 阶段交付。
+
+指标不得包含原始音频、prompt/识别文本、用户身份、会话路径或其他秘密；不得使用 `callId`、`sessionId`、`utteranceId` 等高基数字段作为普通指标标签。
 
 ## 9. 验收
 
@@ -305,4 +309,15 @@ synthesizing / speaking
 
 ### 9.5 第二阶段验收状态
 
-第二阶段尚无交付验收结论。流式 ASR、WebRTC、短期 token、AEC/barge-in、电话专项配额和指标必须分别建立实现与故障/安全/容量测试后，才能更新状态；第一阶段上述任何测试通过都不能作为这些能力已交付的证据。
+已交付（自动化通过；真实设备延迟待验收）：
+
+- **流式 ASR**：§8.1 全链路（WS 代理、partial/final、VAD 端点提交、streamEpoch fencing、批量回退）；服务端代理测试、控制器流式测试与真实 Fun-ASR 上游冒烟通过。
+- **电话配额与指标**：§8.4 全部配额字段在服务端强制（429/1013），OTel 指标按 bounded 属性上报；计量单元测试与 HTTP/WS 拒绝路径测试通过。
+
+未交付（不得由上述交付推导）：
+
+- **TURN 与 AEC/barge-in**：WebRTC 上下行已交付（werift 适配器 + 浏览器客户端，webrtc-media-design.md §7），但 TURN 公网部署与 AEC/barge-in（真实插话检出，打断当前为显式点按）未交付；这些能力不得由媒体面交付推导。
+- **AEC 与 barge-in**：依赖 WebRTC 媒体面先就绪；播放期仍不采集。
+- **前端延迟类与媒体质量指标**：prompt→首音、barge-in 延迟、WebRTC 建连/丢包/抖动随 WebRTC 媒体客户端交付。
+
+流式 ASR 与配额的任何第一阶段测试通过都不能作为 WebRTC/AEC 已交付的证据。

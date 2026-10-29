@@ -11,15 +11,55 @@ base=/srv/trinity-node
 manifest="$base/instances/$instance.json"
 volume="$base/volumes/$environment"
 jail="$base/jailer/firecracker/$generation/root"
+namespace="trinity-$environment"
 
 # Provisioning deliberately fails closed: no blank replacement for an absent user disk.
 for file in "$manifest" "$volume/data.ext4" "$volume/runtime.json" "$base/images/vmlinux" "$base/images/rootfs.ext4"; do
   [[ -f "$file" && ! -L "$file" ]] || exit 66
 done
-[[ -c /dev/kvm && -e "/run/netns/trinity-$environment" ]] || exit 69
-[[ $(jq -r '.id' "$manifest") == "$environment" && $(jq -r '.generation' "$manifest") == "$generation" ]] || exit 65
+[[ -c /dev/kvm ]] || exit 69
 uid=$(jq -er '.uid | select(type == "number" and . >= 100000 and . <= 2147483647 and floor == .)' "$volume/runtime.json")
 gid=$(jq -er '.gid | select(type == "number" and . >= 100000 and . <= 2147483647 and floor == .)' "$volume/runtime.json")
+
+if [[ -e "/run/netns/$namespace" ]] && ! ip -n "$namespace" link show lo >/dev/null 2>&1; then
+  # Stale namespace file: the bind mount behind it is gone (for example it was
+  # created inside an isolated mount namespace), so drop the file and rebuild.
+  ip netns del "$namespace" 2>/dev/null || true
+  rm -f -- "/run/netns/$namespace"
+fi
+if [[ ! -e "/run/netns/$namespace" ]]; then
+  # Host-reboot recovery: rebuild only the ephemeral namespace/TAP from the
+  # protected existing volume identity. The data disk, runtime identity and
+  # immutable images are never modified or recreated; the fresh-volume
+  # provisioner remains the only code allowed to create a data disk.
+  [[ -f "$base/.trinity-storage-mode" && ! -L "$base/.trinity-storage-mode" ]] || exit 69
+  exec 9>/run/lock/trinity-firecracker-provision.lock
+  flock -n 9 || exit 69
+  if [[ ! -e "/run/netns/$namespace" ]]; then
+    if [[ -f "$volume/network.json" && ! -L "$volume/network.json" ]]; then
+      backup="$(mktemp "$volume/network.pre-reboot.XXXXXXXX.json")"
+      cp -p -- "$volume/network.json" "$backup"
+      rm -- "$volume/network.json"
+    fi
+    ip netns add "$namespace"
+    ip -n "$namespace" link set lo up
+    ip netns exec "$namespace" ip tuntap add name tap0 mode tap user "$uid" group "$gid"
+    ip -n "$namespace" link set tap0 up
+    echo "Reconstructed ephemeral networking for $environment; user data disk preserved." >&2
+  fi
+elif ! ip -n "$namespace" link show tap0 >/dev/null 2>&1; then
+  # Live namespace with a lost ephemeral TAP (partial recovery): top up only
+  # the TAP; the namespace, data disk and runtime identity are untouched.
+  ip netns exec "$namespace" ip tuntap add name tap0 mode tap user "$uid" group "$gid"
+  ip -n "$namespace" link set tap0 up
+  echo "Reconstructed the ephemeral TAP for $environment; user data disk preserved." >&2
+fi
+# Idempotent egress validation/configuration in the host mount namespace. The
+# sandboxed egress unit defers namespace reconstruction to this launcher. The
+# generation argument scopes the active-VM guard to this starting instance.
+/usr/local/libexec/trinity-configure-firecracker-guest-egress "$environment" "$generation"
+
+[[ $(jq -r '.id' "$manifest") == "$environment" && $(jq -r '.generation' "$manifest") == "$generation" ]] || exit 65
 vcpus=$(jq -er '.vcpus | select(. >= 1 and . <= 32 and floor == .)' "$manifest")
 tenant=$(jq -er '.tenantId' "$manifest")
 user=$(jq -er '.userId' "$manifest")
@@ -46,4 +86,4 @@ jq -n --argjson cpu "$vcpus" --argjson memory "$memory" --arg environment "$envi
 chown "$uid:$gid" "$jail/config.json"
 exec /usr/local/bin/jailer --id "$generation" --exec-file /usr/local/bin/firecracker \
   --uid "$uid" --gid "$gid" --chroot-base-dir "$base/jailer" --cgroup-version 2 \
-  --netns "/run/netns/trinity-$environment" -- --config-file /config.json --api-sock /api.sock
+  --netns "/run/netns/$namespace" -- --config-file /config.json --api-sock /api.sock

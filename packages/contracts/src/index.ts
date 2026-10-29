@@ -27,3 +27,4 @@ export * from './personal-assistant.js';
 export * from './scheduling.js';
 export * from './environments.js';
 export * from './guest.js';
+export * from './media.js';
