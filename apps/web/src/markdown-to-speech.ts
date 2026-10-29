@@ -1,27 +1,75 @@
+import type { Nodes } from 'mdast';
+import remarkGfm from 'remark-gfm';
+import remarkParse from 'remark-parse';
+import { unified } from 'unified';
+
+const markdownProcessor = unified().use(remarkParse).use(remarkGfm);
+
+function renderChildren(node: Extract<Nodes, { children: unknown[] }>, separator = ''): string {
+  return node.children.map((child) => renderNode(child)).join(separator);
+}
+
+function isUrlOrEmailLabel(label: string): boolean {
+  return /^(?:https?:\/\/\S+|www\.\S+|[^\s@]+@[^\s@]+\.[^\s@]+)$/iu.test(label);
+}
+
 /**
- * Strips markdown syntax so assistant replies read naturally when spoken by
- * the TTS service. Purely presentational: the committed message text is
- * never modified, only the derived speech text is.
+ * Projects Markdown structure to speech without deleting ordinary text by
+ * keyword or punctuation. Rich display content and structured citations are
+ * separate inputs; callers only pass the assistant's Markdown body here.
+ */
+function renderNode(node: Nodes): string {
+  switch (node.type) {
+    case 'root':
+    case 'blockquote':
+    case 'list':
+    case 'listItem':
+      return renderChildren(node, '\n');
+    case 'paragraph':
+    case 'heading':
+    case 'emphasis':
+    case 'strong':
+    case 'delete':
+    case 'linkReference':
+      return renderChildren(node);
+    case 'link': {
+      const label = renderChildren(node);
+      // Autolinks have their target as their label. Speaking every URL
+      // character adds noise, while a prose label remains useful.
+      return isUrlOrEmailLabel(label.trim()) ? '' : label;
+    }
+    case 'table':
+      return renderChildren(node, '\n');
+    case 'tableRow':
+      return renderChildren(node, ' ');
+    case 'tableCell':
+      return renderChildren(node);
+    case 'text':
+    case 'inlineCode':
+      return node.value;
+    case 'break':
+      return '\n';
+    case 'code':
+    case 'definition':
+    case 'footnoteDefinition':
+    case 'footnoteReference':
+    case 'html':
+    case 'image':
+    case 'imageReference':
+    case 'thematicBreak':
+    case 'yaml':
+      return '';
+    default:
+      return '';
+  }
+}
+
+/**
+ * Returns derived speech text only; the committed/displayed Markdown is never
+ * modified. In particular, plain prose such as "Ground Truth Reference" and
+ * punctuation in C++, C#, snake_case or a*b is retained.
  */
 export function markdownToSpeechText(markdown: string): string {
-  return (
-    markdown
-      // Fenced code blocks carry no spoken value and often garble the reading.
-      .replace(/```[\s\S]*?(?:```|$)/g, ' ')
-      .replace(/`([^`\n]*)`/g, '$1')
-      .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
-      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-      .replace(/^\s{0,3}#{1,6}\s+/gm, '')
-      .replace(/^\s*>\s?/gm, '')
-      .replace(/^\s*(?:[-*+]|\d+[.)])\s+\[[ xX]\]\s+/gm, '')
-      .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, '')
-      .replace(/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/gm, ' ')
-      .replace(/\|/g, ' ')
-      .replace(/(\*\*|__)([^*_]+)\1/g, '$2')
-      .replace(/(\*|_)([^*_]+)\1/g, '$2')
-      .replace(/~~([^~]+)~~/g, '$1')
-      .replace(/[*_~#]+/g, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-  );
+  const tree = markdownProcessor.parse(markdown);
+  return renderNode(tree).replace(/\s+/gu, ' ').trim();
 }

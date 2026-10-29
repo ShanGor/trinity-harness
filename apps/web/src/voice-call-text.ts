@@ -1,14 +1,15 @@
 /**
  * Returns the conservative raw Markdown prefix whose speech rendering cannot
- * depend on an unfinished link, inline-code span, code fence or raw URL.
- * Content after the first such construct waits for more input (and ultimately
- * the final snapshot); plain sentences before it remain streamable.
+ * depend on an unfinished Markdown construct or raw URL. Content after the
+ * first such construct waits for more input (and ultimately the final
+ * snapshot); plain sentences before it remain streamable. This gate is only
+ * about streaming stability—the AST speech projection decides what to omit.
  */
 export function stableMarkdownPrefix(markdown: string, final: boolean): string {
   if (final) return markdown;
-  const linkOrCode = /[[`]/u.exec(markdown)?.index;
-  const rawUrl = /https?:\/\//iu.exec(markdown)?.index;
-  const end = Math.min(linkOrCode ?? markdown.length, rawUrl ?? markdown.length);
+  const markdownConstruct = /[[`\]*~|<]/u.exec(markdown)?.index;
+  const rawUrl = /(?:https?:\/\/|www\.)/iu.exec(markdown)?.index;
+  const end = Math.min(markdownConstruct ?? markdown.length, rawUrl ?? markdown.length);
   return markdown.slice(0, end);
 }
 

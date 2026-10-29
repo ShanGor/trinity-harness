@@ -717,7 +717,9 @@ export class VoiceCallController {
     const final = item.final || item.stopped || item.error || (!this.busy && !item.streaming);
     response.final = final;
     const plain = markdownToSpeechText(stableMarkdownPrefix(item.content, final));
-    this.setSnapshot({ ...this.snapshot, assistantText: markdownToSpeechText(item.content) });
+    // Captions and the ordinary transcript retain the original response. Only
+    // the independent TTS projection drops markup, code and link targets.
+    this.setSnapshot({ ...this.snapshot, assistantText: item.content });
 
     // A non-append-only streaming revision pauses speech until final rather
     // than permanently silencing the corrected answer.

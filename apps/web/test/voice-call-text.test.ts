@@ -120,8 +120,16 @@ describe('stableMarkdownPrefix', () => {
     expect(stableMarkdownPrefix('Read this. [Hello](https://example.', false)).toBe('Read this. ');
     expect(stableMarkdownPrefix('Run it. `npm', false)).toBe('Run it. ');
     expect(stableMarkdownPrefix('See https://example.', false)).toBe('See ');
+    expect(stableMarkdownPrefix('See www.example.', false)).toBe('See ');
     expect(stableMarkdownPrefix('[Hello](https://example.com)', true)).toBe(
       '[Hello](https://example.com)',
     );
+  });
+
+  it('holds AST-sensitive emphasis and tables without dropping ordinary final text', () => {
+    expect(stableMarkdownPrefix('Read this. **Bold', false)).toBe('Read this. ');
+    expect(stableMarkdownPrefix('Read this. | a | b |', false)).toBe('Read this. ');
+    expect(stableMarkdownPrefix('Use C++ and C#.', false)).toBe('Use C++ and C#.');
+    expect(stableMarkdownPrefix('Keep a*b and snake_case.', true)).toBe('Keep a*b and snake_case.');
   });
 });

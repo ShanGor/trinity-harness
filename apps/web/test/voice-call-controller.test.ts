@@ -387,6 +387,55 @@ describe('VoiceCallController', () => {
     controller.stop();
   });
 
+  it('does not repeat stable prose when streaming emphasis closes later', async () => {
+    const { controller, deps } = setup();
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+
+    controller.update(responseItems('First sentence. **Bold statement.', false), true, false);
+    await vi.waitFor(() =>
+      expect(deps.synthesize).toHaveBeenCalledWith('First sentence.', expect.anything()),
+    );
+    controller.update(responseItems('First sentence. **Bold statement.**', true), false, false);
+
+    await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
+    expect(vi.mocked(deps.synthesize).mock.calls.map(([text]) => text)).toEqual([
+      'First sentence.',
+      'Bold statement.',
+    ]);
+    controller.stop();
+  });
+
+  it('keeps raw captions and ordinary punctuation while excluding structured citations from TTS', async () => {
+    const { controller, deps } = setup();
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+
+    const content = 'Use C++ and C#. Ground Truth Reference is **visible**.';
+    const items = responseItems(content, true);
+    items[1]!.citationList = [
+      {
+        kind: 'web_source',
+        label: 'Display-only citation',
+        url: 'https://example.com/evidence',
+        callId: 'call-1',
+        evidenceSeq: 1,
+      },
+    ];
+    controller.update(items, false, false);
+
+    await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
+    expect(deps.synthesize).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(deps.synthesize).mock.calls.map(([text]) => text)).toEqual([
+      'Use C++ and C#.',
+      'Ground Truth Reference is visible.',
+    ]);
+    expect(controller.getSnapshot().assistantText).toBe(content);
+    controller.stop();
+  });
+
   it('continues with the final answer when a tool archive interrupts provisional speech', async () => {
     const firstSynthesis = deferred<{
       sampleRate: number;
