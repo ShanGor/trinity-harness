@@ -1216,34 +1216,17 @@
   font-variant-numeric: tabular-nums;
 }
 
-.voice-call-orb {
-  display: grid;
-  place-items: center;
+.xdu-embedded {
   flex-shrink: 0;
-  width: 80px;
-  height: 80px;
-  margin-top: 20px;
-  border-radius: 50%;
-  background: var(--primary-soft);
-  color: var(--primary);
-  font-size: 38px;
-  transition: box-shadow 180ms ease;
+  width: min(260px, 100%);
+  height: clamp(140px, 25dvh, 240px);
+  margin-top: 8px;
+  text-align: center;
 }
 
-.voice-call-orb--listening,
-.voice-call-orb--speaking {
-  box-shadow:
-    0 0 0 12px rgb(36 99 75 / 7%),
-    0 0 0 28px rgb(36 99 75 / 4%);
-}
-
-.voice-call-orb--speaking {
-  animation: voice-call-pulse 1.8s ease-in-out infinite;
-}
-
-.voice-call-orb--error {
-  background: #fff1f0;
-  color: #cf3f32;
+.xdu-embedded .xdu-canvas {
+  width: 100%;
+  height: 100%;
 }
 
 .voice-call-status.ant-typography {
@@ -1362,14 +1345,6 @@
   background: #cf3f32;
 }
 
-@keyframes voice-call-pulse {
-  50% {
-    box-shadow:
-      0 0 0 18px rgb(36 99 75 / 8%),
-      0 0 0 36px rgb(36 99 75 / 3%);
-  }
-}
-
 @media (max-width: 600px) {
   .voice-call-overlay {
     padding: 0;
@@ -1384,7 +1359,7 @@
     border-radius: 0;
   }
 
-  .voice-call-orb {
+  .xdu-embedded {
     margin-top: auto;
   }
 
@@ -1408,11 +1383,5 @@
   .voice-call-mini {
     right: 16px;
     bottom: max(16px, env(safe-area-inset-bottom));
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .voice-call-orb--speaking {
-    animation: none;
   }
 }

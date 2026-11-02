@@ -22,5 +22,7 @@ export const speechSynthesisRequestSchema = z
     text: z.string().min(1).max(50_000),
     /** A call can pin its voice for all sentence requests, including local status hints. */
     voiceStyle: speechPreferencesSchema.shape.voiceStyle.optional(),
+    /** Language for otherwise language-neutral speech, inferred from the current prompt. */
+    languageHint: z.enum(['Chinese']).optional(),
   })
   .strict();

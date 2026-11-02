@@ -114,7 +114,7 @@ describe('WeriftMediaGateway loopback (docs/webrtc-media-design.md §2)', () => 
     expect(session).not.toBeNull();
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
     expect(fakeAsr.receivedConfigs).toHaveLength(1);
-    expect(JSON.parse(fakeAsr.receivedConfigs[0]!)).toMatchObject({ split_silence_ms: 1800 });
+    expect(JSON.parse(fakeAsr.receivedConfigs[0]!)).toMatchObject({ split_silence_ms: 500 });
 
     // ---- browser side (werift peer) ----
     const browser = new RTCPeerConnection({ iceUseTcp: false, iceUseIpv4: true });

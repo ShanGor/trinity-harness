@@ -1,3 +1,5 @@
+import { publishResponseSpeech } from './response-speech-events';
+import { XDuCompanion, companionState } from './x-du-companion';
 import type { PromptDelivery } from '@trinity-harness/shared';
 import { newId, pendingCreationSchema } from '@trinity-harness/shared';
 import {
@@ -1609,8 +1611,28 @@ export default function App() {
           )}
         </Flex>
       </Layout.Content>
+      {page === 'conversation' && (!voiceCall.snapshot.active || voiceCall.minimized) && (
+        <XDuCompanion
+          sessionId={sessionId}
+          state={companionState(
+            items,
+            busy,
+            !!approval,
+            voiceCall.snapshot.status,
+            voiceCall.snapshot.muted,
+          )}
+        />
+      )}
       <VoiceCallPanel
         call={voiceCall.snapshot}
+        sessionId={sessionId}
+        companionState={companionState(
+          items,
+          busy,
+          !!approval,
+          voiceCall.snapshot.status,
+          voiceCall.snapshot.muted,
+        )}
         minimized={voiceCall.minimized}
         onMinimize={() => voiceCall.setMinimized(true)}
         onOpen={() => voiceCall.setMinimized(false)}
@@ -1863,13 +1885,16 @@ function AssistantContent({
   const synthesisAbortRef = useRef<AbortController | null>(null);
 
   const stopSpeech = useCallback(() => {
-    if (stopActiveSpeech === stopSpeech) stopActiveSpeech = null;
+    const wasActive = stopActiveSpeech === stopSpeech;
+    if (wasActive) stopActiveSpeech = null;
     synthesisAbortRef.current?.abort();
     synthesisAbortRef.current = null;
     pcmPlayerRef.current?.stop();
     pcmPlayerRef.current = null;
     setSpeechState('idle');
-  }, []);
+    if (wasActive && browserSessionId)
+      publishResponseSpeech({ sessionId: browserSessionId, phase: 'stopped' });
+  }, [browserSessionId]);
 
   useEffect(() => stopSpeech, [stopSpeech]);
 
@@ -1885,7 +1910,11 @@ function AssistantContent({
     synthesisAbortRef.current = abort;
     // Create/resume audio inside the click gesture. Deferring this until after
     // fetch() can leave Chrome's AudioContext suspended with no audible output.
-    const player = new PcmPlayer(24_000, stopSpeech);
+    const player = new PcmPlayer(24_000, () => {
+      if (abort.signal.aborted) return;
+      stopSpeech();
+      if (browserSessionId) publishResponseSpeech({ sessionId: browserSessionId, phase: 'ended' });
+    });
     pcmPlayerRef.current = player;
     try {
       await player.resume();
@@ -1899,6 +1928,7 @@ function AssistantContent({
       }
       setSpeechState('playing');
       const reader = stream.getReader();
+      let started = false;
       try {
         for (;;) {
           const { done, value } = await reader.read();
@@ -1906,6 +1936,11 @@ function AssistantContent({
           if (abort.signal.aborted) {
             await reader.cancel();
             return;
+          }
+          if (value.length && !started) {
+            started = true;
+            if (browserSessionId)
+              publishResponseSpeech({ sessionId: browserSessionId, phase: 'playing' });
           }
           player.append(value);
         }
@@ -1919,7 +1954,7 @@ function AssistantContent({
         message.error(error instanceof Error ? error.message : 'Speech synthesis failed.');
       }
     }
-  }, [speechState, content, message, stopSpeech]);
+  }, [speechState, content, message, stopSpeech, browserSessionId]);
 
   return (
     <article className="assistant-response" aria-label="Trinity response">

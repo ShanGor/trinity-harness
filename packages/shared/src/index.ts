@@ -6,7 +6,10 @@ export {
   speechSynthesisRequestSchema,
 } from '@trinity-harness/contracts';
 export type { SpeechPreferences } from '@trinity-harness/contracts';
-export { VOICE_CALL_SILENCE_MS } from '@trinity-harness/contracts';
+export {
+  VOICE_CALL_ASR_SEGMENT_SILENCE_MS,
+  VOICE_CALL_SILENCE_MS,
+} from '@trinity-harness/contracts';
 export * from './ids.js';
 export * from './protocol.js';
 export * from './usage.js';

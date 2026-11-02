@@ -689,6 +689,42 @@ describe('VoiceCallController', () => {
     controller.stop();
   });
 
+  it('uses the current Chinese question as the language hint for a numeric answer', async () => {
+    const { controller, deps } = setup({ transcribe: vi.fn(async () => '十九乘十九是多少？') });
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+    controller.update(responseItems('361', true), false, false);
+    await vi.waitFor(() =>
+      expect(deps.synthesize).toHaveBeenCalledWith(
+        '361',
+        expect.anything(),
+        DEFAULT_SPEECH_PREFERENCES,
+        'Chinese',
+      ),
+    );
+    controller.stop();
+  });
+
+  it('does not speak copied conversation source metadata in a streamed answer', async () => {
+    const { controller, deps } = setup();
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+
+    const answer = '三百六十一（19 × 19 = 361）。';
+    const source =
+      '[Conversation source eventId=01a19bc9-9a41-7000-8c1f-4b8bc9c1e1d7, seq=41, characters 0-19/19]';
+    controller.update(responseItems(`${answer}\n[Conversation source`, false), true, false);
+    await vi.waitFor(() => expect(deps.synthesize).toHaveBeenCalledTimes(1));
+    controller.update(responseItems(`${answer}\n${source}`, true), false, false);
+
+    await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
+    expect(vi.mocked(deps.synthesize).mock.calls.map(([text]) => text)).toEqual([answer]);
+    expect(controller.getSnapshot().assistantText).toBe(`${answer}\n${source}`);
+    controller.stop();
+  });
+
   it('continues with the final answer when a tool archive interrupts provisional speech', async () => {
     const firstSynthesis = deferred<{
       sampleRate: number;
@@ -1147,6 +1183,28 @@ describe('VoiceCallController', () => {
       },
     );
 
+    it.each([false, true])(
+      'recovers when speech produces no recognition text (manual=%s)',
+      async (manual) => {
+        const { controller, deps, streaming } = setupStreaming();
+        await controller.start();
+        streaming.handlers.onSpeechActivity();
+        if (manual) controller.finishUtterance();
+        await vi.advanceTimersByTimeAsync(5801);
+        expect(deps.submit).not.toHaveBeenCalled();
+        expect(streaming.session.finish).toHaveBeenCalled();
+        expect(controller.getSnapshot().status).toBe('listening');
+        streaming.handlers.onFinal('迟到的旧结果');
+        expect(deps.submit).not.toHaveBeenCalled();
+        FakeAudioContext.inputLevel = 150;
+        controller.finishUtterance();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(deps.transcribe).toHaveBeenCalled();
+        expect(deps.submit).toHaveBeenCalledOnce();
+        controller.stop();
+      },
+    );
+
     it('does not add another silence window after a delayed ASR final', async () => {
       const { controller, deps, streaming } = setupStreaming();
       await controller.start();
@@ -1241,7 +1299,7 @@ describe('VoiceCallController', () => {
       controller.stop();
     });
 
-    it('fails visibly rather than submitting stale segments when a continuation final never arrives', async () => {
+    it('falls back to batch rather than submitting stale segments when a continuation final never arrives', async () => {
       const { controller, deps, streaming } = setupStreaming();
       await controller.start();
       streaming.handlers.onSpeechActivity();
@@ -1250,8 +1308,9 @@ describe('VoiceCallController', () => {
       streaming.handlers.onPartial('未确认');
       await vi.advanceTimersByTimeAsync(5801);
       expect(deps.submit).not.toHaveBeenCalled();
-      expect(controller.getSnapshot().status).toBe('error');
+      expect(controller.getSnapshot().status).toBe('listening');
       expect(streaming.session.finish).toHaveBeenCalled();
+      expect(deps.onError).toHaveBeenCalledWith(expect.stringContaining('Please repeat'));
       controller.stop();
     });
     it('drives a full turn from VAD final to spoken answer and back to listening', async () => {

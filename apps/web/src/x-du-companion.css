@@ -1,0 +1,53 @@
+.xdu {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  color: #253332;
+  pointer-events: none;
+}
+.xdu-head,
+.xdu-actions {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  align-items: center;
+  pointer-events: auto;
+}
+.xdu-head span {
+  background: #fffffff0;
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+.xdu button {
+  pointer-events: auto;
+  cursor: pointer;
+  border: 1px solid #a9c9c0;
+  border-radius: 999px;
+  background: #fffffff0;
+  padding: 6px 10px;
+}
+.xdu-canvas {
+  width: min(540px, 100vw);
+  height: min(540px, 75dvh);
+  pointer-events: none;
+}
+.xdu-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.xdu-actions {
+  margin-bottom: 12px;
+}
+@media (max-width: 600px) {
+  .xdu {
+    bottom: 0;
+  }
+  .xdu-canvas {
+    width: min(100vw, 540px);
+    height: 88dvh;
+  }
+}

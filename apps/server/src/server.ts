@@ -2680,7 +2680,7 @@ export async function buildServer(
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           text: body.data.text,
-          language: detectSpeechLanguage(body.data.text),
+          language: detectSpeechLanguage(body.data.text, body.data.languageHint),
           instruct: preferences.voiceStyle,
         }),
         signal: AbortSignal.any([cancelled.signal, AbortSignal.timeout(300_000)]),

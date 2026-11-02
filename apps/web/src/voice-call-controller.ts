@@ -84,6 +84,7 @@ export interface VoiceCallDependencies {
     text: string,
     signal: AbortSignal,
     preferences?: SpeechPreferences,
+    languageHint?: 'Chinese',
   ): Promise<SpeechSynthesisStream>;
   createPlayer(sampleRate: number, onEnded: () => void, context: AudioContext): VoiceCallPlayer;
   /**
@@ -382,6 +383,7 @@ export class VoiceCallController {
       onSpeechActivity: () => {
         const turn = this.currentStreamingTurn(call);
         if (!turn) return;
+        if (turn.manual) this.setStatus('listening');
         turn.lastVoiceAt = Date.now();
         turn.localActivity = true;
         turn.waitingFinal = true;
@@ -457,7 +459,8 @@ export class VoiceCallController {
     if (this.currentStreamingTurn(turn.call) !== turn) return;
     if (turn.timer !== null) clearTimeout(turn.timer);
     turn.timer = null;
-    if (!turn.segments.length && !turn.partial) return;
+    // Local activity must also get a deadline when the recognizer returns no text.
+    if (!turn.segments.length && !turn.partial && !turn.waitingFinal) return;
     const silenceAt = (turn.lastVoiceAt ?? Date.now()) + VOICE_CALL_SILENCE_MS;
     const readyAt = turn.manual && !turn.waitingFinal ? Date.now() : silenceAt;
     const delay = Math.max(0, readyAt - Date.now());
@@ -477,10 +480,16 @@ export class VoiceCallController {
         if (remaining > 0) {
           turn.timer = setTimeout(() => this.scheduleStreamingTurn(turn), remaining);
         } else {
-          this.fail(
-            turn.call,
-            new Error('Speech recognition did not finish. Please reconnect and try again.'),
-          );
+          // A stalled persistent recognizer must not strand later turns. Drop
+          // its unconfirmed collection and resume with bounded batch recording.
+          this.cancelRecording();
+          const streaming = turn.call.streaming;
+          turn.call.streaming = null;
+          turn.call.streamEpoch += 1;
+          streaming?.finish();
+          this.setSnapshot({ ...this.snapshot, userText: '' });
+          this.deps.onError('Speech recognition did not finish. Please repeat your message.');
+          this.beginRecording(turn.call);
         }
         return;
       }
@@ -513,6 +522,7 @@ export class VoiceCallController {
     const turn = this.currentStreamingTurn(call);
     if (!turn) return;
     turn.manual = true;
+    if (turn.waitingFinal || turn.partial) this.setStatus('transcribing');
     this.scheduleStreamingTurn(turn);
   }
 
@@ -1141,7 +1151,12 @@ export class VoiceCallController {
         throw new Error('Voice preferences unavailable. Please reconnect the call.');
       if (abort.signal.aborted || !this.isCurrent(call) || epoch !== call.responseEpoch)
         return false;
-      const { sampleRate, stream } = await this.deps.synthesize(text, abort.signal, preferences);
+      const chinesePrompt = this.response && /[\p{Script=Han}]/u.test(this.response.transcript);
+      const numericSpeech = /\d/u.test(text) && !/[\p{L}]/u.test(text);
+      const { sampleRate, stream } =
+        chinesePrompt && numericSpeech
+          ? await this.deps.synthesize(text, abort.signal, preferences, 'Chinese')
+          : await this.deps.synthesize(text, abort.signal, preferences);
       if (sampleRate !== player.sampleRate) {
         throw new Error(`Unsupported speech sample rate (${sampleRate} Hz).`);
       }

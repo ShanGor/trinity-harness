@@ -3,6 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { detectSpeechLanguage } from '../src/speech-text.js';
 
 describe('detectSpeechLanguage', () => {
+  it('uses the prompt language only for language-neutral numeric speech', () => {
+    expect(detectSpeechLanguage('361。', 'Chinese')).toBe('Chinese');
+    expect(detectSpeechLanguage('361 apples', 'Chinese')).toBe('Auto');
+    expect(detectSpeechLanguage('361')).toBe('Auto');
+  });
   it('detects Chinese and mixed Chinese-dominant text', () => {
     expect(detectSpeechLanguage('你好世界')).toBe('Chinese');
     expect(detectSpeechLanguage('小猪佩奇（Peppa Pig）是英国作品')).toBe('Chinese');

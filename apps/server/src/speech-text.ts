@@ -6,7 +6,7 @@
  * faster-qwen3-tts backend resolves those on its own, so the reference's
  * keyword scoring is unnecessary here.
  */
-export function detectSpeechLanguage(text: string): string {
+export function detectSpeechLanguage(text: string, hint?: 'Chinese'): string {
   let han = 0;
   let kana = 0;
   let hangul = 0;
@@ -38,5 +38,6 @@ export function detectSpeechLanguage(text: string): string {
   if (kana > 0) return 'Japanese';
   if (han > 0 && han * 2 >= Math.max(latin, 1)) return 'Chinese';
   if (cyrillic > 0 && cyrillic * 2 >= Math.max(latin, 1)) return 'Russian';
+  if (hint && /\d/u.test(text) && !/[\p{L}]/u.test(text)) return hint;
   return 'Auto';
 }

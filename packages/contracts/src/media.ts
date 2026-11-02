@@ -11,6 +11,8 @@ export const MEDIA_TOKEN_TTL_SECONDS = 600;
 
 /** Shared phone-mode silence window, measured from the last microphone speech. */
 export const VOICE_CALL_SILENCE_MS = 1800;
+/** ASR segments can finalize sooner; the controller still owns the turn endpoint. */
+export const VOICE_CALL_ASR_SEGMENT_SILENCE_MS = 500;
 
 const sdpSchema = z
   .string()

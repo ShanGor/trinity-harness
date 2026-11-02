@@ -1,4 +1,4 @@
-import { VOICE_CALL_SILENCE_MS } from '@trinity-harness/shared';
+import { VOICE_CALL_ASR_SEGMENT_SILENCE_MS } from '@trinity-harness/shared';
 import { connectMicrophoneCapture, hasSpeechActivity } from './microphone-capture';
 
 /**
@@ -174,7 +174,7 @@ export async function startStreamingAsr(
         mode: '2pass',
         itn: true,
         diarize: false, // single-speaker phone mode: skip speaker embeddings
-        split_silence_ms: VOICE_CALL_SILENCE_MS,
+        split_silence_ms: VOICE_CALL_ASR_SEGMENT_SILENCE_MS,
       }),
     );
   };

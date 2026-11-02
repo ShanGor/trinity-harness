@@ -58,7 +58,7 @@ it('uses the shared silence window and reports microphone speech only while capt
     onEnd: vi.fn(),
   };
   const session = await startStreamingAsr(handlers);
-  expect(JSON.parse(send.mock.calls[0]![0])).toMatchObject({ split_silence_ms: 1800 });
+  expect(JSON.parse(send.mock.calls[0]![0])).toMatchObject({ split_silence_ms: 500 });
   const speech = { inputBuffer: { getChannelData: () => new Float32Array(1600).fill(0.1) } };
   processor.onaudioprocess?.(speech);
   expect(handlers.onSpeechActivity).not.toHaveBeenCalled();

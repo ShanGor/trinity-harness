@@ -6,6 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VoiceCallPanel } from '../src/voice-call-panel.js';
 import type { VoiceCallSnapshot } from '../src/voice-call-controller.js';
 
+vi.mock('../src/x-du-companion', () => ({
+  XDuCompanion: ({ state }: { state: string }) =>
+    createElement('div', { 'data-testid': 'companion', 'data-state': state }),
+}));
+
 const CALL: VoiceCallSnapshot = {
   active: true,
   status: 'speaking',
@@ -44,6 +49,8 @@ describe('VoiceCallPanel', () => {
   it('changes explanation depth without submitting a prompt or interrupting playback', async () => {
     const props = {
       call: CALL,
+      companionState: 'speaking' as const,
+      sessionId: 'session-1',
       minimized: false,
       onMinimize: vi.fn(),
       onOpen: vi.fn(),
@@ -62,11 +69,18 @@ describe('VoiceCallPanel', () => {
     expect(props.onInterrupt).not.toHaveBeenCalled();
     expect(props.onFinishUtterance).not.toHaveBeenCalled();
     expect(container.textContent).toContain('查看详情');
+    expect(
+      container
+        .querySelector('[role="dialog"] [data-testid="companion"]')
+        ?.getAttribute('data-state'),
+    ).toBe('speaking');
   });
 
   it('lets a listening user explicitly finish speaking and disables sending while muted or busy', async () => {
     const props = {
       call: { ...CALL, status: 'listening' as const },
+      companionState: 'listening' as const,
+      sessionId: 'session-1',
       minimized: false,
       onMinimize: vi.fn(),
       onOpen: vi.fn(),
@@ -91,6 +105,8 @@ describe('VoiceCallPanel', () => {
   it('exposes mute, interruption, text and hangup as distinct controls', async () => {
     const props = {
       call: CALL,
+      companionState: 'speaking' as const,
+      sessionId: 'session-1',
       minimized: false,
       onMinimize: vi.fn(),
       onOpen: vi.fn(),
@@ -119,6 +135,8 @@ describe('VoiceCallPanel', () => {
   it('keeps an active call visible and stoppable while minimized', async () => {
     const props = {
       call: CALL,
+      companionState: 'speaking' as const,
+      sessionId: 'session-1',
       minimized: true,
       onMinimize: vi.fn(),
       onOpen: vi.fn(),
@@ -133,6 +151,7 @@ describe('VoiceCallPanel', () => {
     await act(async () => root.render(createElement(VoiceCallPanel, props)));
 
     expect(container.querySelector('[aria-label="Active voice call"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="companion"]')).toBeNull();
     await click('Open voice call');
     await click('End voice call');
     expect(props.onOpen).toHaveBeenCalledOnce();

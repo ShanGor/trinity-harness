@@ -11,6 +11,7 @@ import { Button, Radio, Typography } from 'antd';
 import { useEffect, useState, type ReactElement } from 'react';
 
 import type { VoiceCallSnapshot, VoiceCallStatus } from './voice-call-controller';
+import { XDuCompanion, type CompanionState } from './x-du-companion';
 
 const STATUS_LABELS: Record<VoiceCallStatus, string> = {
   idle: 'Voice call',
@@ -36,6 +37,8 @@ function elapsed(startedAt: number | null, now: number): string {
 
 export function VoiceCallPanel({
   call,
+  companionState,
+  sessionId,
   minimized,
   onMinimize,
   onOpen,
@@ -48,6 +51,8 @@ export function VoiceCallPanel({
   onEnd,
 }: {
   call: VoiceCallSnapshot;
+  companionState: CompanionState;
+  sessionId: string | null;
   minimized: boolean;
   onMinimize(): void;
   onOpen(): void;
@@ -115,9 +120,7 @@ export function VoiceCallPanel({
           />
         </header>
 
-        <div className={`voice-call-orb voice-call-orb--${call.status}`} aria-hidden="true">
-          <AudioOutlined />
-        </div>
+        <XDuCompanion state={companionState} sessionId={sessionId} embedded />
         <Typography.Title level={3} className="voice-call-status">
           {statusLabel(call)}
         </Typography.Title>

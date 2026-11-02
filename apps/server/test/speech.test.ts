@@ -200,6 +200,20 @@ describe('speech proxy routes (docs/design.md §10)', () => {
     }
   });
 
+  it('passes the Chinese hint to TTS for numeric speech', async () => {
+    const res = await fetch(`${baseUrl}/api/speech/synthesis/stream`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '361', languageHint: 'Chinese' }),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(JSON.parse(tts.requests.at(-1)!.toString())).toMatchObject({
+      text: '361',
+      language: 'Chinese',
+    });
+  });
+
   it('maps an upstream TTS failure to 502', async () => {
     const res = await fetch(`${baseUrl}/api/speech/synthesis/stream`, {
       method: 'POST',

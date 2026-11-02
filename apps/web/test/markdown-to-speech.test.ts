@@ -3,6 +3,14 @@ import { describe, expect, it } from 'vitest';
 import { markdownToSpeechText } from '../src/markdown-to-speech.js';
 
 describe('markdownToSpeechText', () => {
+  it('omits complete conversation provenance while preserving ordinary bracketed text', () => {
+    const source =
+      '[Conversation source eventId=01a19bc9-9a41-7000-8c1f-4b8bc9c1e1d7, seq=41, characters 0-19/30; excerpt truncated, expand with recall eventId]';
+    expect(markdownToSpeechText(`Answer [important] ${source}`)).toBe('Answer [important]');
+    expect(markdownToSpeechText('[Conversation source is useful]')).toBe(
+      '[Conversation source is useful]',
+    );
+  });
   it('keeps plain prose unchanged', () => {
     expect(markdownToSpeechText('Hello world, how are you?')).toBe('Hello world, how are you?');
   });

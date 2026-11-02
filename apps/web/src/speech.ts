@@ -66,6 +66,7 @@ export async function openSpeechSynthesisStream(
   text: string,
   signal: AbortSignal,
   preferences?: SpeechPreferences,
+  languageHint?: 'Chinese',
 ): Promise<SpeechSynthesisStream> {
   const response = await fetch('/api/speech/synthesis/stream', {
     method: 'POST',
@@ -77,6 +78,7 @@ export async function openSpeechSynthesisStream(
     body: JSON.stringify({
       text,
       ...(preferences ? speechPreferencesSchema.parse(preferences) : {}),
+      ...(languageHint ? { languageHint } : {}),
     }),
     signal,
   });

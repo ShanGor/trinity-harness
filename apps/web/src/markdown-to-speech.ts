@@ -70,6 +70,12 @@ function renderNode(node: Nodes): string {
  * punctuation in C++, C#, snake_case or a*b is retained.
  */
 export function markdownToSpeechText(markdown: string): string {
-  const tree = markdownProcessor.parse(markdown);
+  // Recall provenance can be copied into an answer by the model. It is
+  // metadata, not spoken content; match its complete generated form only.
+  const speechMarkdown = markdown.replace(
+    /\[Conversation source eventId=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}, seq=\d+, characters \d+-\d+\/\d+(?:; excerpt truncated, expand with recall eventId)?\]/giu,
+    '',
+  );
+  const tree = markdownProcessor.parse(speechMarkdown);
   return renderNode(tree).replace(/\s+/gu, ' ').trim();
 }
