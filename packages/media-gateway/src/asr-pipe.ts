@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { VOICE_CALL_SILENCE_MS } from '@trinity-harness/contracts';
 
 /**
  * Fun-ASR `/ws` upstream pipe (packages/media-gateway): feeds PCM16 mono
@@ -63,7 +64,7 @@ export class FunAsrPipe {
             mode: '2pass',
             itn: true,
             diarize: false,
-            split_silence_ms: 700,
+            split_silence_ms: VOICE_CALL_SILENCE_MS,
           }),
         );
         resolve(true);
@@ -85,6 +86,7 @@ export class FunAsrPipe {
           is_end?: boolean;
           text?: string;
           error?: string;
+          append_to_previous?: boolean;
         };
         try {
           message = JSON.parse(String(data));
@@ -95,6 +97,7 @@ export class FunAsrPipe {
           this.callbacks.onError(message.error);
           return;
         }
+        if (message.append_to_previous) return;
         const text = (message.text ?? '').trim();
         if (!text) return;
         if (message.is_final === false) this.callbacks.onPartial(text);

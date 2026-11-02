@@ -1,10 +1,17 @@
-import { newId } from '@trinity-harness/shared';
+import {
+  DEFAULT_SPEECH_PREFERENCES,
+  type SpeechPreferences,
+  type PromptDelivery,
+  newId,
+  VOICE_CALL_SILENCE_MS,
+} from '@trinity-harness/shared';
 
 import type { ChatItem } from './chat-items';
 import { markdownToSpeechText } from './markdown-to-speech';
 import { PcmPlayer } from './pcm-player';
 import {
   openSpeechSynthesisStream,
+  getSpeechPreferences,
   transcribeSpeechAudio,
   type SpeechSynthesisStream,
 } from './speech';
@@ -15,10 +22,13 @@ import {
 } from './streaming-asr';
 import { startWebRtcAsr } from './media-client';
 import { segmentSpeechText, stableMarkdownPrefix } from './voice-call-text';
+import { voiceStatusKind, voiceStatusText } from './voice-status-text';
+import { SPEECH_RMS_THRESHOLD } from './microphone-capture';
 
 const SAMPLE_RATE = 24_000;
-const SILENCE_TIMEOUT_MS = 900;
-const SILENCE_RMS = 0.02;
+const STATUS_IDLE_DELAY_MS = 10_000;
+const STATUS_REMINDER_INTERVAL_MS = 45_000;
+const ASR_FINAL_GRACE_MS = 4000;
 const MAX_RECORDING_MS = 60_000;
 const VAD_POLL_MS = 150;
 
@@ -29,6 +39,7 @@ export interface VoiceCallSnapshot {
   active: boolean;
   status: VoiceCallStatus;
   muted: boolean;
+  depth: PromptDelivery['depth'];
   startedAt: number | null;
   userText: string;
   assistantText: string;
@@ -39,6 +50,7 @@ const IDLE_SNAPSHOT: VoiceCallSnapshot = {
   active: false,
   status: 'idle',
   muted: false,
+  depth: 'brief',
   startedAt: null,
   userText: '',
   assistantText: '',
@@ -58,12 +70,21 @@ export type WebRtcCallSession = StreamingAsrSession;
 
 export interface VoiceCallDependencies {
   getSessionId(): string | null;
-  submit(text: string, onPromptId: (promptId: string) => void): Promise<boolean | void>;
+  submit(
+    text: string,
+    onPromptId: (promptId: string) => void,
+    delivery: PromptDelivery,
+  ): Promise<boolean | void>;
   /** Resolves true only when the turn was already terminal at cancellation. */
   cancelTurn(): Promise<boolean | void>;
   onError(message: string): void;
   transcribe(blob: Blob, signal: AbortSignal): Promise<string>;
-  synthesize(text: string, signal: AbortSignal): Promise<SpeechSynthesisStream>;
+  getSpeechPreferences?(signal: AbortSignal): Promise<SpeechPreferences>;
+  synthesize(
+    text: string,
+    signal: AbortSignal,
+    preferences?: SpeechPreferences,
+  ): Promise<SpeechSynthesisStream>;
   createPlayer(sampleRate: number, onEnded: () => void, context: AudioContext): VoiceCallPlayer;
   /**
    * Opens the streaming-ASR session (docs/voice-call-design.md §8.1). Resolves
@@ -88,6 +109,8 @@ interface CallState {
   stream: MediaStream | null;
   audioContext: AudioContext | null;
   responseEpoch: number;
+  voiceAbort: AbortController;
+  voice: Promise<SpeechPreferences | null>;
   /** Streaming-ASR session when mode 'streaming'; null in batch mode. */
   streaming: StreamingAsrSession | null;
   /** Bumps on interrupt/mute/hangup to fence late streaming finals. */
@@ -101,11 +124,25 @@ interface RecordingState {
   chunks: Blob[];
   source: MediaStreamAudioSourceNode;
   analyser: AnalyserNode;
+  levels: Uint8Array<ArrayBuffer>;
   timer: ReturnType<typeof setInterval> | null;
   startedAt: number;
   lastVoiceAt: number;
   heardSpeech: boolean;
   discard: boolean;
+}
+
+interface StreamingTurn {
+  call: CallState;
+  epoch: number;
+  segments: string[];
+  partial: string;
+  lastVoiceAt: number | null;
+  localActivity: boolean;
+  lastRecognitionAt: number;
+  waitingFinal: boolean;
+  manual: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 interface PendingSubmission {
@@ -119,15 +156,27 @@ interface ResponseState extends PendingSubmission {
   anchorKey: string | null;
   responseKey: string | null;
   spokenText: string;
+  lastContent: string;
+  statusReminders: number;
   final: boolean;
   invalidated: boolean;
   submissionInFlight: boolean;
   cancelRequested: boolean;
 }
 
+type SpeechKind = 'response' | 'status';
+
+interface SpeechQueueItem {
+  call: CallState;
+  epoch: number;
+  kind: SpeechKind;
+  text: string;
+}
+
 interface PlaybackState {
   call: CallState;
   epoch: number;
+  kind: SpeechKind;
   abort: AbortController;
   player: VoiceCallPlayer;
   resolve: () => void;
@@ -147,12 +196,21 @@ export class VoiceCallController {
   private call: CallState | null = null;
   private recording: RecordingState | null = null;
   private streamingActive = false;
+  private streamingTurn: StreamingTurn | null = null;
   private asr: { id: string; call: CallState; abort: AbortController } | null = null;
   private pending: PendingSubmission | null = null;
   private response: ResponseState | null = null;
-  private speechQueue: { call: CallState; epoch: number; text: string }[] = [];
+  private speechQueue: SpeechQueueItem[] = [];
+  // Retain unsynthesized source text rather than eagerly expanding a long
+  // answer into a sentence/audio queue. Only one sentence is synthesized at a
+  // time, after the preceding player ends; no audio is prefetched.
+  private speechBacklog = '';
   private playback: PlaybackState | null = null;
   private pumpCall: CallState | null = null;
+  private statusTimer: {
+    response: ResponseState;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
   private cancelWaiting: {
     call: CallState;
     sessionId: string;
@@ -186,6 +244,11 @@ export class VoiceCallController {
       this.stop();
       return;
     }
+    if (approvalPending) {
+      this.cancelStatusTimer();
+      this.clearQueuedStatus();
+      if (this.playback?.kind === 'status') this.stopPlayback();
+    }
     if (this.cancelWaiting) {
       this.cancelRecording();
       this.setStatus('thinking');
@@ -215,15 +278,25 @@ export class VoiceCallController {
     }
   }
 
+  /** Applies to subsequent prompts in this call, never changes an accepted request. */
+  setDepth(depth: PromptDelivery['depth']): void {
+    if (this.call) this.setSnapshot({ ...this.snapshot, depth });
+  }
+
   /** Starts a new call and unlocks playback synchronously from the click gesture. */
   async start(): Promise<void> {
     this.stop();
+    const voiceAbort = new AbortController();
     const call: CallState = {
       id: newId(),
       sessionId: this.deps.getSessionId(),
       stream: null,
       audioContext: null,
       responseEpoch: 0,
+      voiceAbort,
+      voice:
+        this.deps.getSpeechPreferences?.(voiceAbort.signal).catch(() => null) ??
+        Promise.resolve(DEFAULT_SPEECH_PREFERENCES),
       streaming: null,
       streamEpoch: 0,
     };
@@ -250,27 +323,9 @@ export class VoiceCallController {
         throw new Error('Audio playback is blocked by the browser. Please try again.');
       }
 
-      // Preferred path: WebRTC media uplink (mic over RTCPeerConnection to the
-      // gateway adapter), then streaming ASR; any null ⇒ the next mode, and
-      // all null ⇒ the batch MediaRecorder path.
-      const handlers = this.streamingHandlers(call);
-      const webrtc = call.sessionId
-        ? ((await this.deps.startWebRtcAsr?.(call.sessionId, handlers)) ?? null)
-        : null;
-      if (webrtc) {
-        call.streaming = webrtc;
-      } else {
-        call.streaming = (await this.deps.startStreamingAsr?.(handlers)) ?? null;
-      }
-      if (!this.isCurrent(call)) {
-        call.streaming?.finish();
-        return;
-      }
-      if (call.streaming) {
-        this.beginRecording(call);
-        return;
-      }
-
+      // Capture immediately after permission, before opening a realtime
+      // connection. A rejected/dismissed microphone request cannot orphan a
+      // concurrent connection or leave its rejection unhandled.
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
@@ -279,79 +334,200 @@ export class VoiceCallController {
         return;
       }
       call.stream = stream;
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = !this.snapshot.muted;
+      });
+      this.beginRecording(call);
+      if (!this.isCurrent(call)) return;
+
+      const handlers = this.streamingHandlers(call);
+      let realtime = call.sessionId
+        ? ((await this.deps.startWebRtcAsr?.(call.sessionId, handlers)) ?? null)
+        : null;
+      if (!this.isCurrent(call)) {
+        realtime?.finish();
+        return;
+      }
+      if (!realtime) realtime = (await this.deps.startStreamingAsr?.(handlers)) ?? null;
+      if (!this.isCurrent(call)) {
+        realtime?.finish();
+        return;
+      }
+      if (realtime) {
+        call.streaming = realtime;
+        realtime.pause();
+        if (this.recording) {
+          // Do not cut an ongoing utterance at connection readiness. Let its
+          // normal silence/length endpoint finish before resuming realtime.
+          // Sample now too: readiness can precede the first VAD timer tick.
+          this.detectSpeech(this.recording);
+          if (!this.recording.heardSpeech) this.stopRecording(this.recording, true);
+        } else {
+          this.beginRecording(call);
+        }
+        return;
+      }
+
+      // Both realtime modes unavailable: the same pre-roll recorder simply
+      // continues as the existing batch path, with no capture gap.
       this.beginRecording(call);
     } catch (error) {
       this.fail(call, error);
     }
   }
 
-  /** Handlers are fenced by call identity + streamEpoch (§8.1 late finals). */
+  /** ASR segments and local microphone activity have separate responsibilities. */
   private streamingHandlers(call: CallState): StreamingAsrHandlers {
-    const epoch = (): number => call.streamEpoch;
     return {
-      onPartial: (text) => {
-        if (
-          !this.isCurrent(call) ||
-          epoch() !== call.streamEpoch ||
-          this.snapshot.muted ||
-          this.response ||
-          this.pending
-        ) {
-          return;
-        }
-        this.setSnapshot({ ...this.snapshot, userText: text });
+      onSpeechActivity: () => {
+        const turn = this.currentStreamingTurn(call);
+        if (!turn) return;
+        turn.lastVoiceAt = Date.now();
+        turn.localActivity = true;
+        turn.waitingFinal = true;
+        turn.manual = false;
+        if (turn.timer === null) this.scheduleStreamingTurn(turn);
       },
-      onFinal: (text) => this.handleStreamingFinal(call, epoch(), text),
+      onPartial: (text) => {
+        const turn = this.currentStreamingTurn(call);
+        if (!turn || !text.trim()) return;
+        turn.partial = text.trim();
+        turn.waitingFinal = true;
+        turn.lastRecognitionAt = Date.now();
+        if (!turn.localActivity) turn.lastVoiceAt = Date.now();
+        this.showStreamingTurn(turn);
+        this.scheduleStreamingTurn(turn);
+      },
+      onFinal: (text) => {
+        const turn = this.currentStreamingTurn(call);
+        if (!turn || !text.trim()) return;
+        turn.segments.push(text.trim());
+        turn.partial = '';
+        turn.waitingFinal = false;
+        // If capture activity is unavailable, wait conservatively from the
+        // result. Normal clients measure silence from actual microphone PCM.
+        turn.lastVoiceAt ??= Date.now();
+        this.showStreamingTurn(turn);
+        this.scheduleStreamingTurn(turn);
+      },
       onError: (message) => this.deps.onError(message),
       onEnd: (reason) => {
-        // Unexpected recognizer end mid-call: the call cannot keep listening.
-        // fail() finishes the session and leaves a reconnectable error state.
         if (!this.isCurrent(call) || call.streaming === null) return;
         this.fail(call, new Error(`Speech recognition ended (${reason}).`));
       },
     };
   }
 
-  /**
-   * A VAD-endpointed final segment becomes an utterance. Identical fencing to
-   * the batch finishRecording path: never submit while another turn is live.
-   */
-  private handleStreamingFinal(call: CallState, epoch: number, text: string): void {
-    if (
-      !this.isCurrent(call) ||
-      epoch !== call.streamEpoch ||
-      this.snapshot.muted ||
-      this.response ||
-      this.pending ||
-      this.recording ||
-      this.asr ||
-      this.playback ||
-      this.busy ||
-      this.approvalPending
-    ) {
+  private currentStreamingTurn(call: CallState): StreamingTurn | null {
+    const turn = this.streamingTurn;
+    return turn &&
+      turn.call === call &&
+      turn.epoch === call.streamEpoch &&
+      this.isCurrent(call) &&
+      this.streamingActive &&
+      !this.snapshot.muted &&
+      !this.response &&
+      !this.pending &&
+      !this.recording &&
+      !this.asr &&
+      !this.playback &&
+      !this.busy &&
+      !this.approvalPending
+      ? turn
+      : null;
+  }
+
+  private showStreamingTurn(turn: StreamingTurn): void {
+    const userText = [...turn.segments, turn.partial].filter(Boolean).join(' ');
+    if (userText.length > 100_000) {
+      this.fail(
+        turn.call,
+        new Error('The voice message is too long. Please reconnect and use a shorter message.'),
+      );
       return;
     }
-    const transcript = text.trim();
-    if (!transcript) return;
-    // The final IS the endpoint: stop capture until the next listening
-    // window, exactly like the batch recorder's stop event.
-    this.streamingActive = false;
-    call.streaming?.pause();
-    this.setSnapshot({ ...this.snapshot, userText: transcript, assistantText: '' });
-    this.pending = { call, utteranceId: newId(), transcript };
-    this.setStatus('thinking');
-    void this.submitPending(this.pending);
+    this.setSnapshot({
+      ...this.snapshot,
+      userText,
+      assistantText: '',
+    });
+  }
+
+  private scheduleStreamingTurn(turn: StreamingTurn): void {
+    if (this.currentStreamingTurn(turn.call) !== turn) return;
+    if (turn.timer !== null) clearTimeout(turn.timer);
+    turn.timer = null;
+    if (!turn.segments.length && !turn.partial) return;
+    const silenceAt = (turn.lastVoiceAt ?? Date.now()) + VOICE_CALL_SILENCE_MS;
+    const readyAt = turn.manual && !turn.waitingFinal ? Date.now() : silenceAt;
+    const delay = Math.max(0, readyAt - Date.now());
+    turn.timer = setTimeout(() => {
+      turn.timer = null;
+      if (this.currentStreamingTurn(turn.call) !== turn) return;
+      const latestSilenceAt = (turn.lastVoiceAt ?? Date.now()) + VOICE_CALL_SILENCE_MS;
+      if ((!turn.manual || turn.waitingFinal) && Date.now() < latestSilenceAt) {
+        this.scheduleStreamingTurn(turn);
+        return;
+      }
+      if (turn.waitingFinal) {
+        // Keep sending microphone/silence frames so the recognizer can finish.
+        // A missing final must never send provisional text or hang forever.
+        const remaining =
+          Math.max(latestSilenceAt, turn.lastRecognitionAt) + ASR_FINAL_GRACE_MS - Date.now();
+        if (remaining > 0) {
+          turn.timer = setTimeout(() => this.scheduleStreamingTurn(turn), remaining);
+        } else {
+          this.fail(
+            turn.call,
+            new Error('Speech recognition did not finish. Please reconnect and try again.'),
+          );
+        }
+        return;
+      }
+      const transcript = turn.segments.join(' ').trim();
+      if (!transcript) return;
+      this.cancelRecording();
+      this.pending = { call: turn.call, utteranceId: newId(), transcript };
+      this.setStatus('thinking');
+      void this.submitPending(this.pending);
+    }, delay);
+  }
+
+  /** Explicit end-of-turn; never submits provisional recognition text. */
+  finishUtterance(): void {
+    const call = this.call;
+    if (
+      !call ||
+      this.snapshot.muted ||
+      this.busy ||
+      this.approvalPending ||
+      this.response ||
+      this.pending
+    )
+      return;
+    if (this.recording) {
+      this.detectSpeech(this.recording);
+      if (this.recording.heardSpeech) this.stopRecording(this.recording, false);
+      return;
+    }
+    const turn = this.currentStreamingTurn(call);
+    if (!turn) return;
+    turn.manual = true;
+    this.scheduleStreamingTurn(turn);
   }
 
   /** Hangs up voice resources only; it deliberately does not cancel Agent work. */
   readonly stop = (): void => {
     const call = this.call;
     if (call) call.responseEpoch += 1;
+    call?.voiceAbort.abort();
     if (call) call.streamEpoch += 1;
+    this.cancelStatusTimer();
     this.call = null;
     this.pending = null;
     this.response = null;
     this.speechQueue = [];
+    this.speechBacklog = '';
     this.pumpCall = null;
     this.cancelWaiting = null;
     this.cancelUtterance();
@@ -401,7 +577,9 @@ export class VoiceCallController {
     const response = this.response;
     call.responseEpoch += 1;
     call.streamEpoch += 1;
+    this.cancelStatusTimer();
     this.speechQueue = [];
+    this.speechBacklog = '';
     this.stopPlayback();
     this.pending = null;
     this.cancelUtterance();
@@ -441,6 +619,7 @@ export class VoiceCallController {
   private async requestCancellation(call: CallState, promptId: string | null): Promise<void> {
     const sessionId = call.sessionId ?? this.deps.getSessionId();
     if (!sessionId) return;
+    this.cancelStatusTimer();
     this.response = null;
     this.cancelWaiting = { call, sessionId, promptId };
     this.setStatus('thinking');
@@ -476,12 +655,15 @@ export class VoiceCallController {
 
   private fail(call: CallState, error: unknown): void {
     if (!this.isCurrent(call)) return;
+    this.cancelStatusTimer();
     const startedAt = this.snapshot.startedAt;
     const detail = error instanceof Error ? error.message : String(error);
+    call?.voiceAbort.abort();
     this.call = null;
     this.pending = null;
     this.response = null;
     this.speechQueue = [];
+    this.speechBacklog = '';
     this.pumpCall = null;
     this.cancelWaiting = null;
     this.cancelUtterance();
@@ -518,11 +700,22 @@ export class VoiceCallController {
       return;
     }
     if (call.streaming) {
-      // Streaming mode: resuming capture is synchronous; upstream VAD owns
-      // endpointing, so there is no local recorder to arm.
+      // ASR finals confirm segments; local activity owns the turn window.
       if (!call.streaming.active) return;
-      call.streaming.resume();
+      this.streamingTurn = {
+        call,
+        epoch: call.streamEpoch,
+        segments: [],
+        partial: '',
+        lastVoiceAt: null,
+        localActivity: false,
+        lastRecognitionAt: Date.now(),
+        waitingFinal: false,
+        manual: false,
+        timer: null,
+      };
       this.streamingActive = true;
+      call.streaming.resume();
       this.setSnapshot({ ...this.snapshot, status: 'listening', error: null });
       return;
     }
@@ -547,6 +740,7 @@ export class VoiceCallController {
         chunks: [],
         source,
         analyser,
+        levels: new Uint8Array(analyser.fftSize),
         timer: null,
         startedAt: Date.now(),
         lastVoiceAt: 0,
@@ -559,25 +753,17 @@ export class VoiceCallController {
       });
       recorder.addEventListener('stop', () => void this.finishRecording(recording), { once: true });
 
-      const levels = new Uint8Array(analyser.fftSize);
       recording.timer = setInterval(() => {
         if (this.recording !== recording) return;
-        analyser.getByteTimeDomainData(levels);
-        let sum = 0;
-        for (const level of levels) {
-          const centered = (level - 128) / 128;
-          sum += centered * centered;
-        }
+        this.detectSpeech(recording);
         const now = Date.now();
-        if (Math.sqrt(sum / levels.length) >= SILENCE_RMS) {
-          recording.heardSpeech = true;
-          recording.lastVoiceAt = now;
-        }
         if (
-          (recording.heardSpeech && now - recording.lastVoiceAt >= SILENCE_TIMEOUT_MS) ||
+          (recording.heardSpeech && now - recording.lastVoiceAt >= VOICE_CALL_SILENCE_MS) ||
           now - recording.startedAt >= MAX_RECORDING_MS
         ) {
-          this.stopRecording(recording, false);
+          // Rotate bounded silent recordings locally. Sending silence to ASR
+          // can hallucinate text and manufacture a new user turn.
+          this.stopRecording(recording, !recording.heardSpeech);
         }
       }, VAD_POLL_MS);
       recorder.start();
@@ -585,6 +771,19 @@ export class VoiceCallController {
     } catch (error) {
       this.cancelRecording();
       this.fail(call, error);
+    }
+  }
+
+  private detectSpeech(recording: RecordingState): void {
+    recording.analyser.getByteTimeDomainData(recording.levels);
+    let sum = 0;
+    for (const level of recording.levels) {
+      const centered = (level - 128) / 128;
+      sum += centered * centered;
+    }
+    if (Math.sqrt(sum / recording.levels.length) >= SPEECH_RMS_THRESHOLD) {
+      recording.heardSpeech = true;
+      recording.lastVoiceAt = Date.now();
     }
   }
 
@@ -599,6 +798,9 @@ export class VoiceCallController {
   }
 
   private cancelRecording(): void {
+    if (this.streamingTurn?.timer !== null && this.streamingTurn?.timer !== undefined)
+      clearTimeout(this.streamingTurn.timer);
+    this.streamingTurn = null;
     if (this.streamingActive) {
       this.call?.streaming?.pause();
       this.streamingActive = false;
@@ -659,6 +861,7 @@ export class VoiceCallController {
     if (this.pending !== pending || !this.isCurrent(pending.call)) return;
     if (this.busy || this.approvalPending || this.snapshot.muted) return;
     this.pending = null;
+    this.cancelStatusTimer();
     pending.call.responseEpoch += 1;
     const response: ResponseState = {
       ...pending,
@@ -666,6 +869,8 @@ export class VoiceCallController {
       anchorKey: this.items.at(-1)?.key ?? null,
       responseKey: null,
       spokenText: '',
+      lastContent: '',
+      statusReminders: 0,
       final: false,
       invalidated: false,
       submissionInFlight: true,
@@ -674,11 +879,15 @@ export class VoiceCallController {
     this.response = response;
     this.setStatus('thinking');
     try {
-      const accepted = await this.deps.submit(pending.transcript, (promptId) => {
-        if (this.isCurrent(pending.call) && this.response === response) {
-          response.promptId = promptId;
-        }
-      });
+      const accepted = await this.deps.submit(
+        pending.transcript,
+        (promptId) => {
+          if (this.isCurrent(pending.call) && this.response === response) {
+            response.promptId = promptId;
+          }
+        },
+        { mode: 'phone', depth: this.snapshot.depth },
+      );
       if (!this.isCurrent(pending.call) || this.response !== response) return;
       response.submissionInFlight = false;
       pending.call.sessionId = this.deps.getSessionId() ?? pending.call.sessionId;
@@ -708,7 +917,9 @@ export class VoiceCallController {
       response.final = true;
       response.invalidated = true;
       response.call.responseEpoch += 1;
+      this.cancelStatusTimer(response);
       this.speechQueue = [];
+      this.speechBacklog = '';
       this.stopPlayback();
       this.setSnapshot({ ...this.snapshot, assistantText: '' });
       this.maybeFinishResponse(response);
@@ -716,6 +927,10 @@ export class VoiceCallController {
     }
     const final = item.final || item.stopped || item.error || (!this.busy && !item.streaming);
     response.final = final;
+    if (final) {
+      this.cancelStatusTimer(response);
+      this.clearQueuedStatus();
+    }
     const plain = markdownToSpeechText(stableMarkdownPrefix(item.content, final));
     // Captions and the ordinary transcript retain the original response. Only
     // the independent TTS projection drops markup, code and link targets.
@@ -728,35 +943,94 @@ export class VoiceCallController {
       response.spokenText = '';
     }
     if (!response.invalidated && !plain.startsWith(response.spokenText)) {
-      // A tool-boundary commit archives provisional progress into Execution
-      // details and resets the main response. That reset must not silence the
-      // eventual final answer; an unrelated text replacement is different.
+      // Tool-boundary archival is not a correction: let the current sentence
+      // and its already queued siblings finish before the waiting phase.
       const archived = item.activity?.some((entry) => {
+        if (entry.content === response.lastContent) return true;
         const activityText = markdownToSpeechText(entry.content);
-        return activityText.length > 0 && activityText.startsWith(response.spokenText);
+        return (
+          response.spokenText.length > 0 &&
+          activityText.length > 0 &&
+          activityText.startsWith(response.spokenText)
+        );
       });
-      response.call.responseEpoch += 1;
-      this.speechQueue = [];
-      this.stopPlayback();
       response.spokenText = '';
-      if (!archived) response.invalidated = !final;
+      if (!archived) {
+        this.cancelStatusTimer(response);
+        response.call.responseEpoch += 1;
+        this.speechQueue = [];
+        this.speechBacklog = '';
+        this.stopPlayback();
+        response.invalidated = !final;
+      }
     }
     if (!response.invalidated) {
       const pendingText = plain.slice(response.spokenText.length);
       const segmented = segmentSpeechText(pendingText, final);
       response.spokenText += pendingText.slice(0, segmented.consumed);
       if (segmented.segments.length > 0) {
-        this.speechQueue.push(
-          ...segmented.segments.map((text) => ({
-            call: response.call,
-            epoch: response.call.responseEpoch,
-            text,
-          })),
-        );
+        this.cancelStatusTimer(response);
+        this.clearQueuedStatus();
+        this.speechBacklog += pendingText.slice(0, segmented.consumed);
         void this.pumpSpeech(response.call);
       }
     }
-    this.maybeFinishResponse(response);
+    response.lastContent = item.content;
+    if (!this.maybeFinishResponse(response)) this.scheduleStatusHint(response);
+  }
+
+  private clearQueuedStatus(): void {
+    this.speechQueue = this.speechQueue.filter((entry) => entry.kind !== 'status');
+  }
+
+  private cancelStatusTimer(response?: ResponseState): void {
+    if (!this.statusTimer || (response && this.statusTimer.response !== response)) return;
+    clearTimeout(this.statusTimer.timer);
+    this.statusTimer = null;
+  }
+
+  private canScheduleStatusHint(response: ResponseState): boolean {
+    return (
+      this.response === response &&
+      this.isCurrent(response.call) &&
+      this.busy &&
+      !this.approvalPending &&
+      !response.final &&
+      !response.invalidated &&
+      !response.cancelRequested &&
+      !this.playback &&
+      !this.pumpCall &&
+      this.speechQueue.length === 0 &&
+      this.speechBacklog.length === 0
+    );
+  }
+
+  private scheduleStatusHint(response: ResponseState): void {
+    if (this.statusTimer || !this.canScheduleStatusHint(response)) return;
+    const delay =
+      response.statusReminders === 0 ? STATUS_IDLE_DELAY_MS : STATUS_REMINDER_INTERVAL_MS;
+    // One-shot cancellable wait, not task polling. ACP updates and playback
+    // completion own all subsequent scheduling.
+    const timer = setTimeout(() => {
+      if (this.statusTimer?.response === response) this.statusTimer = null;
+      if (!this.canScheduleStatusHint(response)) return;
+      const item = this.findResponseItem(response);
+      if (!item) return;
+      const text = voiceStatusText(
+        voiceStatusKind(item),
+        response.statusReminders,
+        response.transcript,
+      );
+      response.statusReminders += 1;
+      this.speechQueue.push({
+        call: response.call,
+        epoch: response.call.responseEpoch,
+        kind: 'status',
+        text,
+      });
+      void this.pumpSpeech(response.call);
+    }, delay);
+    this.statusTimer = { response, timer };
   }
 
   private findResponseItem(response: ResponseState): ChatItem | undefined {
@@ -795,11 +1069,24 @@ export class VoiceCallController {
     if (this.pumpCall || !this.isCurrent(call)) return;
     this.pumpCall = call;
     try {
-      while (this.isCurrent(call) && this.speechQueue.length > 0) {
-        const next = this.speechQueue.shift()!;
+      while (this.isCurrent(call) && (this.speechQueue.length > 0 || this.speechBacklog)) {
+        // Read the next sentence lazily from retained response text. This
+        // imposes playback backpressure without dropping any middle content.
+        let next = this.speechQueue.shift();
+        if (!next) {
+          const segmented = segmentSpeechText(this.speechBacklog, true, 1);
+          this.speechBacklog = segmented.remainder;
+          if (!segmented.segments[0]) continue;
+          next = {
+            call,
+            epoch: call.responseEpoch,
+            kind: 'response',
+            text: segmented.segments[0],
+          };
+        }
         if (next.call !== call || next.epoch !== call.responseEpoch) continue;
         this.setStatus('speaking');
-        const played = await this.playSegment(call, next.epoch, next.text);
+        const played = await this.playSegment(call, next.epoch, next.kind, next.text);
         if (!played) break;
       }
     } finally {
@@ -808,17 +1095,25 @@ export class VoiceCallController {
     if (!this.isCurrent(call)) return;
     // An archived/replaced response can enqueue a new epoch while the old
     // playback promise is unwinding. Hand the queued epoch to a fresh pump.
-    if (this.speechQueue.length > 0) {
+    if (this.speechQueue.length > 0 || this.speechBacklog) {
       void this.pumpSpeech(call);
       return;
     }
     if (this.response) {
-      if (!this.maybeFinishResponse(this.response)) this.setStatus('thinking');
+      if (!this.maybeFinishResponse(this.response)) {
+        this.setStatus('thinking');
+        this.scheduleStatusHint(this.response);
+      }
     }
   }
 
   /** Returns false for cancellation/failure; failed synthesis is never retried blindly. */
-  private async playSegment(call: CallState, epoch: number, text: string): Promise<boolean> {
+  private async playSegment(
+    call: CallState,
+    epoch: number,
+    kind: SpeechKind,
+    text: string,
+  ): Promise<boolean> {
     const context = call.audioContext;
     if (!context || !this.isCurrent(call) || epoch !== call.responseEpoch) return false;
     const abort = new AbortController();
@@ -833,6 +1128,7 @@ export class VoiceCallController {
     const playback: PlaybackState = {
       call,
       epoch,
+      kind,
       abort,
       player,
       resolve: resolvePlayback,
@@ -840,7 +1136,12 @@ export class VoiceCallController {
     this.playback = playback;
     try {
       await player.resume();
-      const { sampleRate, stream } = await this.deps.synthesize(text, abort.signal);
+      const preferences = await call.voice;
+      if (!preferences)
+        throw new Error('Voice preferences unavailable. Please reconnect the call.');
+      if (abort.signal.aborted || !this.isCurrent(call) || epoch !== call.responseEpoch)
+        return false;
+      const { sampleRate, stream } = await this.deps.synthesize(text, abort.signal, preferences);
       if (sampleRate !== player.sampleRate) {
         throw new Error(`Unsupported speech sample rate (${sampleRate} Hz).`);
       }
@@ -864,8 +1165,15 @@ export class VoiceCallController {
     } catch (error) {
       if (!abort.signal.aborted && this.isCurrent(call) && epoch === call.responseEpoch) {
         this.deps.onError(error instanceof Error ? error.message : String(error));
-        if (this.response?.call === call) this.response.invalidated = true;
-        this.speechQueue = [];
+        if (kind === 'response') {
+          if (this.response?.call === call) this.response.invalidated = true;
+          this.speechQueue = [];
+          this.speechBacklog = '';
+        } else {
+          // A waiting hint is disposable; never silence a final answer that
+          // arrived while that hint was being synthesized.
+          this.clearQueuedStatus();
+        }
       }
       return false;
     } finally {
@@ -890,7 +1198,8 @@ export class VoiceCallController {
       !response.final ||
       this.pumpCall ||
       this.playback ||
-      this.speechQueue.length > 0
+      this.speechQueue.length > 0 ||
+      this.speechBacklog.length > 0
     ) {
       return false;
     }
@@ -907,6 +1216,7 @@ export class VoiceCallController {
 export const defaultVoiceCallDependencies = {
   transcribe: transcribeSpeechAudio,
   synthesize: openSpeechSynthesisStream,
+  getSpeechPreferences,
   createPlayer: (sampleRate: number, onEnded: () => void, context: AudioContext): VoiceCallPlayer =>
     new PcmPlayer(sampleRate, onEnded, context),
   startStreamingAsr: (handlers: StreamingAsrHandlers): Promise<StreamingAsrSession | null> =>

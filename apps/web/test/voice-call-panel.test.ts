@@ -10,6 +10,7 @@ const CALL: VoiceCallSnapshot = {
   active: true,
   status: 'speaking',
   muted: false,
+  depth: 'brief',
   startedAt: Date.now(),
   userText: 'Hello',
   assistantText: 'Hello. How can I help?',
@@ -40,6 +41,53 @@ async function click(label: string): Promise<void> {
 }
 
 describe('VoiceCallPanel', () => {
+  it('changes explanation depth without submitting a prompt or interrupting playback', async () => {
+    const props = {
+      call: CALL,
+      minimized: false,
+      onMinimize: vi.fn(),
+      onOpen: vi.fn(),
+      onShowText: vi.fn(),
+      onToggleMute: vi.fn(),
+      onFinishUtterance: vi.fn(),
+      onDepthChange: vi.fn(),
+      onInterrupt: vi.fn(async () => undefined),
+      onRetry: vi.fn(async () => undefined),
+      onEnd: vi.fn(),
+    };
+    await act(async () => root.render(createElement(VoiceCallPanel, props)));
+    const detailed = container.querySelector('input[value="detailed"]') as HTMLInputElement;
+    await act(async () => detailed.click());
+    expect(props.onDepthChange).toHaveBeenCalledWith('detailed');
+    expect(props.onInterrupt).not.toHaveBeenCalled();
+    expect(props.onFinishUtterance).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('查看详情');
+  });
+
+  it('lets a listening user explicitly finish speaking and disables sending while muted or busy', async () => {
+    const props = {
+      call: { ...CALL, status: 'listening' as const },
+      minimized: false,
+      onMinimize: vi.fn(),
+      onOpen: vi.fn(),
+      onShowText: vi.fn(),
+      onToggleMute: vi.fn(),
+      onFinishUtterance: vi.fn(),
+      onDepthChange: vi.fn(),
+      onInterrupt: vi.fn(async () => undefined),
+      onRetry: vi.fn(async () => undefined),
+      onEnd: vi.fn(),
+    };
+    await act(async () => root.render(createElement(VoiceCallPanel, props)));
+    await click('Finish speaking');
+    expect(props.onFinishUtterance).toHaveBeenCalledOnce();
+    for (const call of [{ ...props.call, muted: true }, { ...CALL }]) {
+      await act(async () => root.render(createElement(VoiceCallPanel, { ...props, call })));
+      expect(
+        container.querySelector('button[aria-label="Finish speaking"]')?.hasAttribute('disabled'),
+      ).toBe(true);
+    }
+  });
   it('exposes mute, interruption, text and hangup as distinct controls', async () => {
     const props = {
       call: CALL,
@@ -48,6 +96,8 @@ describe('VoiceCallPanel', () => {
       onOpen: vi.fn(),
       onShowText: vi.fn(),
       onToggleMute: vi.fn(),
+      onFinishUtterance: vi.fn(),
+      onDepthChange: vi.fn(),
       onInterrupt: vi.fn(async () => undefined),
       onRetry: vi.fn(async () => undefined),
       onEnd: vi.fn(),
@@ -74,6 +124,8 @@ describe('VoiceCallPanel', () => {
       onOpen: vi.fn(),
       onShowText: vi.fn(),
       onToggleMute: vi.fn(),
+      onFinishUtterance: vi.fn(),
+      onDepthChange: vi.fn(),
       onInterrupt: vi.fn(async () => undefined),
       onRetry: vi.fn(async () => undefined),
       onEnd: vi.fn(),

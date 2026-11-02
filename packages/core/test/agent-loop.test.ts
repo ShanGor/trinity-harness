@@ -48,6 +48,61 @@ class CollectingSink implements EventSink {
 const eventTypes = (events: SessionEvent[]) => events.map((e) => e.type);
 
 describe('CoreAgentLoop', () => {
+  it('keeps current-request language guidance on the first response and tool continuations', async () => {
+    const llm = new FakeLLM(
+      (request) => {
+        expect(request.system).toContain('including the first acknowledgment, progress updates');
+        expect(request.system).toContain(
+          'answer a Chinese request in Chinese from the first sentence',
+        );
+        expect(request.system).toContain(
+          'An explicit request for another response language takes precedence',
+        );
+        return [
+          ...textChunks('我先查看已有资料。').filter((chunk) => chunk.kind !== 'finish'),
+          ...toolCallThenFinish('read', 'read_file', { path: 'movies.txt' }),
+        ];
+      },
+      (request) => {
+        expect(request.system).toContain(
+          'source pages, earlier assistant text and runtime guidance written in English do not change the response language',
+        );
+        expect(JSON.stringify(request.messages)).toContain('Comedy recommendations in English');
+        return textChunks('可以看看这部喜剧。');
+      },
+    );
+    const sandbox = new FakeSandbox();
+    sandbox.files.set('movies.txt', 'Comedy recommendations in English');
+    const store = new MemorySessionStore();
+    const registry = new CoreToolRegistry(sandbox);
+    registry.register(readFileTool);
+    // Use a custom deployment prompt to ensure language guidance does not
+    // depend on the default role framing.
+    const languageLoop = new CoreAgentLoop({
+      llm,
+      model: 'fake/model',
+      systemPrompt: 'Custom assistant',
+      tools: registry,
+      store,
+      workspaceRoot: '/ws',
+    });
+    expect(
+      await languageLoop.run('s', '有没有什么特别好看的喜剧电影啊', new CollectingSink()),
+    ).toMatchObject({ reason: 'completed' });
+    llm.assertExhausted();
+    expect((await store.load('s')).filter((event) => event.type === 'message/assistant')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: 'progress',
+          content: [{ kind: 'text', text: '我先查看已有资料。' }],
+        }),
+        expect.objectContaining({
+          phase: 'final',
+          content: [{ kind: 'text', text: '可以看看这部喜剧。' }],
+        }),
+      ]),
+    );
+  });
   it('persists general failure guidance before dispatch and isolates it from the next prompt', async () => {
     const llm = new FakeLLM(
       () => toolCallThenFinish('a', 'inspect', { item: 'one' }),
@@ -182,6 +237,10 @@ describe('CoreAgentLoop', () => {
     expect(request!.model).toBe('fake/model');
     expect(request!.system).toContain('you are a test agent');
     expect(request!.system).toContain('reference documents actually read');
+    expect(request!.system).toContain(
+      'An unavailable page does not establish a browser-wide outage',
+    );
+    expect(request!.system).toContain('Do not claim an unvisited source failed');
     expect(request!.messages).toEqual([{ role: 'user', content: 'hi there' }]);
     expect(request!.tools.map((t) => t.name)).toEqual(['write_file']);
   });

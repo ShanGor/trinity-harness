@@ -5,8 +5,9 @@ import {
   MinusOutlined,
   PhoneOutlined,
   StopOutlined,
+  SendOutlined,
 } from '@ant-design/icons';
-import { Button, Typography } from 'antd';
+import { Button, Radio, Typography } from 'antd';
 import { useEffect, useState, type ReactElement } from 'react';
 
 import type { VoiceCallSnapshot, VoiceCallStatus } from './voice-call-controller';
@@ -41,6 +42,8 @@ export function VoiceCallPanel({
   onShowText,
   onToggleMute,
   onInterrupt,
+  onFinishUtterance,
+  onDepthChange,
   onRetry,
   onEnd,
 }: {
@@ -51,6 +54,8 @@ export function VoiceCallPanel({
   onShowText(): void;
   onToggleMute(): void;
   onInterrupt(): Promise<void>;
+  onFinishUtterance(): void;
+  onDepthChange(depth: VoiceCallSnapshot['depth']): void;
   onRetry(): Promise<void>;
   onEnd(): void;
 }): ReactElement | null {
@@ -117,6 +122,21 @@ export function VoiceCallPanel({
           {statusLabel(call)}
         </Typography.Title>
 
+        <Radio.Group
+          aria-label="Answer depth for this call"
+          optionType="button"
+          buttonStyle="solid"
+          value={call.depth}
+          onChange={(event) => onDepthChange(event.target.value as VoiceCallSnapshot['depth'])}
+          options={[
+            { label: '简短', value: 'brief' },
+            { label: '详细', value: 'detailed' },
+          ]}
+        />
+        <Typography.Text className="voice-call-depth-note" type="secondary">
+          下次提问生效，也可以直接说「详细讲」或「继续」。
+        </Typography.Text>
+
         <div className="voice-call-captions" aria-live="polite">
           {call.error ? (
             <Typography.Text type="danger">{call.error}</Typography.Text>
@@ -152,6 +172,16 @@ export function VoiceCallPanel({
           <div>
             <Button
               shape="circle"
+              icon={<SendOutlined />}
+              onClick={onFinishUtterance}
+              disabled={call.status !== 'listening' || call.muted}
+              aria-label="Finish speaking"
+            />
+            <span>说完了</span>
+          </div>
+          <div>
+            <Button
+              shape="circle"
               icon={call.muted ? <AudioMutedOutlined /> : <AudioOutlined />}
               onClick={onToggleMute}
               disabled={call.status === 'error' || call.status === 'connecting'}
@@ -181,7 +211,7 @@ export function VoiceCallPanel({
               onClick={onShowText}
               aria-label="View text conversation"
             />
-            <span>Text</span>
+            <span>查看详情</span>
           </div>
           <div>
             <Button
@@ -196,7 +226,7 @@ export function VoiceCallPanel({
           </div>
         </div>
         <Typography.Text className="voice-call-note" type="secondary">
-          Turn-taking mode · playback pauses voice capture
+          Turn-taking mode · playback pauses voice capture · tap Interrupt to speak
         </Typography.Text>
       </section>
     </div>

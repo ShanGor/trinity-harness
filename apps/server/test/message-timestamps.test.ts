@@ -7,6 +7,22 @@ import { logEventToServerEvent, toServerEvent } from '../src/server.js';
 const at = '2026-10-08T06:12:00.000Z';
 
 describe('message timestamps on the browser wire', () => {
+  it('replays the final answer without mixing reasoning into its text', () => {
+    const event = sessionEventSchema.parse({
+      type: 'message/assistant',
+      eventId: crypto.randomUUID(),
+      at,
+      surfaceOp: 'append',
+      phase: 'final',
+      content: [
+        { kind: 'reasoning', text: 'private reasoning' },
+        { kind: 'text', text: 'The actual answer.' },
+      ],
+    });
+    expect(logEventToServerEvent('s', event)).toMatchObject({
+      message: { content: 'The actual answer.' },
+    });
+  });
   it('preserves final grounding and progress phase in live and replayed messages', () => {
     const citationList = [
       {

@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { PNG } from 'pngjs';
 import {
   BROWSER_LIMITS,
-  browserCaptureSchema,
   browserSurfaceSchema,
   browserDriverActionSchema,
   browserDriverStateSchema,
@@ -36,7 +35,7 @@ import {
   browserStateScript,
   browserFocusScript,
 } from './browser-driver-scripts.js';
-import { BrowserDriverError } from './browser-driver-error.js';
+import { BrowserDriverError, parseBrowserCapture } from './browser-driver-error.js';
 import { ZENDRIVER_VERSION, zendriverStructured, type ZendriverClient } from './zendriver-mcp.js';
 
 const ack = z.object({ ok: z.literal(true) });
@@ -485,7 +484,10 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
         throw new BrowserDriverError('STALE_TARGET');
       page = again;
     }
-    return this.checkedState({ ...page, tabId: status.current_tab.id }, privatePages);
+    return this.checkedState(
+      { ...page, url: errorPage ? CHROME_ERROR_PAGE_URL : page.url, tabId: status.current_tab.id },
+      privatePages,
+    );
   }
   private checkedState(raw: unknown, privatePages = false): BrowserDriverState {
     const state = browserDriverStateSchema.parse(raw);
@@ -549,9 +551,7 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
     scope: number[] | undefined,
     ctx: { signal?: AbortSignal },
   ): Promise<BrowserCapture> {
-    return browserCaptureSchema.parse(
-      await this.evaluate(browserExtractor(mode, scope), ctx.signal),
-    );
+    return parseBrowserCapture(await this.evaluate(browserExtractor(mode, scope), ctx.signal));
   }
   async navigate(
     _binding: BrowserBinding,
@@ -572,20 +572,30 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
       await this.client.call('browser_wait_for_load', { ready_state: 'interactive' }, ctx.signal);
     } catch (error) {
       ctx.signal?.throwIfAborted();
+      let state: BrowserDriverState;
       try {
-        if ((await this.inspect(ctx.signal)).url === CHROME_ERROR_PAGE_URL)
-          throw new BrowserDriverError(
-            'PAGE_UNAVAILABLE',
-            'The requested page could not be reached. Check the host-managed guest egress or proxy gateway, then navigate to another validated HTTP(S) source.',
-            'navigate',
-          );
+        state = await this.inspect(ctx.signal);
       } catch (inspectionError) {
+        ctx.signal?.throwIfAborted();
         if (
           inspectionError instanceof BrowserDriverError &&
-          inspectionError.code === 'PAGE_UNAVAILABLE'
+          inspectionError.code === 'NOT_AUTHORIZED'
         )
           throw inspectionError;
+        throw error;
       }
+      if ([CHROME_ERROR_PAGE_URL, 'about:blank'].includes(state.url))
+        throw new BrowserDriverError(
+          'PAGE_UNAVAILABLE',
+          'The requested page did not produce a readable web document. The browser still responds; this does not establish a channel outage. Choose another relevant HTTP(S) source without automatically repeating the failed navigation.',
+          'navigate',
+        );
+      if (error instanceof BrowserDriverError && error.code === 'DRIVER_FAILED' && !error.recovery)
+        throw new BrowserDriverError(
+          'PAGE_UNAVAILABLE',
+          'The navigation/load command failed, but the browser still responds. The requested page is unverified. Read a fresh observation of the current page before deciding how to proceed; never automatically repeat a navigation with unknown effects.',
+          'reobserve',
+        );
       throw error;
     }
   }

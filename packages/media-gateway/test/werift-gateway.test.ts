@@ -114,6 +114,7 @@ describe('WeriftMediaGateway loopback (docs/webrtc-media-design.md §2)', () => 
     expect(session).not.toBeNull();
     await new Promise<void>((resolve) => setTimeout(resolve, 200));
     expect(fakeAsr.receivedConfigs).toHaveLength(1);
+    expect(JSON.parse(fakeAsr.receivedConfigs[0]!)).toMatchObject({ split_silence_ms: 1800 });
 
     // ---- browser side (werift peer) ----
     const browser = new RTCPeerConnection({ iceUseTcp: false, iceUseIpv4: true });
@@ -173,9 +174,11 @@ describe('WeriftMediaGateway loopback (docs/webrtc-media-design.md §2)', () => 
     // Gateway relays ASR results emitted by the upstream.
     fakeAsr.socket!.send(JSON.stringify({ is_final: false, text: 'partial' }));
     fakeAsr.socket!.send(JSON.stringify({ is_final: true, is_end: false, text: 'final' }));
+    fakeAsr.socket!.send(JSON.stringify({ is_final: true, append_to_previous: true, text: '。' }));
     await new Promise<void>((resolve) => setTimeout(resolve, 300));
     expect(events).toContainEqual({ type: 'asr_partial', text: 'partial' });
     expect(events).toContainEqual({ type: 'asr_final', text: 'final' });
+    expect(events).not.toContainEqual({ type: 'asr_final', text: '。' });
 
     await gateway.close(session!.mediaSessionId);
     browser.close();

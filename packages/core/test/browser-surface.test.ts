@@ -77,6 +77,51 @@ it('refuses private forms and fingerprints geometry/role/name changes', () => {
     interactionFromSurface(changed).fingerprint,
   );
 });
+it.each(['true', '', 'plaintext-only'])(
+  'allows an empty public comment editor (%s) while keeping it unavailable for input',
+  (editable) => {
+    setup(
+      `<body><main><p>Public article.</p><div contenteditable="${editable}" role="textbox"><p><br></p></div></main></body>`,
+    );
+    const result = browserSurfaceSchema.parse(browser.window.eval(browserSurfaceScript()));
+    expect(result.privacyDenied).toBe(false);
+    expect(result.targets.find((target) => target.role === 'textbox')).toMatchObject({
+      name: '[sensitive control]',
+      sensitive: true,
+    });
+    const capture = browserCaptureSchema.parse(browser.window.eval(browserExtractor('article')));
+    expect(capture.blocks.map((block) => block.text)).toEqual(['Public article.']);
+  },
+);
+it.each(['true', '', 'plaintext-only'])(
+  'still refuses a populated editor (%s) and excludes its draft from semantic text',
+  (editable) => {
+    setup(
+      `<body><main><p>Public article.</p><div contenteditable="${editable}" role="textbox">PRIVATE_DRAFT</div></main></body>`,
+    );
+    expect(
+      browserSurfaceSchema.parse(browser.window.eval(browserSurfaceScript())).privacyDenied,
+    ).toBe(true);
+    expect(
+      browserSurfaceSchema.parse(browser.window.eval(browserSurfaceScript('all', [1, 0, 0])))
+        .privacyDenied,
+    ).toBe(true);
+    const capture = browserCaptureSchema.parse(browser.window.eval(browserExtractor('article')));
+    expect(JSON.stringify(capture)).not.toContain('PRIVATE_DRAFT');
+  },
+);
+it('refuses non-text drafts and sensitive form values even beside a public article', () => {
+  for (const privateControl of [
+    '<div contenteditable="true"><img src="draft.png"></div>',
+    '<input type="password" value="PRIVATE_PASSWORD">',
+    '<input type="file">',
+  ]) {
+    setup(`<body><main><p>Public article.</p>${privateControl}</main></body>`);
+    expect(
+      browserSurfaceSchema.parse(browser.window.eval(browserSurfaceScript())).privacyDenied,
+    ).toBe(true);
+  }
+});
 it('bounds targets and marks truncated projections', () => {
   setup(`<body>${'<button>More</button>'.repeat(200)}</body>`);
   const result = browserSurfaceSchema.parse(browser.window.eval(browserSurfaceScript()));

@@ -1,3 +1,4 @@
+import type { PromptDelivery } from '@trinity-harness/shared';
 import {
   useEffect,
   useRef,
@@ -19,7 +20,11 @@ export interface UseVoiceCallOptions {
   busy: boolean;
   approvalPending: boolean;
   getSessionId(): string | null;
-  onSubmit(text: string, onPromptId: (promptId: string) => void): Promise<boolean | void>;
+  onSubmit(
+    text: string,
+    onPromptId: (promptId: string) => void,
+    delivery: PromptDelivery,
+  ): Promise<boolean | void>;
   onCancelTurn(): Promise<boolean | void>;
   onError(message: string): void;
 }
@@ -40,7 +45,7 @@ export function useVoiceCall(options: UseVoiceCallOptions): VoiceCallView {
       new VoiceCallController({
         ...defaultVoiceCallDependencies,
         getSessionId: () => latest.current.getSessionId(),
-        submit: (text, onPromptId) => latest.current.onSubmit(text, onPromptId),
+        submit: (text, onPromptId, delivery) => latest.current.onSubmit(text, onPromptId, delivery),
         cancelTurn: () => latest.current.onCancelTurn(),
         onError: (message) => latest.current.onError(message),
       }),

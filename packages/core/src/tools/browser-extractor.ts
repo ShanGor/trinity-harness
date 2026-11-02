@@ -17,7 +17,7 @@ export function browserExtractor(mode: 'article' | 'documentation', scopePath?: 
     const clean = (live) => {
       if (++visited > 20000) { truncated = true; return null; }
       if (live.nodeType === 3) return live.cloneNode();
-      if (live.nodeType !== 1 || excluded.has(live.tagName) || live.getAttribute('contenteditable') === 'true' || live.getAttribute('role') === 'textbox' || !visible(live)) return null;
+      if (live.nodeType !== 1 || excluded.has(live.tagName) || (live.hasAttribute('contenteditable') && live.getAttribute('contenteditable') !== 'false') || live.getAttribute('role') === 'textbox' || !visible(live)) return null;
       if (live.tagName === 'BR') return document.createTextNode('\\n');
       const clone = live.cloneNode(false);
       for (const child of live.childNodes) { const copied = clean(child); if (copied) clone.appendChild(copied); if (truncated) break; }
@@ -55,7 +55,30 @@ export function browserExtractor(mode: 'article' | 'documentation', scopePath?: 
         }
         const block = {id,kind,text,sectionId,links};
         if (tag === 'TABLE') {
-          block.rows = Array.from(clone.querySelectorAll('tr')).slice(0,100).map(row => Array.from(row.children).filter(c => ['TD','TH'].includes(c.tagName)).slice(0,40).map(c => ({text: Array.from(c.textContent.trim()).slice(0,2000).join(''), header: c.tagName === 'TH'})));
+          // Bound the aggregate too: individually bounded cells can still
+          // exceed the block schema or consume the entire artifact allowance.
+          block.rows = []; let tableChars = 0;
+          const rows = Array.from(clone.querySelectorAll('tr'));
+          if (rows.length > 100) truncated = true;
+          for (const row of rows.slice(0,100)) {
+            const cells = Array.from(row.children).filter(c => ['TD','TH'].includes(c.tagName));
+            if (cells.length > 40) truncated = true;
+            const values = [];
+            for (const cell of cells.slice(0,40)) {
+              const rawCell = cell.textContent.trim();
+              const value = Array.from(rawCell).slice(0,2000).join('');
+              if (value.length !== rawCell.length) truncated = true;
+              const separator = values.length ? 3 : block.rows.length ? 1 : 0;
+              const remaining = 16000 - tableChars - separator;
+              if (remaining <= 0) { truncated = true; break; }
+              const text = Array.from(value).slice(0,remaining).join('');
+              values.push({text,header:cell.tagName==='TH'});
+              tableChars += Array.from(text).length + separator;
+              if (text.length !== value.length) { truncated = true; break; }
+            }
+            if (values.length) block.rows.push(values);
+            if (tableChars >= 16000) { truncated = true; break; }
+          }
           block.text = block.rows.map(row => row.map(c => c.text).join(' | ')).join('\\n');
         }
         const size = encoder.encode(JSON.stringify(block)).length;
@@ -64,7 +87,7 @@ export function browserExtractor(mode: 'article' | 'documentation', scopePath?: 
     };
     const walk = (node) => {
       if (++nodes > 20000 || blocks.length >= 1000) { truncated = true; return; }
-      if (!node || node.nodeType !== 1 || excluded.has(node.tagName) || node.getAttribute('contenteditable') === 'true' || node.getAttribute('role') === 'textbox' || !visible(node)) return;
+      if (!node || node.nodeType !== 1 || excluded.has(node.tagName) || (node.hasAttribute('contenteditable') && node.getAttribute('contenteditable') !== 'false') || node.getAttribute('role') === 'textbox' || !visible(node)) return;
       const tag = node.tagName;
       if (semantic(tag)) {
         const clone = clean(node); if (!clone) return;
@@ -80,7 +103,7 @@ export function browserExtractor(mode: 'article' | 'documentation', scopePath?: 
         if (++nodes > 20000) { truncated = true; break; }
         if (child.nodeType === 3) { const copied = clean(child); if (copied) run.appendChild(copied); }
         else if (child.nodeType === 1) {
-          if (excluded.has(child.tagName) || child.getAttribute('contenteditable') === 'true' || child.getAttribute('role') === 'textbox' || !visible(child)) continue;
+          if (excluded.has(child.tagName) || (child.hasAttribute('contenteditable') && child.getAttribute('contenteditable') !== 'false') || child.getAttribute('role') === 'textbox' || !visible(child)) continue;
           const display = getComputedStyle(child).display;
           if (semantic(child.tagName) || /^(block|flow-root|flex|grid|table|list-item)/.test(display) || child.querySelector('h1,h2,h3,h4,h5,h6,p,li,pre,table,div,section,article')) {
             flush(); if (truncated) break; walk(child);

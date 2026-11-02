@@ -1,4 +1,8 @@
 import {
+  speechPreferencesSchema,
+  promptDeliverySchema,
+  type PromptDelivery,
+  type SpeechPreferences,
   newId,
   personalFoldersResponseSchema,
   serverEventSchema,
@@ -243,6 +247,29 @@ export class AcpClient {
     if (res.status === 204) return undefined;
     return res.json();
   }
+  async getSpeechPreferences(signal?: AbortSignal): Promise<SpeechPreferences> {
+    return speechPreferencesSchema.parse(
+      await this.assistantRequest(
+        '/api/me/speech-preferences',
+        'GET',
+        undefined,
+        AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(15_000)]),
+      ),
+    );
+  }
+  async setSpeechPreferences(
+    preferences: SpeechPreferences,
+    signal?: AbortSignal,
+  ): Promise<SpeechPreferences> {
+    return speechPreferencesSchema.parse(
+      await this.assistantRequest(
+        '/api/me/speech-preferences',
+        'PUT',
+        speechPreferencesSchema.parse(preferences),
+        AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(15_000)]),
+      ),
+    );
+  }
   async getMemory(): Promise<MemorySnapshot> {
     return memorySnapshotSchema.parse(await this.assistantRequest('/api/memory'));
   }
@@ -397,6 +424,7 @@ export class AcpClient {
     sessionId: string,
     text: string,
     attachments?: { uri: string; mimeType: string }[],
+    delivery?: PromptDelivery,
   ): Promise<string | undefined> {
     const res = await fetch(`${this.baseUrl}/api/sessions/${sessionId}/messages`, {
       method: 'POST',
@@ -404,6 +432,7 @@ export class AcpClient {
       body: JSON.stringify({
         text,
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        ...(delivery ? { delivery: promptDeliverySchema.parse(delivery) } : {}),
       }),
     });
     if (res.status !== 202) {

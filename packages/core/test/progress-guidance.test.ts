@@ -59,7 +59,7 @@ describe('progress guidance', () => {
       ...pair('2', snapshot, ''),
       ...pair('3', snapshot, '', true),
     ];
-    expect(progressGuidance(events, 1, 4, 64)).toContain('three consecutive browser commands');
+    expect(progressGuidance(events, 1, 4, 64)).toContain('three browser channel failures');
     expect(
       progressGuidance(
         [user(), ...Array.from({ length: 4 }, (_, i) => pair(`${i}`, 'pytest', '', true)).flat()],
@@ -312,7 +312,7 @@ it('keeps live failure guidance across saved reads, replay and a process restart
     ...browserPair('failed3', 'read_page', true),
   ];
   const warning = progressGuidance(events, 1, 6, Infinity);
-  expect(warning).toContain('three consecutive browser commands');
+  expect(warning).toContain('three browser channel failures');
   expect(warning).toContain('Successful saved reads do not demonstrate live recovery');
   expect(
     progressGuidance(
@@ -327,6 +327,39 @@ it('keeps live failure guidance across saved reads, replay and a process restart
   ).toBeNull();
   const next = [...events, user()];
   expect(progressGuidance(next, next.length, 1, Infinity)).toBeNull();
+});
+
+it('does not turn mixed page privacy, argument and adapter errors into a channel failure streak', () => {
+  const events = [
+    user(),
+    ...browserPair('private-page', 'get_page_text', true, 'PRIVACY_DENIED'),
+    ...browserPair('bad-scroll', 'scroll', true, 'INVALID_ARGUMENTS'),
+    ...browserPair('bad-adapter', 'read_page', true, 'DRIVER_FAILED'),
+  ];
+  const advice = progressGuidance(events, 1, 4, Infinity);
+  expect(advice).toBeNull();
+  expect(progressGuidance(structuredClone(events), 1, 4, Infinity)).toBe(advice);
+});
+
+it('keeps source-specific failures out of tool-wide outage guidance after successful live reads', () => {
+  const events = [
+    user(),
+    ...browserPair('failed-page', 'navigate', true, 'PAGE_UNAVAILABLE'),
+    ...browserPair('recovered-search', 'web_search'),
+    ...browserPair('another-page', 'navigate', true, 'PAGE_UNAVAILABLE'),
+  ];
+  expect(progressGuidance(events, 1, 4, Infinity)).toBeNull();
+  expect(progressGuidance(structuredClone(events), 1, 4, Infinity)).toBeNull();
+});
+
+it('does not count rejected or unexecuted browser calls as repeated execution failures', () => {
+  const events = [
+    user(),
+    ...browserPair('bad1', 'scroll', true, 'INVALID_ARGUMENTS'),
+    ...browserPair('skipped', 'scroll', true, 'NOT_EXECUTED'),
+    ...browserPair('bad2', 'read_page', true, 'INVALID_ARGUMENTS'),
+  ];
+  expect(progressGuidance(events, 1, 4, Infinity)).toBeNull();
 });
 
 it('reports live denial immediately and only clears it after live success', () => {

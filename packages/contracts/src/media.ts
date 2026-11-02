@@ -1,16 +1,16 @@
 import { z } from 'zod';
 
 /**
- * WebRTC media-plane contracts (docs/webrtc-media-design.md). Phase delivered:
- * signaling message schemas, the media-gateway port the server relays to, and
- * the short-lived media-token port. The RTP-terminating gateway adapter and
- * the browser media client are NOT delivered — without an adapter the
- * signaling route answers 501 and calls keep using the streaming-ASR + SSE-TTS
- * path (docs/voice-call-design.md §8.1).
+ * WebRTC signaling, gateway and short-lived token contracts. Without a
+ * configured adapter the signaling route answers 501; phone calls retain
+ * streaming-ASR/batch fallback. Delivery gates live in the media design docs.
  */
 
 /** Media token lifetime (docs/webrtc-media-design.md §4). */
 export const MEDIA_TOKEN_TTL_SECONDS = 600;
+
+/** Shared phone-mode silence window, measured from the last microphone speech. */
+export const VOICE_CALL_SILENCE_MS = 1800;
 
 const sdpSchema = z
   .string()

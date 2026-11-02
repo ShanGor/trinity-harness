@@ -60,6 +60,10 @@ import type {
   UserStore,
 } from '@trinity-harness/contracts';
 import {
+  DEFAULT_SPEECH_PREFERENCES,
+  speechPreferencesSchema,
+  speechSynthesisRequestSchema,
+  type SpeechPreferences,
   approvalResponseSchema,
   newId,
   personalFoldersQuerySchema,
@@ -68,6 +72,8 @@ import {
   sessionSettingsSchema,
   sessionPolicyUpdateSchema,
   messageRevisionSchema,
+  promptDeliverySchema,
+  type PromptDelivery,
 } from '@trinity-harness/shared';
 import type { ServerEvent } from '@trinity-harness/shared';
 import Fastify from 'fastify';
@@ -142,6 +148,7 @@ const createSessionSchema = z.object({
 const postMessageSchema = z.object({
   text: z.string().min(1).max(100_000),
   revision: messageRevisionSchema.optional(),
+  delivery: promptDeliverySchema.optional(),
   /**
    * M4 multimodal: `blob://` attachments previously uploaded via
    * POST /api/sessions/:id/attachments (docs/design.md §10).
@@ -190,7 +197,7 @@ const speechAudioQuerySchema = z.object({
     .string()
     .regex(/^audio\/[A-Za-z0-9.+-]{1,60}$/, 'mime must be a bare audio/* type (no parameters)'),
 });
-const speechSynthesisSchema = z.object({ text: z.string().min(1).max(50_000) });
+const speechSynthesisSchema = speechSynthesisRequestSchema;
 const asrResponseSchema = z.object({ text: z.string() });
 
 function credentialMemoryRequest(text: string): boolean {
@@ -487,7 +494,7 @@ export function logEventToServerEvent(sessionId: string, event: SessionEvent): S
         message: {
           role: 'assistant',
           id: event.eventId,
-          content: blocksToText(event.content),
+          content: blocksToText(event.content.filter((block) => block.kind !== 'reasoning')),
           at: event.at,
           ...(event.phase ? { phase: event.phase } : {}),
           ...(event.citationList ? { citationList: event.citationList } : {}),
@@ -1227,6 +1234,7 @@ export async function buildServer(
     identity: Identity,
     text: string,
     content: ContentBlock[],
+    delivery?: PromptDelivery,
     revision?: {
       promptId: string;
       removed: SessionEvent[];
@@ -1251,6 +1259,7 @@ export async function buildServer(
           tenantId: identity.tenantId,
           policy: policyFor(meta),
           ...(revision ? { revision: revision.source } : {}),
+          ...(delivery ? { delivery } : {}),
         },
       ],
       {
@@ -1935,7 +1944,11 @@ export async function buildServer(
     return {
       messages: surface.map((m) => ({
         role: m.role,
-        content: blocksToText(m.content),
+        content: blocksToText(
+          m.role === 'assistant'
+            ? m.content.filter((block) => block.kind !== 'reasoning')
+            : m.content,
+        ),
         ...(m.citationList ? { citationList: m.citationList } : {}),
       })),
     };
@@ -2196,6 +2209,7 @@ export async function buildServer(
         identity!,
         body.data.text,
         content,
+        body.data.delivery,
         revision
           ? {
               promptId,
@@ -2223,6 +2237,7 @@ export async function buildServer(
             surfaceOp: 'append',
             content,
             ...(revision ? { revision: { promptId: revision.promptId, kind: revision.kind } } : {}),
+            ...(body.data.delivery ? { delivery: body.data.delivery } : {}),
           },
         ],
         { actor: identity?.userId ?? 'anonymous', expectedLastSeq },
@@ -2254,6 +2269,7 @@ export async function buildServer(
           surfaceOp: 'append',
           content,
           ...(revision ? { revision: { promptId: revision.promptId, kind: revision.kind } } : {}),
+          ...(body.data.delivery ? { delivery: body.data.delivery } : {}),
         },
       ],
       { actor: identity?.userId ?? 'anonymous', expectedLastSeq },
@@ -2581,12 +2597,55 @@ export async function buildServer(
     },
   );
 
+  // Authenticated metadata, not conversational memory; failures must not silently change voice.
+  const speechPreferencesOf = async (
+    identity: Identity | undefined,
+  ): Promise<SpeechPreferences> => {
+    if (!identity || !deps.auth?.users.getSpeechPreferences) return DEFAULT_SPEECH_PREFERENCES;
+    const saved = await deps.auth.users.getSpeechPreferences(identity.tenantId, identity.userId);
+    return speechPreferencesSchema.parse(saved ?? DEFAULT_SPEECH_PREFERENCES);
+  };
+
+  app.get('/api/me/speech-preferences', async (req, reply) => {
+    if (!req.identity) return reply.code(401).send({ error: 'authentication required' });
+    try {
+      return await speechPreferencesOf(req.identity);
+    } catch {
+      return reply.code(503).send({ error: 'voice preferences unavailable' });
+    }
+  });
+  app.put('/api/me/speech-preferences', async (req, reply) => {
+    if (!req.identity) return reply.code(401).send({ error: 'authentication required' });
+    const preferences = speechPreferencesSchema.safeParse(req.body);
+    if (!preferences.success) return reply.code(400).send({ error: 'invalid voice preferences' });
+    if (!deps.auth?.users.setSpeechPreferences)
+      return reply.code(501).send({ error: 'voice preferences unavailable' });
+    try {
+      const saved = await deps.auth.users.setSpeechPreferences(
+        req.identity.tenantId,
+        req.identity.userId,
+        preferences.data,
+      );
+      return saved ? preferences.data : reply.code(404).send({ error: 'user not found' });
+    } catch {
+      return reply.code(503).send({ error: 'voice preferences unavailable' });
+    }
+  });
+
   app.post('/api/speech/synthesis/stream', async (req, reply) => {
     if (!deps.speech) {
       return reply.code(501).send({ error: 'speech services are not configured' });
     }
     const body = speechSynthesisSchema.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'invalid synthesis request' });
+    let preferences: SpeechPreferences;
+    try {
+      preferences = body.data.voiceStyle
+        ? { voiceStyle: body.data.voiceStyle }
+        : await speechPreferencesOf(req.identity);
+    } catch {
+      return reply.code(503).send({ error: 'voice preferences unavailable' });
+    }
     const tenantId = req.identity?.tenantId;
     let lease: SpeechLease | null = null;
     if (tenantId) {
@@ -2613,15 +2672,16 @@ export async function buildServer(
     req.raw.once('aborted', abort);
     reply.raw.once('close', abort);
     try {
-      // The TTS backend streams token-by-token (faster-qwen3-tts), so the
-      // whole text goes upstream as-is; only the detected language is added
-      // (see speech-text.ts).
+      // Explicit style overrides deployment defaults for every upstream segment.
+      // The local Qwen Base service supplies its configured reference speaker;
+      // instruct carries delivery preferences without selecting a new speaker.
       const upstream = await fetch(new URL('/tts/stream', deps.speech.ttsUrl), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           text: body.data.text,
           language: detectSpeechLanguage(body.data.text),
+          instruct: preferences.voiceStyle,
         }),
         signal: AbortSignal.any([cancelled.signal, AbortSignal.timeout(300_000)]),
       });
@@ -2860,8 +2920,9 @@ export async function buildServer(
    * PCM iterable completes.
    */
   const mediaTtsFetch =
-    (tenantId: string | null): MediaTtsFetch =>
+    (identity: Identity | undefined): MediaTtsFetch =>
     async (text, signal) => {
+      const tenantId = identity?.tenantId;
       if (!tenantId || !deps.speech) return null;
       const cfg = await speechQuotaOf(tenantId);
       if (cfg === null) return null;
@@ -2872,10 +2933,15 @@ export async function buildServer(
       const openedAt = Date.now();
       let body: ReadableStream<Uint8Array> | null = null;
       try {
+        const preferences = await speechPreferencesOf(identity);
         const upstream = await fetch(new URL('/tts/stream', deps.speech.ttsUrl), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ text, language: detectSpeechLanguage(text) }),
+          body: JSON.stringify({
+            text,
+            language: detectSpeechLanguage(text),
+            instruct: preferences.voiceStyle,
+          }),
           signal: AbortSignal.any([signal, AbortSignal.timeout(300_000)]),
         });
         if (upstream.ok && upstream.body) body = upstream.body;
@@ -2936,7 +3002,6 @@ export async function buildServer(
 
       let phase: 'awaiting_hello' | 'ready' | 'closing' = 'awaiting_hello';
       let mediaSessionId: string | null = null;
-      let boundTenantId: string | null = null;
       let lease: SpeechLease | null = null;
       let cleaned = false;
 
@@ -3050,7 +3115,6 @@ export async function buildServer(
             }
             mediaSessionId = session.mediaSessionId;
             phase = 'ready';
-            boundTenantId = consumed.tenantId;
             mediaSessions.add(1);
             try {
               socket.send(
@@ -3096,7 +3160,7 @@ export async function buildServer(
           // route): the gateway receives an already-authorized PCM stream
           // and only owns transcoding/pacing.
           gateway
-            .speak(mediaSessionId, message.text, mediaTtsFetch(boundTenantId))
+            .speak(mediaSessionId, message.text, mediaTtsFetch(req.identity))
             .then((ok) => {
               if (cleaned || phase !== 'ready') return;
               if (!ok) fail('tts_unavailable', 'TTS downlink unavailable');

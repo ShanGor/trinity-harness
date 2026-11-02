@@ -1,3 +1,4 @@
+import { DEFAULT_SPEECH_STYLE } from '@trinity-harness/shared';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   createServer,
@@ -169,7 +170,34 @@ describe('speech proxy routes (docs/design.md §10)', () => {
     expect(JSON.parse(tts.requests[0]!.toString())).toEqual({
       text: 'Say this.',
       language: 'Auto',
+      instruct: DEFAULT_SPEECH_STYLE,
     });
+  });
+
+  it('pins a bounded voice style across synthesis requests without changing text or language', async () => {
+    const voiceStyle = '标准普通话，沉稳温柔的女声，语速舒缓。';
+    for (const text of ['第一句话。', '第二句话。']) {
+      const res = await fetch(`${baseUrl}/api/speech/synthesis/stream`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text, voiceStyle }),
+      });
+      expect(res.status).toBe(200);
+      await res.text();
+      expect(JSON.parse(tts.requests.at(-1)!.toString())).toEqual({
+        text,
+        language: 'Chinese',
+        instruct: voiceStyle,
+      });
+    }
+    for (const voiceStyle of ['', ' ', 'a'.repeat(1001)]) {
+      const res = await fetch(`${baseUrl}/api/speech/synthesis/stream`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'Hello', voiceStyle }),
+      });
+      expect(res.status).toBe(400);
+    }
   });
 
   it('maps an upstream TTS failure to 502', async () => {

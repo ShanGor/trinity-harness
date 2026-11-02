@@ -1,3 +1,4 @@
+import { DEFAULT_SPEECH_PREFERENCES } from '@trinity-harness/shared';
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -198,6 +199,7 @@ interface FakeStreaming {
     active: boolean;
   };
   handlers: {
+    onSpeechActivity: () => void;
     onPartial: (text: string) => void;
     onFinal: (text: string) => void;
     onError: (message: string) => void;
@@ -207,6 +209,7 @@ interface FakeStreaming {
 
 function fakeStreaming(): FakeStreaming {
   const handlers = {
+    onSpeechActivity: (): void => undefined,
     onPartial: (): void => undefined,
     onFinal: (): void => undefined,
     onError: (): void => undefined,
@@ -319,6 +322,121 @@ afterEach(() => {
 });
 
 describe('VoiceCallController', () => {
+  it('defaults each call to brief and snapshots depth only when submitting a new request', async () => {
+    const { controller, deps } = setup();
+    await controller.start();
+    expect(controller.getSnapshot().depth).toBe('brief');
+    controller.setDepth('detailed');
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.waitFor(() =>
+      expect(deps.submit).toHaveBeenCalledWith('Hello Trinity', expect.any(Function), {
+        mode: 'phone',
+        depth: 'detailed',
+      }),
+    );
+    controller.setDepth('brief');
+    expect(deps.submit).toHaveBeenCalledOnce();
+    controller.stop();
+    await controller.start();
+    expect(controller.getSnapshot().depth).toBe('brief');
+    controller.stop();
+  });
+
+  it('applies playback backpressure to a long answer and preserves every sentence through archival', async () => {
+    const ended: (() => void)[] = [];
+    const { controller, deps } = setup({
+      createPlayer: (_rate, onEnded) => {
+        ended.push(onEnded);
+        return {
+          sampleRate: 24000,
+          resume: async () => undefined,
+          append: () => undefined,
+          finish: () => undefined,
+          stop: () => undefined,
+        };
+      },
+    });
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+    const sentences = Array.from({ length: 40 }, (_, i) => `Sentence ${i} complete.`);
+    const text = sentences.join(' ');
+    controller.update(responseItems(text, false), true, false);
+    await vi.waitFor(() => expect(deps.synthesize).toHaveBeenCalledOnce());
+    const archived = responseItems('', false);
+    archived[1]!.activity = [{ content: text }];
+    controller.update(archived, true, false);
+    controller.update(responseItems('Done.', true), false, false);
+    expect(deps.synthesize).toHaveBeenCalledOnce();
+    for (let i = 0; i < sentences.length; i += 1) {
+      ended[i]!();
+      await vi.waitFor(() => expect(deps.synthesize).toHaveBeenCalledTimes(i + 2));
+    }
+    expect(vi.mocked(deps.synthesize).mock.calls.map(([text]) => text)).toEqual([
+      ...sentences,
+      'Done.',
+    ]);
+    ended.at(-1)!();
+    await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
+    expect(deps.submit).toHaveBeenCalledOnce();
+    controller.stop();
+  });
+
+  it('keeps a batch utterance open across a sub-second pause and stops after the longer silence window', async () => {
+    vi.useFakeTimers();
+    const { controller, deps } = setup();
+    await controller.start();
+    const recorder = FakeMediaRecorder.instances[0]!;
+    FakeAudioContext.inputLevel = 255;
+    await vi.advanceTimersByTimeAsync(160);
+    FakeAudioContext.inputLevel = 128;
+    await vi.advanceTimersByTimeAsync(900);
+    expect(recorder.state).toBe('recording');
+    expect(deps.transcribe).not.toHaveBeenCalled();
+    FakeAudioContext.inputLevel = 255;
+    await vi.advanceTimersByTimeAsync(160);
+    FakeAudioContext.inputLevel = 128;
+    await vi.advanceTimersByTimeAsync(1900);
+    expect(deps.transcribe).toHaveBeenCalledOnce();
+    expect(deps.submit).toHaveBeenCalledOnce();
+    controller.stop();
+  });
+
+  it('lets explicit finish transcribe batch speech immediately while ignoring an empty recording', async () => {
+    vi.useFakeTimers();
+    const { controller, deps } = setup();
+    await controller.start();
+    controller.finishUtterance();
+    expect(deps.transcribe).not.toHaveBeenCalled();
+    FakeAudioContext.inputLevel = 255;
+    controller.finishUtterance();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deps.transcribe).toHaveBeenCalledOnce();
+    expect(deps.submit).toHaveBeenCalledOnce();
+    controller.stop();
+  });
+
+  it('discards repeated silent batch recordings locally and still accepts the next spoken turn', async () => {
+    vi.useFakeTimers();
+    const { controller, deps } = setup();
+    await controller.start();
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(FakeMediaRecorder.instances).toHaveLength(4);
+    expect(FakeMediaRecorder.instances.slice(0, -1).every((r) => r.state === 'inactive')).toBe(
+      true,
+    );
+    expect(controller.getSnapshot().status).toBe('listening');
+    expect(deps.transcribe).not.toHaveBeenCalled();
+    expect(deps.submit).not.toHaveBeenCalled();
+    FakeAudioContext.inputLevel = 255;
+    await vi.advanceTimersByTimeAsync(160);
+    FakeAudioContext.inputLevel = 128;
+    await vi.advanceTimersByTimeAsync(1900);
+    expect(deps.transcribe).toHaveBeenCalledOnce();
+    expect(deps.submit).toHaveBeenCalledOnce();
+    controller.stop();
+  });
+
   it('does not start a second recorder during the asynchronous stop-event window', async () => {
     vi.useFakeTimers();
     const { controller, deps } = setup();
@@ -328,7 +446,7 @@ describe('VoiceCallController', () => {
     FakeAudioContext.inputLevel = 255;
     await vi.advanceTimersByTimeAsync(160);
     FakeAudioContext.inputLevel = 128;
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1900);
 
     expect(recorder.state).toBe('inactive');
     controller.update([], false, false);
@@ -342,27 +460,154 @@ describe('VoiceCallController', () => {
     controller.stop();
   });
 
+  it.each(['batch', 'streaming', 'webrtc'] as const)(
+    'automatically listens for a clarification answer after playback in %s mode',
+    async (mode) => {
+      vi.useFakeTimers();
+      const { controller, deps, streaming, webrtc } = setupDualMode();
+      if (mode !== 'webrtc') deps.startWebRtcAsr = vi.fn(async () => null);
+      if (mode === 'batch') deps.startStreamingAsr = vi.fn(async () => null);
+      const media = mode === 'streaming' ? streaming : webrtc;
+      let endPlayback!: () => void;
+      deps.createPlayer = (_rate, onEnded) => {
+        endPlayback = onEnded;
+        return {
+          sampleRate: 24_000,
+          resume: async () => undefined,
+          append: () => undefined,
+          finish: () => undefined,
+          stop: () => undefined,
+        };
+      };
+      deps.transcribe = vi
+        .fn()
+        .mockResolvedValueOnce('RAG 和微调该选哪个')
+        .mockResolvedValueOnce('知识经常更新');
+      let promptCount = 0;
+      deps.submit = vi.fn(async (_text, onPromptId) => {
+        onPromptId(`prompt-${++promptCount}`);
+        return true;
+      });
+      await controller.start();
+      if (mode === 'batch') FakeMediaRecorder.instances.at(-1)!.stop();
+      else {
+        media.handlers.onSpeechActivity();
+        media.handlers.onFinal('RAG 和微调该选哪个');
+      }
+      await vi.advanceTimersByTimeAsync(1800);
+      expect(deps.submit).toHaveBeenCalledOnce();
+      const resumes = media.session.resume.mock.calls.length;
+      const recorders = FakeMediaRecorder.instances.length;
+      controller.update(
+        responseItems('你们主要想更新知识，还是调整回答方式？', true, 'RAG 和微调该选哪个'),
+        false,
+        false,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(controller.getSnapshot().status).toBe('speaking');
+      expect(media.session.resume).toHaveBeenCalledTimes(resumes);
+      expect(FakeMediaRecorder.instances).toHaveLength(recorders);
+      endPlayback();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(controller.getSnapshot().status).toBe('listening');
+      if (mode === 'batch') expect(FakeMediaRecorder.instances).toHaveLength(recorders + 1);
+      else expect(media.session.resume).toHaveBeenCalledTimes(resumes + 1);
+      // Silence does not create a continuation prompt or another answer.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(deps.submit).toHaveBeenCalledOnce();
+      if (mode === 'batch') FakeMediaRecorder.instances.at(-1)!.stop();
+      else {
+        media.handlers.onSpeechActivity();
+        media.handlers.onFinal('知识经常更新');
+      }
+      await vi.advanceTimersByTimeAsync(1800);
+      expect(deps.submit).toHaveBeenLastCalledWith('知识经常更新', expect.any(Function), {
+        mode: 'phone',
+        depth: 'brief',
+      });
+      expect(deps.submit).toHaveBeenCalledTimes(2);
+      controller.stop();
+    },
+  );
+
+  it.each(['busy', 'approval', 'mute', 'hangup'] as const)(
+    'keeps automatic listening fenced by %s after clarification playback',
+    async (gate) => {
+      vi.useFakeTimers();
+      const { controller, deps, streaming } = setupStreaming();
+      let endPlayback!: () => void;
+      deps.createPlayer = (_rate, onEnded) => {
+        endPlayback = onEnded;
+        return {
+          sampleRate: 24_000,
+          resume: async () => undefined,
+          append: () => undefined,
+          finish: () => undefined,
+          stop: () => undefined,
+        };
+      };
+      await controller.start();
+      streaming.handlers.onSpeechActivity();
+      streaming.handlers.onFinal('Hello Trinity');
+      await vi.advanceTimersByTimeAsync(1800);
+      const resumes = streaming.session.resume.mock.calls.length;
+      const items = responseItems('你希望先了解哪个部分？', true);
+      controller.update(items, gate === 'busy', gate === 'approval');
+      await vi.advanceTimersByTimeAsync(0);
+      if (gate === 'mute') controller.toggleMute();
+      if (gate === 'hangup') controller.stop();
+      endPlayback();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(streaming.session.resume).toHaveBeenCalledTimes(resumes);
+      expect(deps.submit).toHaveBeenCalledOnce();
+      expect(deps.cancelTurn).not.toHaveBeenCalled();
+
+      if (gate === 'hangup') {
+        controller.update(items, false, false);
+        expect(controller.getSnapshot().active).toBe(false);
+        expect(streaming.session.resume).toHaveBeenCalledTimes(resumes);
+      } else {
+        if (gate === 'mute') controller.toggleMute();
+        else controller.update(items, false, false);
+        expect(controller.getSnapshot().status).toBe('listening');
+        expect(streaming.session.resume).toHaveBeenCalledTimes(resumes + 1);
+      }
+      controller.stop();
+    },
+  );
+
   it('runs a complete turn and speaks stable sentences before resuming listening', async () => {
-    const { controller, deps, players } = setup();
+    const saved = { voiceStyle: '标准普通话，沉稳温柔的成年女声，耐心自然。' };
+    const getSpeechPreferences = vi.fn(async () => ({ ...saved }));
+    const { controller, deps, players } = setup({ getSpeechPreferences });
     await controller.start();
     expect(controller.getSnapshot().status).toBe('listening');
 
     FakeMediaRecorder.instances[0]!.stop();
     await vi.waitFor(() =>
-      expect(deps.submit).toHaveBeenCalledWith('Hello Trinity', expect.any(Function)),
+      expect(deps.submit).toHaveBeenCalledWith('Hello Trinity', expect.any(Function), {
+        mode: 'phone',
+        depth: 'brief',
+      }),
     );
 
     controller.update(responseItems('First sentence. Second', false), true, false);
     await vi.waitFor(() =>
-      expect(deps.synthesize).toHaveBeenCalledWith('First sentence.', expect.anything()),
+      expect(deps.synthesize).toHaveBeenCalledWith('First sentence.', expect.anything(), {
+        voiceStyle: '标准普通话，沉稳温柔的成年女声，耐心自然。',
+      }),
     );
     expect(controller.getSnapshot().status).toBe('thinking');
 
+    saved.voiceStyle = '清晰自然的成年男声';
     controller.update(responseItems('First sentence. Second sentence.', true), false, false);
     await vi.waitFor(() => expect(deps.synthesize).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
 
-    expect(deps.synthesize).toHaveBeenNthCalledWith(2, 'Second sentence.', expect.anything());
+    expect(deps.synthesize).toHaveBeenNthCalledWith(2, 'Second sentence.', expect.anything(), {
+      voiceStyle: '标准普通话，沉稳温柔的成年女声，耐心自然。',
+    });
+    expect(getSpeechPreferences).toHaveBeenCalledOnce();
     expect(players).toHaveLength(2);
     expect(FakeMediaRecorder.instances).toHaveLength(2);
     expect(deps.cancelTurn).not.toHaveBeenCalled();
@@ -381,7 +626,11 @@ describe('VoiceCallController', () => {
 
     controller.update(responseItems('[Hello](https://example.com)', true), false, false);
     await vi.waitFor(() =>
-      expect(deps.synthesize).toHaveBeenCalledWith('Hello', expect.anything()),
+      expect(deps.synthesize).toHaveBeenCalledWith(
+        'Hello',
+        expect.anything(),
+        DEFAULT_SPEECH_PREFERENCES,
+      ),
     );
     await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
     controller.stop();
@@ -395,7 +644,11 @@ describe('VoiceCallController', () => {
 
     controller.update(responseItems('First sentence. **Bold statement.', false), true, false);
     await vi.waitFor(() =>
-      expect(deps.synthesize).toHaveBeenCalledWith('First sentence.', expect.anything()),
+      expect(deps.synthesize).toHaveBeenCalledWith(
+        'First sentence.',
+        expect.anything(),
+        DEFAULT_SPEECH_PREFERENCES,
+      ),
     );
     controller.update(responseItems('First sentence. **Bold statement.**', true), false, false);
 
@@ -441,7 +694,7 @@ describe('VoiceCallController', () => {
       sampleRate: number;
       stream: ReadableStream<Uint8Array>;
     }>();
-    const { controller, deps } = setup({
+    const { controller, deps, players } = setup({
       synthesize: vi.fn((text: string) =>
         text === 'Working on it.'
           ? firstSynthesis.promise
@@ -457,12 +710,208 @@ describe('VoiceCallController', () => {
     const archived = responseItems('', false);
     archived[1]!.activity = [{ content: 'Working on it.' }];
     controller.update(archived, true, false);
+    expect(players[0]!.stopped).toBe(false);
     controller.update(responseItems('Final answer.', true), false, false);
     firstSynthesis.resolve({ sampleRate: 24_000, stream: audioStream() });
 
     await vi.waitFor(() => expect(deps.synthesize).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
-    expect(deps.synthesize).toHaveBeenNthCalledWith(2, 'Final answer.', expect.anything());
+    expect(deps.synthesize).toHaveBeenNthCalledWith(
+      2,
+      'Final answer.',
+      expect.anything(),
+      DEFAULT_SPEECH_PREFERENCES,
+    );
+    controller.stop();
+  });
+
+  it('speaks localized waiting hints during subtasks and lets the final answer follow', async () => {
+    vi.useFakeTimers();
+    const transcript = '请调研这个问题';
+    const statusText = '子任务还在处理中，结果汇总后我会继续。';
+    const statusSynthesis = deferred<{
+      sampleRate: number;
+      stream: ReadableStream<Uint8Array>;
+    }>();
+    const { controller, deps } = setup({
+      transcribe: vi.fn(async () => transcript),
+      synthesize: vi.fn((text: string) =>
+        text === statusText
+          ? statusSynthesis.promise
+          : Promise.resolve({ sampleRate: 24_000, stream: audioStream() }),
+      ),
+    });
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deps.submit).toHaveBeenCalledWith(transcript, expect.any(Function), {
+      mode: 'phone',
+      depth: 'brief',
+    });
+
+    controller.update(responseItems('我先查一下资料。', false, transcript), true, false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deps.synthesize).toHaveBeenCalledWith(
+      '我先查一下资料。',
+      expect.anything(),
+      DEFAULT_SPEECH_PREFERENCES,
+    );
+
+    const researching = responseItems('', false, transcript);
+    researching[1]!.activity = [
+      { content: '我先查一下资料。' },
+      { content: 'Subagent 1234: running; Strategy: do not read this' },
+    ];
+    researching[1]!.tools = [
+      {
+        toolCallId: 'subagent-1',
+        title: 'subagent({"task":"private research arguments"})',
+        status: 'in_progress',
+      },
+    ];
+    controller.update(researching, true, false);
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(deps.synthesize).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(deps.synthesize).toHaveBeenNthCalledWith(
+      2,
+      statusText,
+      expect.anything(),
+      DEFAULT_SPEECH_PREFERENCES,
+    );
+
+    controller.update(responseItems('最终答案。', true, transcript), false, false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deps.synthesize).toHaveBeenCalledTimes(2);
+    statusSynthesis.resolve({ sampleRate: 24_000, stream: audioStream() });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(deps.synthesize).toHaveBeenNthCalledWith(
+      3,
+      '最终答案。',
+      expect.anything(),
+      DEFAULT_SPEECH_PREFERENCES,
+    );
+    expect(controller.getSnapshot().status).toBe('listening');
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(deps.synthesize).toHaveBeenCalledTimes(3);
+    controller.stop();
+  });
+
+  it('still speaks the final answer when an in-flight waiting hint fails', async () => {
+    vi.useFakeTimers();
+    const synthesis = deferred<{ sampleRate: number; stream: ReadableStream<Uint8Array> }>();
+    const { controller, deps } = setup({
+      synthesize: vi.fn((text: string) =>
+        text === 'Final answer.'
+          ? Promise.resolve({ sampleRate: 24_000, stream: audioStream() })
+          : synthesis.promise,
+      ),
+    });
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    controller.update(responseItems('', false), true, false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(deps.synthesize).toHaveBeenCalledOnce();
+
+    controller.update(responseItems('Final answer.', true), false, false);
+    synthesis.reject(new Error('Waiting hint failed'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deps.synthesize).toHaveBeenLastCalledWith(
+      'Final answer.',
+      expect.anything(),
+      DEFAULT_SPEECH_PREFERENCES,
+    );
+    expect(controller.getSnapshot().status).toBe('listening');
+    controller.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('suppresses waiting hints during approval and clears them on hangup', async () => {
+    vi.useFakeTimers();
+    const { controller, deps } = setup();
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    const waiting = responseItems('', false);
+    controller.update(waiting, true, false);
+    await vi.advanceTimersByTimeAsync(9_000);
+    controller.update(waiting, true, true);
+    await vi.advanceTimersByTimeAsync(46_000);
+    expect(deps.synthesize).not.toHaveBeenCalled();
+    controller.update(waiting, true, false);
+    controller.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(deps.synthesize).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('discards a waiting hint that resolves after approval starts', async () => {
+    vi.useFakeTimers();
+    const synthesis = deferred<{ sampleRate: number; stream: ReadableStream<Uint8Array> }>();
+    const { controller, deps, players } = setup({
+      synthesize: vi.fn((text: string) =>
+        text === 'Final answer.'
+          ? Promise.resolve({ sampleRate: 24_000, stream: audioStream() })
+          : synthesis.promise,
+      ),
+    });
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    const waiting = responseItems('', false);
+    controller.update(waiting, true, false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(deps.synthesize).toHaveBeenCalledOnce();
+    controller.update(waiting, true, true);
+    synthesis.resolve({ sampleRate: 24_000, stream: audioStream() });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(players[0]!.stopped).toBe(true);
+    expect(players[0]!.chunks).toHaveLength(0);
+    controller.update(responseItems('Final answer.', true), false, false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deps.synthesize).toHaveBeenLastCalledWith(
+      'Final answer.',
+      expect.anything(),
+      DEFAULT_SPEECH_PREFERENCES,
+    );
+    expect(controller.getSnapshot().status).toBe('listening');
+    controller.stop();
+  });
+
+  it('spaces out and alternates English research reminders', async () => {
+    vi.useFakeTimers();
+    const { controller, deps } = setup();
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(deps.submit).toHaveBeenCalledOnce();
+
+    const researching = responseItems('', false);
+    researching[1]!.tools = [
+      {
+        toolCallId: 'browser-1',
+        title: 'browser({"operation":"web_search"})',
+        status: 'in_progress',
+      },
+    ];
+    controller.update(researching, true, false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(vi.mocked(deps.synthesize).mock.calls.map(([text]) => text)).toEqual([
+      'Research is still in progress. I’ll continue when there’s an update.',
+    ]);
+
+    await vi.advanceTimersByTimeAsync(44_999);
+    expect(deps.synthesize).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(vi.mocked(deps.synthesize).mock.calls.map(([text]) => text)).toEqual([
+      'Research is still in progress. I’ll continue when there’s an update.',
+      'The research is still running. I’ll report back when it’s ready.',
+    ]);
+    controller.update(responseItems('Done.', true), false, false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.getSnapshot().status).toBe('listening');
     controller.stop();
   });
 
@@ -527,9 +976,17 @@ describe('VoiceCallController', () => {
     controller.update([...historical, ...current], false, false);
 
     await vi.waitFor(() =>
-      expect(deps.synthesize).toHaveBeenCalledWith('New answer.', expect.anything()),
+      expect(deps.synthesize).toHaveBeenCalledWith(
+        'New answer.',
+        expect.anything(),
+        DEFAULT_SPEECH_PREFERENCES,
+      ),
     );
-    expect(deps.synthesize).not.toHaveBeenCalledWith('Old answer.', expect.anything());
+    expect(deps.synthesize).not.toHaveBeenCalledWith(
+      'Old answer.',
+      expect.anything(),
+      DEFAULT_SPEECH_PREFERENCES,
+    );
     controller.stop();
   });
 
@@ -655,20 +1112,169 @@ describe('VoiceCallController', () => {
   });
 
   describe('streaming ASR mode (docs/voice-call-design.md §8.1)', () => {
+    beforeEach(() => vi.useFakeTimers());
+    it.each(['streaming', 'webrtc'] as const)(
+      'merges continued speech on %s without pausing the microphone at a segment final',
+      async (mode) => {
+        const { controller, deps, streaming, webrtc } = setupDualMode();
+        if (mode === 'streaming') deps.startWebRtcAsr = vi.fn(async () => null);
+        const media = mode === 'streaming' ? streaming : webrtc;
+        await controller.start();
+        media.session.pause.mockClear();
+        media.handlers.onSpeechActivity();
+        await vi.advanceTimersByTimeAsync(700);
+        media.handlers.onFinal('我想找一部电影');
+        expect(media.session.pause).not.toHaveBeenCalled();
+        expect(controller.getSnapshot().status).toBe('listening');
+        await vi.advanceTimersByTimeAsync(200);
+        media.handlers.onSpeechActivity();
+        media.handlers.onPartial('最好是');
+        expect(controller.getSnapshot().userText).toBe('我想找一部电影 最好是');
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(deps.submit).not.toHaveBeenCalled();
+        expect(media.session.pause).not.toHaveBeenCalled();
+        media.handlers.onFinal('最好是喜剧');
+        await vi.advanceTimersByTimeAsync(799);
+        expect(deps.submit).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(deps.submit).toHaveBeenCalledExactlyOnceWith(
+          '我想找一部电影 最好是喜剧',
+          expect.any(Function),
+          { mode: 'phone', depth: 'brief' },
+        );
+        expect(media.session.pause).toHaveBeenCalledOnce();
+        controller.stop();
+      },
+    );
+
+    it('does not add another silence window after a delayed ASR final', async () => {
+      const { controller, deps, streaming } = setupStreaming();
+      await controller.start();
+      streaming.handlers.onSpeechActivity();
+      streaming.handlers.onPartial('推荐一部');
+      await vi.advanceTimersByTimeAsync(1900);
+      expect(deps.submit).not.toHaveBeenCalled();
+      streaming.handlers.onFinal('推荐一部喜剧');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(deps.submit).toHaveBeenCalledExactlyOnceWith('推荐一部喜剧', expect.any(Function), {
+        mode: 'phone',
+        depth: 'brief',
+      });
+      controller.stop();
+    });
+
+    it('keeps listening to progressing recognition when quiet speech never crosses the local energy gate', async () => {
+      const { controller, deps, streaming } = setupStreaming();
+      await controller.start();
+      for (const partial of ['我在', '我在慢慢', '我在慢慢说明这个问题']) {
+        streaming.handlers.onPartial(partial);
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(controller.getSnapshot().status).toBe('listening');
+      }
+      streaming.handlers.onFinal('我在慢慢说明这个问题');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(deps.submit).toHaveBeenCalledExactlyOnceWith(
+        '我在慢慢说明这个问题',
+        expect.any(Function),
+        { mode: 'phone', depth: 'brief' },
+      );
+      controller.stop();
+    });
+
+    it('waits for recognition of the continuation even after the local silence deadline', async () => {
+      const { controller, deps, streaming } = setupStreaming();
+      await controller.start();
+      streaming.handlers.onSpeechActivity();
+      streaming.handlers.onFinal('第一段');
+      await vi.advanceTimersByTimeAsync(800);
+      streaming.handlers.onSpeechActivity();
+      streaming.handlers.onPartial('第二');
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(deps.submit).not.toHaveBeenCalled();
+      streaming.handlers.onFinal('第二段');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(deps.submit).toHaveBeenCalledExactlyOnceWith('第一段 第二段', expect.any(Function), {
+        mode: 'phone',
+        depth: 'brief',
+      });
+      controller.stop();
+    });
+
+    it.each(['mute', 'interrupt', 'hangup', 'session', 'approval', 'busy', 'asr-end'] as const)(
+      'discards an unsubmitted streaming turn on %s',
+      async (action) => {
+        const { controller, deps, streaming } = setupStreaming();
+        await controller.start();
+        streaming.handlers.onSpeechActivity();
+        streaming.handlers.onFinal('未提交的第一段');
+        if (action === 'mute') controller.toggleMute();
+        if (action === 'interrupt') await controller.interrupt();
+        if (action === 'hangup') controller.stop();
+        if (action === 'session') {
+          deps.getSessionId = () => 'another-session';
+          controller.update([], false, false);
+        }
+        if (action === 'approval') controller.update([], false, true);
+        if (action === 'busy') controller.update([], true, false);
+        if (action === 'asr-end') streaming.handlers.onEnd('closed');
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(deps.submit).not.toHaveBeenCalled();
+        controller.stop();
+      },
+    );
+
+    it('supports explicit finish while never submitting a provisional transcript', async () => {
+      const { controller, deps, streaming } = setupStreaming();
+      await controller.start();
+      streaming.handlers.onSpeechActivity();
+      streaming.handlers.onPartial('还没确认');
+      controller.finishUtterance();
+      controller.finishUtterance();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(deps.submit).not.toHaveBeenCalled();
+      streaming.handlers.onFinal('确认后的全文');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(deps.submit).toHaveBeenCalledExactlyOnceWith('确认后的全文', expect.any(Function), {
+        mode: 'phone',
+        depth: 'brief',
+      });
+      controller.stop();
+    });
+
+    it('fails visibly rather than submitting stale segments when a continuation final never arrives', async () => {
+      const { controller, deps, streaming } = setupStreaming();
+      await controller.start();
+      streaming.handlers.onSpeechActivity();
+      streaming.handlers.onFinal('已确认');
+      streaming.handlers.onSpeechActivity();
+      streaming.handlers.onPartial('未确认');
+      await vi.advanceTimersByTimeAsync(5801);
+      expect(deps.submit).not.toHaveBeenCalled();
+      expect(controller.getSnapshot().status).toBe('error');
+      expect(streaming.session.finish).toHaveBeenCalled();
+      controller.stop();
+    });
     it('drives a full turn from VAD final to spoken answer and back to listening', async () => {
       const { controller, deps, players, streaming } = setupStreaming();
       await controller.start();
       expect(streaming.session.resume).toHaveBeenCalled();
-      expect(FakeMediaRecorder.instances).toHaveLength(0); // no batch recorder
+      expect(FakeMediaRecorder.instances).toHaveLength(1); // discarded silent pre-roll
+      expect(FakeMediaRecorder.instances[0]!.state).toBe('inactive');
+      expect(deps.transcribe).not.toHaveBeenCalled();
 
       streaming.handlers.onPartial('Hello Trin');
       expect(controller.getSnapshot().userText).toBe('Hello Trin');
 
       streaming.handlers.onFinal('Hello Trinity');
+      await vi.advanceTimersByTimeAsync(1800);
       await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
       controller.update(responseItems('Hi there.', true), false, false);
       await vi.waitFor(() =>
-        expect(deps.synthesize).toHaveBeenCalledWith('Hi there.', expect.anything()),
+        expect(deps.synthesize).toHaveBeenCalledWith(
+          'Hi there.',
+          expect.anything(),
+          DEFAULT_SPEECH_PREFERENCES,
+        ),
       );
       await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
       // Capture paused while the answer played, then resumed.
@@ -682,6 +1288,7 @@ describe('VoiceCallController', () => {
       const { controller, deps, streaming } = setupStreaming();
       await controller.start();
       streaming.handlers.onFinal('First question');
+      await vi.advanceTimersByTimeAsync(1800);
       await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
       controller.update(responseItems('First answer.', false), true, false);
       await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('speaking'));
@@ -693,6 +1300,7 @@ describe('VoiceCallController', () => {
       controller.update([], false, false);
       await vi.waitFor(() => expect(controller.getSnapshot().status).toBe('listening'));
       streaming.handlers.onFinal('Second question');
+      await vi.advanceTimersByTimeAsync(1800);
       await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledTimes(2));
       controller.stop();
     });
@@ -708,7 +1316,126 @@ describe('VoiceCallController', () => {
       controller.toggleMute();
       expect(streaming.session.resume).toHaveBeenCalledTimes(2);
       streaming.handlers.onFinal('Second question');
+      await vi.advanceTimersByTimeAsync(1800);
       await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+      controller.stop();
+    });
+
+    it.each([0, 160])(
+      'preserves the whole pre-roll utterance when ready after %i ms',
+      async (delay) => {
+        vi.useFakeTimers();
+        const streaming = fakeStreaming();
+        const connection = deferred<FakeStreaming['session']>();
+        const { controller, deps } = setup({
+          startStreamingAsr: vi.fn(async (handlers) => {
+            Object.assign(streaming.handlers, handlers);
+            return connection.promise;
+          }),
+        });
+
+        const starting = controller.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(FakeMediaRecorder.instances).toHaveLength(1);
+        expect(FakeMediaRecorder.instances[0]!.state).toBe('recording');
+        expect(deps.startStreamingAsr).toHaveBeenCalledOnce();
+
+        FakeAudioContext.inputLevel = 255;
+        await vi.advanceTimersByTimeAsync(delay);
+        connection.resolve(streaming.session);
+        await starting;
+        expect(FakeMediaRecorder.instances[0]!.state).toBe('recording');
+        expect(deps.transcribe).not.toHaveBeenCalled();
+        expect(streaming.session.resume).not.toHaveBeenCalled();
+        streaming.handlers.onFinal('Duplicate realtime pre-roll');
+        expect(deps.submit).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(deps.transcribe).not.toHaveBeenCalled();
+
+        FakeAudioContext.inputLevel = 128;
+        await vi.advanceTimersByTimeAsync(1_900);
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(deps.transcribe).toHaveBeenCalledOnce();
+        expect(deps.submit).toHaveBeenCalledWith('Hello Trinity', expect.any(Function), {
+          mode: 'phone',
+          depth: 'brief',
+        });
+        expect(streaming.session.pause).toHaveBeenCalled();
+        expect(streaming.session.resume).not.toHaveBeenCalled();
+        controller.stop();
+      },
+    );
+
+    it.each(['webrtc', 'streaming'] as const)(
+      'disposes a late %s connection after hangup',
+      async (mode) => {
+        vi.useFakeTimers();
+        const streaming = fakeStreaming();
+        const connection = deferred<FakeStreaming['session']>();
+        const { controller, deps } = setup({
+          ...(mode === 'webrtc'
+            ? { startWebRtcAsr: vi.fn(() => connection.promise) }
+            : { startStreamingAsr: vi.fn(() => connection.promise) }),
+        });
+        const starting = controller.start();
+        await vi.advanceTimersByTimeAsync(0);
+        const recorder = FakeMediaRecorder.instances[0]!;
+        controller.stop();
+        connection.resolve(streaming.session);
+        await starting;
+
+        expect(streaming.session.finish).toHaveBeenCalledOnce();
+        expect(streaming.session.resume).not.toHaveBeenCalled();
+        expect(recorder.stream.tracks[0]!.stopped).toBe(true);
+        expect(deps.transcribe).not.toHaveBeenCalled();
+        expect(deps.submit).not.toHaveBeenCalled();
+        expect(controller.getSnapshot().active).toBe(false);
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
+
+    it('does not open a fallback connection after hangup during WebRTC setup', async () => {
+      vi.useFakeTimers();
+      const connection = deferred<null>();
+      const { controller, deps } = setup({
+        startWebRtcAsr: vi.fn(() => connection.promise),
+        startStreamingAsr: vi.fn(async () => null),
+      });
+      const starting = controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      controller.stop();
+      connection.resolve(null);
+      await starting;
+      expect(deps.startStreamingAsr).not.toHaveBeenCalled();
+    });
+
+    it('releases late microphone permission without starting a connection', async () => {
+      vi.useFakeTimers();
+      const microphone = deferred<MediaStream>();
+      vi.mocked(navigator.mediaDevices.getUserMedia).mockReturnValue(microphone.promise);
+      const { controller, deps } = setup({ startStreamingAsr: vi.fn(async () => null) });
+      const starting = controller.start();
+      await vi.advanceTimersByTimeAsync(0);
+      controller.stop();
+      const stream = new FakeStream();
+      microphone.resolve(stream as unknown as MediaStream);
+      await starting;
+      expect(stream.tracks[0]!.stopped).toBe(true);
+      expect(deps.startStreamingAsr).not.toHaveBeenCalled();
+      expect(FakeMediaRecorder.instances).toHaveLength(0);
+    });
+
+    it('does not open realtime connections when microphone permission is denied', async () => {
+      vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValue(
+        new Error('Permission denied'),
+      );
+      const { controller, deps } = setup({ startStreamingAsr: vi.fn(async () => null) });
+      await controller.start();
+      expect(controller.getSnapshot().status).toBe('error');
+      expect(deps.startStreamingAsr).not.toHaveBeenCalled();
+      expect(FakeMediaRecorder.instances).toHaveLength(0);
+      expect(FakeAudioContext.instances[0]!.state).toBe('closed');
       controller.stop();
     });
 
@@ -755,6 +1482,7 @@ describe('VoiceCallController', () => {
       webrtc.handlers.onPartial('hello');
       expect(controller.getSnapshot().userText).toBe('hello');
       webrtc.handlers.onFinal('Hello Trinity');
+      await vi.advanceTimersByTimeAsync(1800);
       await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
       controller.stop();
       expect(webrtc.session.finish).toHaveBeenCalled();
@@ -769,6 +1497,7 @@ describe('VoiceCallController', () => {
       expect(streaming.session.resume).toHaveBeenCalled();
 
       streaming.handlers.onFinal('Hello Trinity');
+      await vi.advanceTimersByTimeAsync(1800);
       await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
       controller.stop();
     });
@@ -787,11 +1516,16 @@ describe('VoiceCallController', () => {
       const { controller, deps, players, webrtc, downlink } = setupWebRtcDownlink();
       await controller.start();
       webrtc.handlers.onFinal('Hello Trinity');
+      await vi.advanceTimersByTimeAsync(1800);
       await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
       controller.update(responseItems('Hi there.', true), false, false);
 
       await vi.waitFor(() =>
-        expect(deps.synthesize).toHaveBeenCalledWith('Hi there.', expect.anything()),
+        expect(deps.synthesize).toHaveBeenCalledWith(
+          'Hi there.',
+          expect.anything(),
+          DEFAULT_SPEECH_PREFERENCES,
+        ),
       );
       expect(downlink.speak).not.toHaveBeenCalled();
       expect(players).toHaveLength(1);

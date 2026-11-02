@@ -1,3 +1,4 @@
+import type { PromptDelivery } from '@trinity-harness/shared';
 import { newId, pendingCreationSchema } from '@trinity-harness/shared';
 import {
   AssistantMemory,
@@ -61,6 +62,7 @@ import { ScheduledTasks } from './scheduled-tasks';
 import { InboxIndicator } from './inbox-indicator';
 import { PersonalComputer } from './personal-computer';
 import { SessionSettingsModal } from './session-settings';
+import { SpeechSettingsModal } from './speech-settings';
 import { loadTimelineWithPrompt } from './conversation-history';
 import { transcribeSpeechAudio, openSpeechSynthesisStream } from './speech';
 import { PcmPlayer } from './pcm-player';
@@ -186,6 +188,7 @@ export default function App() {
     staged: [] as (AttachmentView & { name: string })[],
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [speechSettingsOpen, setSpeechSettingsOpen] = useState(false);
   const [items, setItems] = useState<ChatItem[]>([]);
   const [usageRecords, setUsageRecords] = useState<ModelUsage[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -775,14 +778,19 @@ export default function App() {
   );
 
   const onSubmit = useCallback(
-    async (text: string, onPromptId?: (promptId: string) => void) => {
+    async (text: string, onPromptId?: (promptId: string) => void, delivery?: PromptDelivery) => {
+      // A phone utterance must not submit or clear files staged with the text draft.
+      const submittedAttachments = delivery ? [] : staged;
       const trimmed = text.trim();
-      if ((!trimmed && staged.length === 0) || (busy && sessionRef.current !== mainSessionId))
+      if (
+        (!trimmed && submittedAttachments.length === 0) ||
+        (busy && sessionRef.current !== mainSessionId)
+      )
         return false;
       if (sessionRef.current === mainSessionId && mainSessionId) {
         try {
           const attachments = [];
-          for (const attachment of staged) {
+          for (const attachment of submittedAttachments) {
             const file = localFiles.current.get(attachment.uri);
             const uploaded = file
               ? await client.uploadAttachment(mainSessionId, file, file.type, file.name)
@@ -796,22 +804,23 @@ export default function App() {
             mainSessionId,
             trimmed || '[see attachments]',
             attachments,
+            ...(delivery ? [delivery] : []),
           );
           if (promptId) onPromptId?.(promptId);
-          setStaged([]);
+          if (!delivery) setStaged([]);
           return true;
         } catch (error) {
           message.error(error instanceof Error ? error.message : String(error));
           return false;
         }
       }
-      if (trimmed.length === 0 && staged.length === 0) return;
-      const sent = staged.map(({ kind, uri, mimeType }) => ({ kind, uri, mimeType }));
-      const mimeList = staged.map(({ uri, mimeType }) => ({
+      if (trimmed.length === 0 && submittedAttachments.length === 0) return;
+      const sent = submittedAttachments.map(({ kind, uri, mimeType }) => ({ kind, uri, mimeType }));
+      const mimeList = submittedAttachments.map(({ uri, mimeType }) => ({
         uri,
         mimeType: mimeType ?? 'application/octet-stream',
       }));
-      setStaged([]);
+      if (!delivery) setStaged([]);
       setBusy(true);
       const userKey = newItemKey();
       setItems((prev) => [
@@ -845,7 +854,12 @@ export default function App() {
             attachment.uri = uploaded.uri;
           }
         }
-        const promptId = await client.sendPrompt(id, trimmed || '[see attachments]', mimeList);
+        const promptId = await client.sendPrompt(
+          id,
+          trimmed || '[see attachments]',
+          mimeList,
+          ...(delivery ? [delivery] : []),
+        );
         if (promptId) onPromptId?.(promptId);
         if (promptId && sessionRef.current === id)
           setItems((items) =>
@@ -862,7 +876,7 @@ export default function App() {
                 : item,
             ),
           );
-        for (const attachment of staged) {
+        for (const attachment of submittedAttachments) {
           if (localFiles.current.has(attachment.uri)) {
             URL.revokeObjectURL(attachment.uri);
             localFiles.current.delete(attachment.uri);
@@ -874,7 +888,7 @@ export default function App() {
         message.error(err instanceof Error ? err.message : String(err));
         setBusy(false);
         setItems((items) => settleAssistantItems(items, 'error'));
-        setStaged(staged);
+        if (!delivery) setStaged(staged);
         return false;
       }
     },
@@ -1337,11 +1351,13 @@ export default function App() {
               items: [
                 { key: 'teams', label: 'Teams' },
                 { key: 'memory', label: 'Memory' },
+                { key: 'voice', label: 'Voice settings' },
                 ...(user.role === 'admin' ? [{ key: 'audit', label: 'Audit log' }] : []),
                 { key: 'sign-out', label: 'Sign out', danger: true },
               ],
               onClick: ({ key }) => {
                 if (key === 'memory') setPage('memory');
+                if (key === 'voice') setSpeechSettingsOpen(true);
                 if (key === 'audit') setPage('audit');
                 if (key === 'teams') setTeamsOpen(true);
                 if (key === 'sign-out') logout();
@@ -1362,6 +1378,13 @@ export default function App() {
             </Button>
           </Dropdown>
         </div>
+        {speechSettingsOpen && (
+          <SpeechSettingsModal
+            key={user.id}
+            client={client}
+            onClose={() => setSpeechSettingsOpen(false)}
+          />
+        )}
       </HistorySidebar>
       <HistoryDivider
         collapsed={historyCollapsed}
@@ -1594,6 +1617,8 @@ export default function App() {
         onShowText={showVoiceCallText}
         onToggleMute={() => voiceCall.controller.toggleMute()}
         onInterrupt={() => voiceCall.controller.interrupt()}
+        onFinishUtterance={() => voiceCall.controller.finishUtterance()}
+        onDepthChange={(depth) => voiceCall.controller.setDepth(depth)}
         onRetry={() => voiceCall.controller.start()}
         onEnd={voiceCall.controller.stop}
       />

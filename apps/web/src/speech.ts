@@ -5,6 +5,8 @@
  * services directly.
  */
 
+import { speechPreferencesSchema, type SpeechPreferences } from '@trinity-harness/shared';
+
 const TOKEN_KEY = 'trinity.token';
 
 function authHeaders(): Record<string, string> {
@@ -45,6 +47,16 @@ export interface SpeechSynthesisStream {
   stream: ReadableStream<Uint8Array>;
 }
 
+/** Load once at call start so sentence requests share one voice even after settings change. */
+export async function getSpeechPreferences(signal: AbortSignal): Promise<SpeechPreferences> {
+  const response = await fetch('/api/me/speech-preferences', {
+    headers: authHeaders(),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+  });
+  if (!response.ok) throw new Error(`Voice preferences unavailable (${response.status})`);
+  return speechPreferencesSchema.parse(await response.json());
+}
+
 /**
  * Opens a token-streamed synthesis session. The wire format is SSE rather
  * than an octet-stream download because browser-facing proxies may buffer the
@@ -53,6 +65,7 @@ export interface SpeechSynthesisStream {
 export async function openSpeechSynthesisStream(
   text: string,
   signal: AbortSignal,
+  preferences?: SpeechPreferences,
 ): Promise<SpeechSynthesisStream> {
   const response = await fetch('/api/speech/synthesis/stream', {
     method: 'POST',
@@ -61,7 +74,10 @@ export async function openSpeechSynthesisStream(
       'content-type': 'application/json',
       ...authHeaders(),
     },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({
+      text,
+      ...(preferences ? speechPreferencesSchema.parse(preferences) : {}),
+    }),
     signal,
   });
   if (!response.ok || !response.body) {

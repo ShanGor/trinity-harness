@@ -1,3 +1,4 @@
+import { promptDeliverySchema } from './prompt-delivery.js';
 import { permissionPolicySchema } from './approval.js';
 import { personalContextEventSchema } from './personal-assistant.js';
 import { z } from 'zod';
@@ -106,6 +107,7 @@ export const userMessageEventSchema = z.object({
   content: z.array(contentBlockSchema),
   trigger: scheduleTriggerSchema.optional(),
   revision: messageRevisionProvenanceSchema.optional(),
+  delivery: promptDeliverySchema.optional(),
 });
 
 export const assistantMessageEventSchema = z.object({
@@ -229,6 +231,7 @@ export const queuedPromptEventSchema = z.object({
   policy: permissionPolicySchema,
   trigger: scheduleTriggerSchema.optional(),
   revision: messageRevisionProvenanceSchema.optional(),
+  delivery: promptDeliverySchema.optional(),
 });
 export const discardedPromptEventSchema = z.object({
   ...baseFields,

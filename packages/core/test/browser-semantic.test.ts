@@ -156,6 +156,26 @@ describe('visible semantic capture', () => {
     expect(Array.from(result.blocks[0]!.text)).toHaveLength(16000);
     expect(result.captureTruncated).toBe(true);
   });
+  it('bounds a large table as a whole within the block and artifact schemas', () => {
+    const result = extract(
+      `<body><main><h1>Movie list</h1><table>${Array.from({ length: 30 }, () => `<tr>${`<td>${'电影😀'.repeat(500)}</td>`.repeat(4)}</tr>`).join('')}</table><p>Read this paragraph too.</p></main></body>`,
+    );
+    const table = result.blocks.find((block) => block.kind === 'table')!;
+    expect(Array.from(table.text).length).toBeLessThanOrEqual(16000);
+    expect(table.text).toBe(
+      table.rows!.map((row) => row.map((cell) => cell.text).join(' | ')).join('\n'),
+    );
+    expect(result.captureTruncated).toBe(true);
+    expect(result.blocks[0]!.text).toBe('Movie list');
+  });
+  it('keeps an ASCII table that used to fit the byte budget but exceed the block schema readable', () => {
+    const result = extract(
+      `<body><main><table>${`<tr><td>${'x'.repeat(1000)}</td><td>${'y'.repeat(1000)}</td></tr>`.repeat(40)}</table></main></body>`,
+    );
+    expect(result.blocks[0]!.kind).toBe('table');
+    expect(result.blocks[0]!.text.length).toBeLessThanOrEqual(16000);
+    expect(result.captureTruncated).toBe(true);
+  });
 });
 
 it('selects an explicit article body over recommendations and longer comments', () => {

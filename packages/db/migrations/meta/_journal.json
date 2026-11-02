@@ -120,6 +120,13 @@
       "when": 1792943165080,
       "tag": "0016_great_gressill",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1793601090478,
+      "tag": "0017_hard_triton",
+      "breakpoints": true
     }
   ]
 }

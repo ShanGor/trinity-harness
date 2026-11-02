@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ZendriverClient } from '../src/tools/zendriver-mcp.js';
 import { ZendriverBrowserDriver } from '../src/index.js';
+import { BrowserDriverError } from '../src/tools/browser-driver-error.js';
 
 /**
  * Zendriver driver state inspection against a scripted MCP client.
@@ -50,6 +51,101 @@ const generation = '00000000-0000-7000-8000-000000000002';
 const owner = async (): Promise<boolean> => true;
 
 describe('ZendriverBrowserDriver error pages', () => {
+  it('fails closed when tab status already reports a network error but the renderer still reports the old page', async () => {
+    const driver = new ZendriverBrowserDriver(
+      fakeClient([
+        { tabUrl: 'chrome-error://chromewebdata/', documentUrl: 'https://example.com/old' },
+      ]),
+      sessionId,
+      generation,
+      owner,
+    );
+    await expect(driver.authorize(sessionId, 'get_page_text', undefined)).rejects.toMatchObject({
+      code: 'PAGE_UNAVAILABLE',
+      recovery: 'navigate',
+    });
+  });
+
+  it.each(['chrome-error://chromewebdata/', 'about:blank'])(
+    'classifies a document that becomes %s during capture as a page failure',
+    async (url) => {
+      const driver = new ZendriverBrowserDriver(
+        {
+          async call() {
+            return { content: [], structuredContent: { value: { url } } };
+          },
+        },
+        sessionId,
+        generation,
+        owner,
+      );
+      await expect(driver.capture({} as never, 'article', undefined, {})).rejects.toMatchObject({
+        code: 'PAGE_UNAVAILABLE',
+        recovery: 'navigate',
+      });
+    },
+  );
+
+  it('keeps a responsive browser available after an individual navigation command fails', async () => {
+    const page = fakeClient([
+      { tabUrl: 'https://example.com/current', documentUrl: 'https://example.com/current' },
+    ]);
+    const calls: string[] = [];
+    const driver = new ZendriverBrowserDriver(
+      {
+        async call(name, args, signal) {
+          calls.push(name);
+          if (name === 'browser_goto') throw new BrowserDriverError('DRIVER_FAILED');
+          return page.call(name, args, signal);
+        },
+      },
+      sessionId,
+      generation,
+      owner,
+    );
+    await expect(
+      driver.navigate({} as never, 'https://example.com/failed', {}),
+    ).rejects.toMatchObject({ code: 'PAGE_UNAVAILABLE', recovery: 'reobserve' });
+    expect(calls.filter((name) => name === 'browser_goto')).toHaveLength(1);
+    await expect(driver.authorize(sessionId, 'read_page', undefined)).resolves.toMatchObject({
+      observedUrl: 'https://example.com/current',
+    });
+  });
+
+  it('retains actual channel failures when state inspection also fails', async () => {
+    const failure = new BrowserDriverError('DRIVER_FAILED', 'Channel unavailable', 'conclude');
+    const driver = new ZendriverBrowserDriver(
+      {
+        async call() {
+          throw failure;
+        },
+      },
+      sessionId,
+      generation,
+      owner,
+    );
+    await expect(driver.navigate({} as never, 'https://example.com/', {})).rejects.toBe(failure);
+  });
+
+  it('keeps malformed adapter output distinct from page failure even when inspection works', async () => {
+    const page = fakeClient([
+      { tabUrl: 'https://example.com/', documentUrl: 'https://example.com/' },
+    ]);
+    const driver = new ZendriverBrowserDriver(
+      {
+        async call(name, args, signal) {
+          if (name === 'browser_goto') return { content: [], structuredContent: { garbage: true } };
+          return page.call(name, args, signal);
+        },
+      },
+      sessionId,
+      generation,
+      owner,
+    );
+    await expect(driver.navigate({} as never, 'https://example.com/', {})).rejects.toMatchObject({
+      name: 'ZodError',
+    });
+  });
   it.each(['read_page', 'screenshot', 'click', 'web_search', 'navigate'])(
     'reports Chrome error pages as PAGE_UNAVAILABLE for %s without an explicit URL',
     async (operation) => {

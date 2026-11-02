@@ -3,13 +3,13 @@ import { describe, expect, it } from 'vitest';
 import { segmentSpeechText, stableMarkdownPrefix } from '../src/voice-call-text.js';
 
 describe('segmentSpeechText', () => {
-  it('splits Chinese sentence and clause boundaries while retaining unfinished text', () => {
+  it('splits complete Chinese sentences while retaining an unfinished clause', () => {
     const text = ' 第一句话。第二句！第三句？第四句；第五句、未完成';
 
     expect(segmentSpeechText(text, false)).toEqual({
-      segments: ['第一句话。', '第二句！', '第三句？', '第四句；', '第五句、'],
-      remainder: '未完成',
-      consumed: text.length - '未完成'.length,
+      segments: ['第一句话。', '第二句！', '第三句？'],
+      remainder: '第四句；第五句、未完成',
+      consumed: text.length - '第四句；第五句、未完成'.length,
     });
   });
 
@@ -17,9 +17,9 @@ describe('segmentSpeechText', () => {
     const text = ' First sentence. Second!\nThird?\r\nFourth; tail';
 
     expect(segmentSpeechText(text, false)).toEqual({
-      segments: ['First sentence.', 'Second!', 'Third?', 'Fourth;'],
-      remainder: ' tail',
-      consumed: text.length - ' tail'.length,
+      segments: ['First sentence.', 'Second!', 'Third?'],
+      remainder: 'Fourth; tail',
+      consumed: text.length - 'Fourth; tail'.length,
     });
   });
 
@@ -27,10 +27,21 @@ describe('segmentSpeechText', () => {
     const text = 'Pi is 3.14159. Next is 2.5; tail';
 
     expect(segmentSpeechText(text, false)).toEqual({
-      segments: ['Pi is 3.14159.', 'Next is 2.5;'],
-      remainder: ' tail',
-      consumed: text.length - ' tail'.length,
+      segments: ['Pi is 3.14159.'],
+      remainder: ' Next is 2.5; tail',
+      consumed: text.length - ' Next is 2.5; tail'.length,
     });
+  });
+
+  it('keeps enumeration and semicolon clauses together for consistent synthesis phrasing', () => {
+    const text = '先从听力、跟读开始；每天练习一点。用于工作、考试，还是日常交流？';
+    expect(segmentSpeechText(text, true).segments).toEqual([
+      '先从听力、跟读开始；每天练习一点。',
+      '用于工作、考试，还是日常交流？',
+    ]);
+    expect(segmentSpeechText('Listen, repeat; practice a little.', true).segments).toEqual([
+      'Listen, repeat; practice a little.',
+    ]);
   });
 
   it('breaks long prose at a safe whitespace boundary', () => {

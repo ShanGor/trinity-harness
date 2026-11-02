@@ -6,8 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TimelinePage, ServerEvent } from '@trinity-harness/shared';
 
 import App from '../src/App';
+import type { UseVoiceCallOptions } from '../src/use-voice-call';
+import type * as VoiceCallModule from '../src/use-voice-call';
 
 const fake = vi.hoisted(() => ({
+  voiceOptions: undefined as UseVoiceCallOptions | undefined,
   onEvent: undefined as ((event: ServerEvent) => void) | undefined,
   markdown: vi.fn(),
   getTimeline: vi.fn<() => Promise<TimelinePage>>(),
@@ -32,6 +35,17 @@ const fake = vi.hoisted(() => ({
     createdAt: '2026-10-08T00:00:00Z',
   })),
 }));
+
+vi.mock('../src/use-voice-call', async (importOriginal) => {
+  const original = await importOriginal<typeof VoiceCallModule>();
+  return {
+    ...original,
+    useVoiceCall(options: UseVoiceCallOptions) {
+      fake.voiceOptions = options;
+      return original.useVoiceCall(options);
+    },
+  };
+});
 
 vi.mock('react-markdown', () => ({
   default: ({ children }: { children: string }) => {
@@ -158,6 +172,43 @@ afterEach(async () => {
 });
 
 describe('chat typing and streaming performance', () => {
+  it('keeps the text draft, focus and staged attachments separate from a phone prompt', async () => {
+    await click(container.querySelector('.history-item'));
+    const composer = container.querySelector('textarea')!;
+    await type(composer, 'Keep this draft');
+    vi.stubGlobal(
+      'URL',
+      class extends URL {
+        static createObjectURL(): string {
+          return 'blob:staged';
+        }
+        static revokeObjectURL(): void {}
+      },
+    );
+    const fileInput = container.querySelector('input[type="file"]')!;
+    Object.defineProperty(fileInput, 'files', {
+      value: [new File(['notes'], 'notes.pdf', { type: 'application/pdf' })],
+      configurable: true,
+    });
+    await act(async () => fileInput.dispatchEvent(new Event('change', { bubbles: true })));
+    expect(container.querySelector('.staged-file-tag')?.textContent).toContain('notes.pdf');
+    composer.focus();
+    await act(async () => {
+      await fake.voiceOptions!.onSubmit('解释一下这个问题', () => undefined, {
+        mode: 'phone',
+        depth: 'brief',
+      });
+    });
+    expect(fake.sendPrompt).toHaveBeenCalledWith('s0', '解释一下这个问题', [], {
+      mode: 'phone',
+      depth: 'brief',
+    });
+    expect(container.querySelector('textarea')).toBe(composer);
+    expect(composer.value).toBe('Keep this draft');
+    expect(document.activeElement).toBe(composer);
+    expect(container.querySelector('.staged-file-tag')?.textContent).toContain('notes.pdf');
+  });
+
   it('retries a fatal response before any assistant text and keeps the composer draft', async () => {
     const promptId = '019a1e10-1234-7000-8000-000000000001';
     fake.getTimeline.mockResolvedValueOnce({

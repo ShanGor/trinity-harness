@@ -1,11 +1,10 @@
-import { BrowserDriverError } from './browser-driver-error.js';
+import { BrowserDriverError, parseBrowserCapture } from './browser-driver-error.js';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import {
   BROWSER_LIMITS,
-  browserCaptureSchema,
   browserSurfaceSchema,
   type BrowserDriverPort,
   type BrowserBinding,
@@ -88,9 +87,7 @@ export const agentBrowserDriver: BrowserDriverPort = {
     );
   },
   async capture(binding, mode, scope, ctx) {
-    return browserCaptureSchema.parse(
-      await cli(ctx, binding, ['eval', browserExtractor(mode, scope)]),
-    );
+    return parseBrowserCapture(await cli(ctx, binding, ['eval', browserExtractor(mode, scope)]));
   },
   async navigate(binding, url, ctx) {
     await cli(ctx, binding, ['open', url]);

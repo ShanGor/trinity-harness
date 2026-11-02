@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "speech_voice_style" text;

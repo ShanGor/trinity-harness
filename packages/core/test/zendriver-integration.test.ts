@@ -15,6 +15,7 @@ import {
   captureBrowserPreview,
 } from '../src/index.js';
 import {
+  browserErrorSchema,
   browserResultSchema,
   type ToolContext,
   type BrowserBinding,
@@ -35,6 +36,16 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
     const sessionId = randomUUID();
     const server = createServer((request, response) => {
       response.setHeader('content-type', 'text/html; charset=utf-8');
+      if (request.url === '/network-error') {
+        response.destroy();
+        return;
+      }
+      if (request.url === '/public-article') {
+        response.end(
+          `<!doctype html><main><h1>Public movie list</h1><p>Public article text.</p><table>${`<tr><td>${'x'.repeat(1000)}</td><td>${'y'.repeat(1000)}</td></tr>`.repeat(40)}</table><div contenteditable="true" role="textbox"><p><br></p></div></main>`,
+        );
+        return;
+      }
       if (request.url === '/bookmark-destination') {
         response.end(`<!doctype html><style>body{margin:0;min-height:4000px}button{position:fixed;right:20px;bottom:20px;width:120px;height:60px}#stripe{position:absolute;left:0;top:1500px;width:100%;height:80px;background:rgb(255,0,0)}</style><div id="stripe"></div>
           <button onclick="this.dataset.clicked=String(event.isTrusted)">Bookmark destination</button>`);
@@ -158,6 +169,86 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
         { ...sideContext, callId: randomUUID() },
       );
       expect(denied.isError).toBe(true);
+    });
+    it('reads a public article with an empty editor and large table while protecting later drafts', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(20_000) };
+      const store = new MemorySessionStore();
+      const blobs = new LocalBlobStore(path.join(root, 'public-article-blobs'));
+      const tool = createBrowserTool({
+        store,
+        blobs,
+        now: () => new Date(),
+        driver,
+        access: driver,
+      });
+      try {
+        const result = await tool.execute(
+          { operation: 'navigate', url: new URL('/public-article', url).href },
+          { ...ctx, callId: randomUUID() },
+        );
+        expect(result.isError).toBe(false);
+        const page = browserResultSchema.parse(result.value);
+        expect(page.blocks.some((block) => block.text === 'Public article text.')).toBe(true);
+        expect(page.captureTruncated).toBe(true);
+        const captured = await driver.capture(
+          await driver.authorize(sessionId, 'get_page_text', undefined, ctx.signal),
+          'article',
+          undefined,
+          ctx,
+        );
+        expect(captured.blocks.some((block) => block.kind === 'table')).toBe(true);
+        expect(
+          (await tool.execute({ operation: 'get_page_text' }, { ...ctx, callId: randomUUID() }))
+            .isError,
+        ).toBe(false);
+        await connection.call(
+          'browser_evaluate',
+          {
+            expression: `document.querySelector('[contenteditable]').textContent = 'PRIVATE_DRAFT'`,
+          },
+          ctx.signal,
+        );
+        const denied = await tool.execute(
+          { operation: 'get_page_text' },
+          { ...ctx, callId: randomUUID() },
+        );
+        expect(denied.isError).toBe(true);
+        expect(browserErrorSchema.parse(denied.value)).toMatchObject({
+          code: 'PRIVACY_DENIED',
+          recovery: 'navigate',
+        });
+        expect(JSON.stringify(denied)).not.toContain('PRIVATE_DRAFT');
+      } finally {
+        await driver.navigate(binding, url, ctx);
+        binding = await driver.authorize(sessionId, 'read_page', undefined, ctx.signal);
+      }
+    });
+    it('recovers from a local network-error document without declaring the browser channel unavailable', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(20_000) };
+      const tool = createBrowserTool({
+        store: new MemorySessionStore(),
+        blobs: new LocalBlobStore(path.join(root, 'network-error-blobs')),
+        now: () => new Date(),
+        driver,
+        access: driver,
+      });
+      const failed = await tool.execute(
+        { operation: 'navigate', url: new URL('/network-error', url).href },
+        { ...ctx, callId: randomUUID() },
+      );
+      expect(failed.isError).toBe(true);
+      expect(browserErrorSchema.parse(failed.value)).toMatchObject({
+        code: 'PAGE_UNAVAILABLE',
+        effect: 'unknown',
+      });
+      const recovered = await tool.execute(
+        { operation: 'navigate', url },
+        { ...ctx, callId: randomUUID() },
+      );
+      expect(recovered.isError).toBe(false);
+      const page = browserResultSchema.parse(recovered.value);
+      expect(page.blocks.some((block) => block.text.includes('Exact “quote”：世界.'))).toBe(true);
+      binding = await driver.authorize(sessionId, 'read_page', undefined, ctx.signal);
     });
     it('captures user-facing previews with Zendriver and suppresses sensitive pages', async () => {
       const preview = () =>

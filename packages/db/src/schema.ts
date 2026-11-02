@@ -168,6 +168,7 @@ export const users = pgTable(
     tenantId: uuid('tenant_id').notNull(),
     email: text('email').notNull(),
     passwordHash: text('password_hash').notNull(),
+    speechVoiceStyle: text('speech_voice_style'),
     role: text('role').notNull().default('developer'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
       .notNull()

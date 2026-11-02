@@ -124,6 +124,100 @@ function fixture(
   return { runtime, store, dispose, perform, create, authorize, options };
 }
 describe('managed browser supervisor', () => {
+  it.each([
+    ['PAGE_UNAVAILABLE', 'unknown'],
+    ['PRIVACY_DENIED', 'none'],
+    ['STALE_TARGET', 'none'],
+    ['LIMIT_REACHED', 'none'],
+  ] as const)(
+    'journals %s page failures and preserves the browser generation for a fresh read',
+    async (code, effect) => {
+      const f = fixture(async (r) => ({
+        isError: true,
+        value: {
+          kind: 'browser-error-v1',
+          operation: r.args.operation,
+          code,
+          effect,
+          recovery: 'navigate',
+          message: 'This page is unavailable.',
+        },
+      }));
+      const r = request();
+      try {
+        const failed = await f.runtime.execute(r);
+        expect(failed).toMatchObject({ isError: true, value: { code, effect } });
+        const generation = f.store.records.get(r.sessionId)!.generation;
+        expect(await f.runtime.execute(r)).toEqual(failed);
+        expect(f.perform).toHaveBeenCalledOnce();
+        expect(f.dispose).not.toHaveBeenCalled();
+        f.perform.mockImplementation(async (next) => success(next));
+        expect(
+          (
+            await f.runtime.execute({
+              ...r,
+              callId: 'fresh-read',
+              args: { operation: 'read_page', filter: 'all' },
+            })
+          ).isError,
+        ).toBe(false);
+        expect(f.create).toHaveBeenCalledOnce();
+        expect(f.store.records.get(r.sessionId)).toMatchObject({ generation, status: 'active' });
+        expect(f.store.commands.get(`${r.sessionId}/${r.callId}`)!.result).toEqual(failed);
+      } finally {
+        await f.runtime.dispose();
+      }
+    },
+  );
+
+  it.each(['DRIVER_FAILED', 'INVALID_OUTPUT', 'PERSIST_FAILED'] as const)(
+    'still disposes the browser after %s',
+    async (code) => {
+      const f = fixture(async (r) => ({
+        isError: true,
+        value: {
+          kind: 'browser-error-v1',
+          operation: r.args.operation,
+          code,
+          effect: 'none',
+          message: 'Unavailable.',
+        },
+      }));
+      const r = request();
+      try {
+        await f.runtime.execute(r);
+        expect(f.dispose).toHaveBeenCalledOnce();
+        expect(f.store.records.get(r.sessionId)?.status).toBe('invalid');
+      } finally {
+        await f.runtime.dispose();
+      }
+    },
+  );
+
+  it('does not keep a browser after a page failure with uncertain input effects', async () => {
+    const f = fixture(async (r) => ({
+      isError: true,
+      value: {
+        kind: 'browser-error-v1',
+        operation: r.args.operation,
+        code: 'PAGE_UNAVAILABLE',
+        effect: 'unknown',
+        message: 'Unknown input outcome.',
+      },
+    }));
+    const r = {
+      ...request(),
+      permissionGranted: true,
+      args: { operation: 'click' as const, snapshotId: 'snapshot', ref: 'r0' },
+    };
+    try {
+      await f.runtime.execute(r);
+      expect(f.dispose).toHaveBeenCalledOnce();
+      expect(f.store.records.get(r.sessionId)?.status).toBe('invalid');
+    } finally {
+      await f.runtime.dispose();
+    }
+  });
   it('does not allocate or renew a runtime for spectators and refuses missing preview authorization', async () => {
     const f = fixture();
     const id = randomUUID();
@@ -218,20 +312,37 @@ describe('managed browser supervisor', () => {
     }
     expect(f.dispose).toHaveBeenCalledTimes(1);
   });
-  it('quarantines an unfinished dispatch after an outcome write fails; crash replay never resends it', async () => {
-    const f = fixture();
-    const r = request();
-    f.store.finish = async () => {
-      throw new Error('database unavailable');
-    };
-    expect(await f.runtime.execute(r)).toMatchObject({ value: { effect: 'unknown' } });
-    expect(f.dispose).toHaveBeenCalledTimes(1);
-    expect(await f.runtime.execute(r)).toMatchObject({
-      value: { code: 'NOT_EXECUTED', effect: 'unknown' },
-    });
-    expect(f.perform).toHaveBeenCalledTimes(1);
-    await f.runtime.dispose();
-  });
+  it.each([false, true])(
+    'quarantines an unfinished dispatch after an outcome write fails; crash replay never resends it (page error: %s)',
+    async (pageError) => {
+      const f = fixture(async (r) =>
+        pageError
+          ? {
+              isError: true,
+              value: {
+                kind: 'browser-error-v1',
+                operation: r.args.operation,
+                code: 'PAGE_UNAVAILABLE',
+                effect: 'unknown',
+                message: 'Page unavailable.',
+                recovery: 'navigate',
+              },
+            }
+          : success(r),
+      );
+      const r = request();
+      f.store.finish = async () => {
+        throw new Error('database unavailable');
+      };
+      expect(await f.runtime.execute(r)).toMatchObject({ value: { effect: 'unknown' } });
+      expect(f.dispose).toHaveBeenCalledTimes(1);
+      expect(await f.runtime.execute(r)).toMatchObject({
+        value: { code: 'NOT_EXECUTED', effect: 'unknown' },
+      });
+      expect(f.perform).toHaveBeenCalledTimes(1);
+      await f.runtime.dispose();
+    },
+  );
   it('refuses to take over an unconfirmed active supervisor after process loss', async () => {
     const f = fixture();
     const r = request();

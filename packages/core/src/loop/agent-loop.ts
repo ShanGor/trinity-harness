@@ -1,3 +1,4 @@
+import { phoneGuidance } from './phone-guidance.js';
 import { personalModelMessages, fitDialogue } from '../personal-assistant/memory.js';
 import type { PersonalContextPort, SessionMetaStore } from '@trinity-harness/contracts';
 import type { SkillRuntimePort } from '@trinity-harness/contracts';
@@ -800,7 +801,10 @@ export class CoreAgentLoop implements AgentLoop {
               : undefined,
             conclusion,
             'For workspace text-file inspection, use read_file (and glob to locate files) instead of Bash commands such as cat, head, tail, sed, or grep. Reserve Bash for running commands, tests, builds, version-control operations, and other shell tasks. Sensitive-file reads are checked by the agent and may trigger the normal approval flow; call read_file directly when needed, do not invoke a separate approval tool or bypass the gate with Bash, and stop if access is rejected. Never repeat secret values in your final answer.',
+            'Use the language of the current user request for all user-facing text, including the first acknowledgment, progress updates before and between tool calls, explanations of limitations and the final answer. For example, answer a Chinese request in Chinese from the first sentence. An explicit request for another response language takes precedence. Tool descriptions, source pages, earlier assistant text and runtime guidance written in English do not change the response language. Preserve names, code and necessary quoted text in their original language.',
+            'Describe failures at their observed scope. An unavailable page does not establish a browser-wide outage; later successful live calls show the browser worked for those calls. Do not claim an unvisited source failed, or present search snippets as a direct reading of the linked page.',
             'Keep progress updates brief. Answer the requested question directly with decisive observed evidence and material limits. Label inference; avoid speculative causal stories, unrequested calculations, unmeasured performance promises and internal verification bookkeeping. A later success does not make a recorded earlier failure false. Link factual claims to reference documents actually read using Markdown links. The interface lists sources separately; do not invent citations.',
+            phoneGuidance(committedPrompt.delivery),
           ]
             .filter((s) => s !== undefined)
             .join('\n\n');

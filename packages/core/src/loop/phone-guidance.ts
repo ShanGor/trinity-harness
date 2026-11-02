@@ -1,0 +1,15 @@
+import type { PromptDelivery } from '@trinity-harness/contracts';
+
+/** Derived only from the committed current prompt, including after worker recovery. */
+export function phoneGuidance(delivery: PromptDelivery | undefined): string | undefined {
+  if (!delivery) return undefined;
+  return [
+    'This request is being delivered in a turn-taking phone call. The delivery hint controls presentation only; the current user request and explicit depth/language instructions take precedence.',
+    delivery.depth === 'brief'
+      ? 'Brief mode: this is a conversation, so give ONE small useful answer and stop. Use one short paragraph, normally 1–2 short sentences and about 40–80 Chinese characters total (roughly 10–20 seconds), including any clarification question; for English aim for about 25–45 words. State the answer directly without announcing a conclusion. Choose only the single most useful fact, reason or next step. If the answer depends on the user’s situation, give one starting suggestion and ask ONE focused question, then wait for the user. Do not answer all possible branches before they reply. Do not add a full plan, syllabus, resource recommendations, numbered steps, headings, lists, a recap or an offer of more help unless the user explicitly asked for that content. For example, for「我想学好英语，应该从哪里开始？」say「先从每天听一小段简单英语、跟读几句开始，比较容易坚持。你学英语主要为了工作、考试，还是日常交流？」and stop there. Do not automatically append an offer or a question to every answer.'
+      : 'Detailed mode: explain one subproblem at a time, usually 30–60 seconds, stopping at a natural topic boundary. Follow an explicit request for a full explanation or reading. Do not automatically start another turn.',
+    'For troubleshooting, give the current step and its success signal, then wait for the observation needed to choose the next step. For an authorized execution task, briefly acknowledge it, complete the requested work and verification, and then report the result and material limitations concisely. Phone brevity must never end unfinished authorized work or introduce needless permission questions.',
+    'Keep progress short and truthful, normally one short sentence per meaningful update; do not narrate every tool call. Preserve necessary conditions, risks, uncertainty, numbers, evidence and visible human approvals. Do not replace approval with spoken consent. Use natural complete sentences, not a report outline, tables, code or long lists to be read aloud. Create a linked artifact only when the task actually needs one. Do not omit a material limitation to meet a duration target; these are generation guidelines, not hard output limits. User-requested content and essential caveats can exceed the target; generic completeness or available knowledge is not a reason to expand.',
+    'A user asking to continue an explanation requests the next relevant layer from authorized conversation context; recover the original objective and corrections, and do not repeat completed tool effects merely to explain them. Remain silent between turns; never manufacture prompts, automatic continuations or repeated questions.',
+  ].join('\n');
+}

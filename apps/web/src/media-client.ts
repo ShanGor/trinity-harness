@@ -1,3 +1,5 @@
+import { connectMicrophoneCapture, hasSpeechActivity } from './microphone-capture';
+
 /**
  * WebRTC media client (docs/webrtc-media-design.md): carries the phone call's
  * microphone uplink over a real RTCPeerConnection through the server's
@@ -17,7 +19,9 @@ const TOKEN_KEY = 'trinity.token';
 export interface WebRtcAsrHandlers {
   /** Provisional recognition text; must never be treated as a prompt. */
   onPartial(text: string): void;
-  /** VAD-endpointed final segment; safe to submit as an utterance. */
+  /** Local microphone speech, independent of recognition/network latency. */
+  onSpeechActivity?(): void;
+  /** Confirmed segment; the controller owns end-of-turn submission. */
   onFinal(text: string): void;
   onError(message: string): void;
   /** The media session ended (signal/media error, quota, shutdown). */
@@ -83,6 +87,11 @@ export async function startWebRtcAsr(
       noiseSuppression: true,
       autoGainControl: true,
     },
+  });
+  // Pre-roll owns the first utterance. Keep the uplink silent during setup
+  // until the controller explicitly resumes realtime recognition.
+  stream.getAudioTracks().forEach((track) => {
+    track.enabled = false;
   });
   const pc = new RTCPeerConnection();
   pc.addTrack(stream.getAudioTracks()[0]!);
@@ -186,6 +195,7 @@ export async function startWebRtcAsr(
     }
   };
   pc.onconnectionstatechange = () => {
+    if (!active) return;
     if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
       teardown();
       handlers.onEnd(`peer connection ${pc.connectionState}`);
@@ -193,6 +203,7 @@ export async function startWebRtcAsr(
   };
 
   let active = true;
+  let releaseCapture: (() => void) | null = null;
   /** One in-flight downlink speak(); resolved by tts_ended or abort. */
   let pendingSpeak: { resolve(): void; reject(error: Error): void } | null = null;
 
@@ -211,6 +222,8 @@ export async function startWebRtcAsr(
     }
     pendingSpeak?.resolve();
     pendingSpeak = null;
+    releaseCapture?.();
+    releaseCapture = null;
     stream.getTracks().forEach((track) => track.stop());
     void playbackContext.close().catch(() => {
       // Already closed.
@@ -233,6 +246,29 @@ export async function startWebRtcAsr(
     };
   });
   if (!opened) {
+    teardown();
+    return null;
+  }
+  ws.onclose = () => {
+    if (!active) return;
+    teardown();
+    handlers.onEnd('signaling connection closed');
+  };
+  try {
+    await playbackContext.resume();
+    releaseCapture = await connectMicrophoneCapture(playbackContext, stream, (samples) => {
+      if (
+        active &&
+        stream.getAudioTracks().some((track) => track.enabled) &&
+        hasSpeechActivity(samples)
+      )
+        handlers.onSpeechActivity?.();
+    });
+    if (!active) {
+      releaseCapture();
+      return null;
+    }
+  } catch {
     teardown();
     return null;
   }

@@ -1,8 +1,12 @@
+import { VOICE_CALL_SILENCE_MS } from '@trinity-harness/shared';
+import { connectMicrophoneCapture, hasSpeechActivity } from './microphone-capture';
+
 /**
  * Streaming ASR client (docs/voice-call-design.md §8.1): browser microphone →
  * PCM16 16 kHz frames → authenticated `/api/speech/asr/stream` WebSocket →
  * Fun-ASR `/ws` (via the server proxy). Provisional partials are captioned;
- * VAD-endpointed finals are delivered to the caller one utterance at a time.
+ * Confirmed segments are delivered while capture continues; the controller
+ * merges them and decides when the user's turn is complete.
  *
  * Capture follows the reference Fun-ASR frontend patterns: a 16 kHz
  * AudioContext created inside the click gesture (autoplay policy), AudioWorklet
@@ -19,7 +23,9 @@ const FRAME_SAMPLES = 1600; // 100 ms at 16 kHz
 export interface StreamingAsrHandlers {
   /** Provisional recognition text; must never be treated as a prompt. */
   onPartial(text: string): void;
-  /** VAD-endpointed final segment; safe to submit as an utterance. */
+  /** Local microphone speech, independent of recognition/network latency. */
+  onSpeechActivity?(): void;
+  /** Confirmed recognition segment; the controller owns end-of-turn submission. */
   onFinal(text: string): void;
   onError(message: string): void;
   /** The server ended the session (protocol error / quota / shutdown). */
@@ -168,13 +174,14 @@ export async function startStreamingAsr(
         mode: '2pass',
         itn: true,
         diarize: false, // single-speaker phone mode: skip speaker embeddings
-        split_silence_ms: 700,
+        split_silence_ms: VOICE_CALL_SILENCE_MS,
       }),
     );
   };
 
   const onChunk = (samples: Float32Array): void => {
     if (!sending || finished) return;
+    if (hasSpeechActivity(samples)) handlers.onSpeechActivity?.();
     const pcm = resample(samples);
     for (let i = 0; i < pcm.length; i += 1) pending.push(floatToInt16(pcm[i]!));
     while (pending.length >= FRAME_SAMPLES && ws.readyState === WebSocket.OPEN) {
@@ -184,39 +191,9 @@ export async function startStreamingAsr(
     }
   };
 
-  let captureNode: AudioNode | null = null;
+  let releaseCapture: (() => void) | null = null;
   try {
-    const source = context.createMediaStreamSource(stream);
-    const workletCode = `
-      class TrinityPcmCapture extends AudioWorkletProcessor {
-        process(inputs) {
-          const ch = inputs[0] && inputs[0][0];
-          if (ch) this.port.postMessage(ch.slice(0));
-          return true;
-        }
-      }
-      registerProcessor('trinity-pcm-capture', TrinityPcmCapture);`;
-    if (context.audioWorklet) {
-      const moduleUrl = URL.createObjectURL(
-        new Blob([workletCode], { type: 'application/javascript' }),
-      );
-      try {
-        await context.audioWorklet.addModule(moduleUrl);
-      } finally {
-        URL.revokeObjectURL(moduleUrl);
-      }
-      const node = new AudioWorkletNode(context, 'trinity-pcm-capture');
-      node.port.onmessage = (e: MessageEvent<Float32Array>) => onChunk(e.data);
-      source.connect(node);
-      node.connect(context.destination);
-      captureNode = node;
-    } else {
-      const sp = context.createScriptProcessor(4096, 1, 1);
-      sp.onaudioprocess = (e) => onChunk(new Float32Array(e.inputBuffer.getChannelData(0)));
-      source.connect(sp);
-      sp.connect(context.destination);
-      captureNode = sp;
-    }
+    releaseCapture = await connectMicrophoneCapture(context, stream, onChunk);
   } catch {
     stream.getTracks().forEach((track) => track.stop());
     void context.close();
@@ -248,6 +225,7 @@ export async function startStreamingAsr(
   };
   ws.onclose = () => {
     active = false;
+    if (!finished) handlers.onEnd('connection closed');
   };
   ws.onerror = () => {
     handlers.onError('Streaming speech connection error');
@@ -257,7 +235,7 @@ export async function startStreamingAsr(
 
   const release = (): void => {
     try {
-      captureNode?.disconnect();
+      releaseCapture?.();
     } catch {
       // Already released.
     }

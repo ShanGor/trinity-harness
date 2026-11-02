@@ -11,6 +11,10 @@ Revision: Adopt Anthropic's browser interaction patterns through Trinity's exist
 
 ## Implementation status (2026-10-09)
 
+2026-10-30 reliability update: empty public comment editors no longer suppress otherwise public captures; populated text/non-text drafts and sensitive forms remain blocked, with no scope bypass. Table aggregates are bounded before schema validation. Read scopes and scroll arguments have explicit feedback, and rejected/unexecuted calls and page-specific privacy failures no longer form a browser-channel failure streak. Adapter diagnostics retain only known schema fields and issue codes. Local DOM and opt-in pinned-Zendriver fixtures cover these cases; this does not establish public-site access or answer-quality acceptance.
+
+A further page-failure recovery update covers Chrome error/blank documents appearing during capture, disagreement between tab and document probes, and failed navigation commands followed by successful browser inspection. These produce page-scoped recovery without replaying navigation or committing invalid evidence. Real transport failures and malformed adapter output retain fail-closed handling. Local error-page/recovery fixtures do not establish public-site reachability.
+
 The read-only foundation is implemented in `packages/core/src/tools/browser*` and `packages/contracts/src/browser.ts`:
 
 - Bounded literal-argv Sandbox execution caps stdout/stderr while consuming process chunks; overflow kills/reaps the process. The trusted adapter owns CLI flags, fixed extractor and envelope validation.

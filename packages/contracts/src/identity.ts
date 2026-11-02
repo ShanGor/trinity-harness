@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import type { SpeechPreferences } from './speech.js';
+
 import type { PermissionPolicy } from './approval.js';
 
 /**
@@ -105,6 +107,13 @@ export interface UserStore {
     passwordHash: string;
     role: Role;
   }): Promise<User>;
+  /** Account TTS preferences, scoped to the authenticated owner, never model context. */
+  getSpeechPreferences?(tenantId: string, userId: string): Promise<SpeechPreferences | null>;
+  setSpeechPreferences?(
+    tenantId: string,
+    userId: string,
+    preferences: SpeechPreferences,
+  ): Promise<boolean>;
   /** Tenant-scoped listing; admin endpoints only. */
   listByTenant(tenantId: string): Promise<User[]>;
 }

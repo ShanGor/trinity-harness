@@ -282,6 +282,7 @@ it('drains queued prompts in source order after reversed delivery and deduplicat
       type: 'prompt/queued' as const,
       promptId,
       content: [{ kind: 'text' as const, text: `request ${i}` }],
+      ...(i === 0 ? { delivery: { mode: 'phone' as const, depth: 'brief' as const } } : {}),
       actor: owner.userId,
       tenantId: owner.tenantId,
       policy: parsePermissionPolicy('read-only'),
@@ -303,6 +304,9 @@ it('drains queued prompts in source order after reversed delivery and deduplicat
     calls.push(ordered.prompt);
     const user = (await store.load(owner.id))[ordered.promptSeq - 1]!;
     expect(user.type).toBe('message/user');
+    expect(user.type === 'message/user' ? user.delivery : null).toEqual(
+      ordered.prompt === 'request 0' ? { mode: 'phone', depth: 'brief' } : undefined,
+    );
     await store.append(owner.id, [
       { type: 'turn/end', eventId: randomUUID(), at, reason: 'completed', promptId: user.eventId },
     ]);

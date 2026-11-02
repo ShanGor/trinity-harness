@@ -1188,7 +1188,24 @@ export class ManagedBrowserSupervisor
       result.value.kind === 'browser-error-v1' &&
       result.value.code === 'NOT_AUTHORIZED' &&
       result.value.effect === 'none';
-    if (result.isError && !sourceDenied && !intervention) await this.destroy(scope);
+    // A journaled page/read limitation does not invalidate a healthy shared
+    // browser. Preserve its generation for fresh observation, while retaining
+    // teardown for uncertain input, transport and persistence failures.
+    const pageFailure =
+      result.value.kind === 'browser-error-v1' &&
+      result.value.operation === request.args.operation &&
+      ((result.value.effect === 'none' &&
+        [
+          'PAGE_UNAVAILABLE',
+          'PRIVACY_DENIED',
+          'STALE_TARGET',
+          'LIMIT_REACHED',
+          'INVALID_ARGUMENTS',
+          'ARTIFACT_UNAVAILABLE',
+        ].includes(result.value.code)) ||
+        (result.value.code === 'PAGE_UNAVAILABLE' &&
+          ['navigate', 'web_search'].includes(request.args.operation)));
+    if (result.isError && !sourceDenied && !pageFailure && !intervention) await this.destroy(scope);
     else if (this.sessions.get(scope) === session) this.armIdle(scope);
     return result;
   }

@@ -31,11 +31,14 @@ export function browserSurfaceScript(
     if(scopePath) for(const index of scopePath) root=root?.children[index];
     if(!root || !visible(root)) throw Error('scope unavailable');
     const targets=[]; let visited=0, truncated=false, privacyDenied=false;
-    const sensitive=el=>el.matches('input[type=password],input[type=file]') || /password|secret|token|credit|card|cvc|ssn|one-time-code/i.test([el.name,el.id,el.autocomplete,el.getAttribute('aria-label')].join(' '));
+    const editable=el=>el.hasAttribute('contenteditable') && el.getAttribute('contenteditable')!=='false';
+    const sensitive=el=>editable(el) || el.matches('input[type=password],input[type=file]') || /password|secret|token|credit|card|cvc|ssn|one-time-code/i.test([el.name,el.id,el.autocomplete,el.getAttribute('aria-label')].join(' '));
     let privateNodes=0;
-    for(const el of document.querySelectorAll('input,textarea,[contenteditable=true]')) {
+    for(const el of document.querySelectorAll('input,textarea,[contenteditable]')) {
       if(++privateNodes>5000){privacyDenied=true;break;}
-      if(visible(el) && (el.getAttribute('contenteditable')==='true' || (sensitive(el) && (el.value || el.type==='file')))) privacyDenied=true;
+      // Public articles often contain an empty comment editor. Only populated
+      // editors (including non-text drafts) require whole-page suppression.
+      if(visible(el) && ((editable(el) && (el.textContent.trim() || el.querySelector('img,svg,video,audio,canvas,iframe,object,embed,input,textarea,select'))) || (sensitive(el) && (el.value || el.type==='file')))) privacyDenied=true;
     }
     const walker=document.createTreeWalker(root,NodeFilter.SHOW_ELEMENT);
     for(let el=root;el;el=walker.nextNode()) {

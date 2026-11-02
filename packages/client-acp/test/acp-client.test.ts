@@ -505,6 +505,29 @@ describe('AcpClient', () => {
     }
   });
 
+  it('sends per-prompt phone hints without leaking them into later text prompts', async () => {
+    const bodies: unknown[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ accepted: true }), { status: 202 });
+    });
+    try {
+      const client = new AcpClient({
+        baseUrl: 'http://x',
+        eventSourceFactory: (u) => new FakeEventSource(u),
+      });
+      await client.sendPrompt('s', '原始识别文本', [], { mode: 'phone', depth: 'brief' });
+      await client.sendPrompt('s', '普通文字请求');
+      expect(bodies).toEqual([
+        { text: '原始识别文本', delivery: { mode: 'phone', depth: 'brief' } },
+        { text: '普通文字请求' },
+      ]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it('creates sessions, sends prompts and fetches history', async () => {
     const { impl } = fakeFetch({
       'POST http://x/api/sessions': () =>

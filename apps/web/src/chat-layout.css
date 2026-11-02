@@ -1219,9 +1219,10 @@
 .voice-call-orb {
   display: grid;
   place-items: center;
-  width: 112px;
-  height: 112px;
-  margin-top: 30px;
+  flex-shrink: 0;
+  width: 80px;
+  height: 80px;
+  margin-top: 20px;
   border-radius: 50%;
   background: var(--primary-soft);
   color: var(--primary);
@@ -1246,13 +1247,19 @@
 }
 
 .voice-call-status.ant-typography {
-  margin: 24px 0 8px;
+  margin: 16px 0 8px;
+  text-align: center;
+}
+
+.voice-call-depth-note.ant-typography {
+  margin: 8px 0;
+  font-size: 12px;
   text-align: center;
 }
 
 .voice-call-captions {
   width: 100%;
-  min-height: 128px;
+  min-height: 80px;
   max-height: 220px;
   margin: 4px 0 20px;
   padding: 14px 16px;
@@ -1290,7 +1297,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 24px;
+  gap: 16px;
   width: 100%;
   margin-top: 20px;
 }
@@ -1310,7 +1317,7 @@
 }
 
 .voice-call-note.ant-typography {
-  margin-top: 22px;
+  margin-top: 14px;
   color: var(--text-muted);
   font-size: 12px;
   text-align: center;
@@ -1386,7 +1393,12 @@
   }
 
   .voice-call-controls {
-    gap: 20px;
+    gap: clamp(6px, 2vw, 16px);
+  }
+
+  .voice-call-controls .ant-btn {
+    width: 48px;
+    height: 48px;
   }
 
   .voice-call-note.ant-typography {

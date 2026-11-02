@@ -67,6 +67,7 @@ function findLongSegmentBreak(
 export function segmentSpeechText(
   text: string,
   final: boolean,
+  maxSegments = Number.POSITIVE_INFINITY,
 ): { segments: string[]; remainder: string; consumed: number } {
   const segments: string[] = [];
   let segmentStart = 0;
@@ -77,7 +78,7 @@ export function segmentSpeechText(
     if (segment.length > 0) segments.push(segment);
   };
 
-  while (index < text.length) {
+  while (index < text.length && segments.length < maxSegments) {
     const character = text[index]!;
 
     if (character === '\n' || character === '\r') {
@@ -96,16 +97,15 @@ export function segmentSpeechText(
     // cumulative chunk may extend it into a decimal. Wait for more input.
     if (couldBecomeDecimalPoint) break;
 
+    // Lists and semicolons stay within the same synthesis request. Restarting
+    // VoiceDesign for each tiny clause disrupts phrasing and can change pace.
     const isSentenceBoundary =
       character === '。' ||
       character === '！' ||
       character === '？' ||
-      character === '；' ||
-      character === '、' ||
       character === '.' ||
       character === '!' ||
-      character === '?' ||
-      character === ';';
+      character === '?';
 
     if (isSentenceBoundary && !isDecimalPoint) {
       emit(index + 1);
@@ -125,7 +125,7 @@ export function segmentSpeechText(
     index += 1;
   }
 
-  if (final) {
+  if (final && segments.length < maxSegments) {
     emit(text.length);
     segmentStart = text.length;
   }

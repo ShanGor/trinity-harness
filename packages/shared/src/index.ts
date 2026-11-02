@@ -1,4 +1,12 @@
 export * from './env.js';
+export {
+  DEFAULT_SPEECH_STYLE,
+  DEFAULT_SPEECH_PREFERENCES,
+  speechPreferencesSchema,
+  speechSynthesisRequestSchema,
+} from '@trinity-harness/contracts';
+export type { SpeechPreferences } from '@trinity-harness/contracts';
+export { VOICE_CALL_SILENCE_MS } from '@trinity-harness/contracts';
 export * from './ids.js';
 export * from './protocol.js';
 export * from './usage.js';
@@ -61,3 +69,5 @@ export type {
   HistoryPage,
   MemorySelectionsResponse,
 } from '@trinity-harness/contracts';
+
+export { promptDeliverySchema, type PromptDelivery } from '@trinity-harness/contracts';

@@ -1,5 +1,6 @@
 import type { Identity, PasswordHasher, Role, User, UserStore } from '@trinity-harness/contracts';
-import { asc, eq } from 'drizzle-orm';
+import { speechPreferencesSchema, type SpeechPreferences } from '@trinity-harness/contracts';
+import { and, asc, eq } from 'drizzle-orm';
 import { newId } from '@trinity-harness/shared';
 
 import type { Db } from './client.js';
@@ -63,6 +64,29 @@ export class PgUserStore implements UserStore {
       throw new Error('createUser: no row returned');
     }
     return toUser(row);
+  }
+
+  async getSpeechPreferences(tenantId: string, userId: string): Promise<SpeechPreferences | null> {
+    const [row] = await this.db
+      .select({ voiceStyle: users.speechVoiceStyle })
+      .from(users)
+      .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)))
+      .limit(1);
+    return row?.voiceStyle == null ? null : speechPreferencesSchema.parse(row);
+  }
+
+  async setSpeechPreferences(
+    tenantId: string,
+    userId: string,
+    preferences: SpeechPreferences,
+  ): Promise<boolean> {
+    const parsed = speechPreferencesSchema.parse(preferences);
+    const rows = await this.db
+      .update(users)
+      .set({ speechVoiceStyle: parsed.voiceStyle })
+      .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)))
+      .returning({ id: users.id });
+    return rows.length === 1;
   }
 
   async listByTenant(tenantId: string): Promise<User[]> {

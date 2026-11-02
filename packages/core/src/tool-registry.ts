@@ -76,7 +76,41 @@ export class CoreToolRegistry implements ToolRegistry {
             code: 'INVALID_ARGUMENTS',
             operation: 'browser',
             effect: 'none',
-            message: 'Invalid or disabled browser operation arguments.',
+            // Fixed field names and schema codes only: Zod messages may echo
+            // supplied URLs, enum values or other private arguments.
+            message: `Invalid or disabled browser operation arguments. Check the tool schema: ${[
+              ...new Set(
+                parsed.error.issues.slice(0, 4).map((issue) => {
+                  const field = issue.path[0];
+                  const known =
+                    typeof field === 'string' &&
+                    [
+                      'operation',
+                      'url',
+                      'query',
+                      'readiness',
+                      'scope',
+                      'snapshotId',
+                      'ref',
+                      'point',
+                      'text',
+                      'direction',
+                      'pixels',
+                      'key',
+                      'filter',
+                      'mode',
+                      'observationId',
+                      'blockIds',
+                      'sectionId',
+                      'cursor',
+                      'crop',
+                    ].includes(field);
+                  return `${known ? field : 'arguments'}/${issue.code}`;
+                }),
+              ),
+            ].join(
+              ', ',
+            )}. Nothing was executed. Correct the arguments; this is not a browser outage.`,
           }),
         };
       return {

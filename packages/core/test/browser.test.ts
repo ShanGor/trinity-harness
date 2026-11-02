@@ -1048,6 +1048,53 @@ describe('bounded saved reading and evidence', () => {
   });
 });
 
+it.each([
+  'chrome-error://chromewebdata/',
+  'about:blank',
+  'about:srcdoc',
+  'data:text/html,unreadable',
+  `https://example.com/?q=${'x'.repeat(2100)}`,
+])(
+  'refuses %s captures without declaring a channel outage or persisting error-page evidence',
+  async (url) => {
+    const page = { ...capture, url };
+    const { run, blobs, calls } = await assembly({ authorize: async () => binding }, page);
+    const failed = await run('failed', {
+      operation: 'navigate',
+      url: 'https://example.com/failed',
+    });
+    expect(failed).toMatchObject({
+      isError: true,
+      value: { code: 'PAGE_UNAVAILABLE', recovery: 'navigate', effect: 'unknown' },
+    });
+    expect(blobs.data.size).toBe(0);
+    expect(calls.filter((args) => args.includes('open'))).toHaveLength(1);
+    page.url = 'https://example.com/article';
+    const recovered = await run('different-source', {
+      operation: 'navigate',
+      url: 'https://example.com/article',
+    });
+    expect(recovered.isError).toBe(false);
+    expect(browserResultSchema.parse(recovered.value).url).toBe('https://example.com/article');
+    expect(calls.filter((args) => args.includes('open'))).toHaveLength(2);
+  },
+);
+
+it('refuses credentials in a late captured URL without exposing values or committing evidence', async () => {
+  const { run, blobs } = await assembly(
+    { authorize: async () => binding },
+    { ...capture, url: 'https://private-user:private-password@example.com/' },
+  );
+  const failed = await run('private-url', { operation: 'navigate', url: 'https://example.com/' });
+  expect(failed).toMatchObject({
+    isError: true,
+    value: { code: 'PRIVACY_DENIED', effect: 'unknown' },
+  });
+  expect(JSON.stringify(failed)).not.toContain('private-user');
+  expect(JSON.stringify(failed)).not.toContain('private-password');
+  expect(blobs.data.size).toBe(0);
+});
+
 it('bounds malformed argument diagnostics without echoing model keys', async () => {
   const { registry } = await assembly();
   const result = await registry.execute(
@@ -1066,6 +1113,75 @@ it('bounds malformed argument diagnostics without echoing model keys', async () 
     BROWSER_LIMITS.diagnostic,
   );
   expect(JSON.stringify(result.value)).not.toContain('secret');
+});
+
+it('reports exact invalid browser fields without performing a call or echoing arguments', async () => {
+  const { registry, calls } = await assembly();
+  const result = await registry.execute(
+    {
+      id: 'scroll',
+      name: 'browser',
+      args: {
+        operation: 'scroll',
+        direction: 'down',
+        pixels: 3000,
+      },
+    },
+    { sessionId: 's', workspaceRoot: '/ws' },
+  );
+  const error = browserErrorSchema.parse(result.value);
+  expect(error.code).toBe('INVALID_ARGUMENTS');
+  expect(error.message).toContain('snapshotId/invalid_type');
+  expect(error.message).toContain('pixels/too_big');
+  expect(error.message).toContain('not a browser outage');
+  expect(calls).toEqual([]);
+});
+
+it('rejects misplaced read scope fields instead of silently reading the whole page', async () => {
+  const { registry, calls } = await assembly();
+  const result = await registry.execute(
+    {
+      id: 'read',
+      name: 'browser',
+      args: {
+        operation: 'read_page',
+        snapshotId: 'PRIVATE_SNAPSHOT',
+        ref: 'r15',
+      },
+    },
+    { sessionId: 's', workspaceRoot: '/ws' },
+  );
+  const error = browserErrorSchema.parse(result.value);
+  expect(error.code).toBe('INVALID_ARGUMENTS');
+  expect(error.message).toContain('scope/custom');
+  expect(error.message).not.toContain('PRIVATE_SNAPSHOT');
+  expect(calls).toEqual([]);
+});
+
+it('bounds adapter validation diagnostics to schema fields and codes', async () => {
+  const { run, sandbox } = await assembly();
+  const old = sandbox.argvHandler!;
+  sandbox.argvHandler = async (cmd, args, opts) =>
+    args.includes('eval')
+      ? {
+          stdout: JSON.stringify({
+            success: true,
+            data: {
+              ...capture,
+              blocks: [{ ...capture.blocks[0], text: 'PRIVATE_VALUE'.repeat(6000) }],
+            },
+          }),
+          stderr: '',
+          exitCode: 0,
+          outputOverflow: false,
+        }
+      : old(cmd, args, opts);
+  const result = await run('invalid-capture', { operation: 'get_page_text' });
+  const error = browserErrorSchema.parse(result.value);
+  expect(error.code).toBe('DRIVER_FAILED');
+  expect(error.message).toContain('blocks/too_big');
+  expect(error.message).not.toContain('PRIVATE_VALUE');
+  expect(error.message.length).toBeLessThanOrEqual(500);
 });
 
 it('continues live reading beyond the former cumulative delivery ceilings', async () => {

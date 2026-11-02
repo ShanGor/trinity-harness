@@ -22,6 +22,8 @@ import type {
 import { MemorySessionStore } from '@trinity-harness/core';
 import type { SessionMetaStore } from '@trinity-harness/contracts';
 
+import { DEFAULT_SPEECH_PREFERENCES, type SpeechPreferences } from '@trinity-harness/shared';
+
 import { buildServer } from '../src/index.js';
 
 const WS_DIR = mkdtempSync(path.join(tmpdir(), 'trinity-auth-'));
@@ -39,6 +41,7 @@ class FakeHasher implements PasswordHasher {
 
 class FakeUserStore implements UserStore {
   private readonly byId = new Map<string, User>();
+  private readonly speech = new Map<string, SpeechPreferences>();
   private readonly passwords = new Map<string, string>();
   constructor(private readonly hasher: FakeHasher) {}
 
@@ -72,6 +75,18 @@ class FakeUserStore implements UserStore {
     this.byId.set(user.id, user);
     this.passwords.set(user.id, input.passwordHash.replace(/^h:/, ''));
     return user;
+  }
+  async getSpeechPreferences(tenantId: string, userId: string): Promise<SpeechPreferences | null> {
+    return this.byId.get(userId)?.tenantId === tenantId ? (this.speech.get(userId) ?? null) : null;
+  }
+  async setSpeechPreferences(
+    tenantId: string,
+    userId: string,
+    preferences: SpeechPreferences,
+  ): Promise<boolean> {
+    if (this.byId.get(userId)?.tenantId !== tenantId) return false;
+    this.speech.set(userId, preferences);
+    return true;
   }
   async listByTenant(tenantId: string): Promise<User[]> {
     return [...this.byId.values()].filter((u) => u.tenantId === tenantId);
@@ -209,6 +224,73 @@ describe('M2 auth / tenants / RBAC', () => {
       expect(res.status, path).toBe(401);
     }
     expect((await fetch(`${baseUrl}/api/health`)).status).toBe(200);
+  });
+
+  it('saves voice preferences for the authenticated account and fails visibly on storage errors', async () => {
+    const bundle = await makeApp();
+    const baseUrl = await bundle.app.listen({ port: 0, host: '127.0.0.1' });
+    try {
+      const tokens: string[] = [];
+      for (const [tenantId, email] of [
+        ['speech-tenant-a', 'speech-a@example.com'],
+        ['speech-tenant-b', 'speech-b@example.com'],
+      ]) {
+        await bundle.users.createUser({
+          tenantId: tenantId!,
+          email: email!,
+          passwordHash: 'h:password123',
+          role: 'developer',
+        });
+        tokens.push((await login(baseUrl, email!, 'password123')).token!);
+      }
+      const route = '/api/me/speech-preferences';
+      expect((await authed(baseUrl, undefined, route)).status).toBe(401);
+      expect(await (await authed(baseUrl, tokens[0], route)).json()).toEqual(
+        DEFAULT_SPEECH_PREFERENCES,
+      );
+      const custom = { voiceStyle: '标准普通话，温柔沉稳的成年男声，语速舒缓。' };
+      expect(
+        (await authed(baseUrl, tokens[0], route, { method: 'PUT', body: JSON.stringify(custom) }))
+          .status,
+      ).toBe(200);
+      expect(await (await authed(baseUrl, tokens[0], route)).json()).toEqual(custom);
+      expect(await (await authed(baseUrl, tokens[1], route)).json()).toEqual(
+        DEFAULT_SPEECH_PREFERENCES,
+      );
+      for (const body of [
+        { voiceStyle: '' },
+        { voiceStyle: 'a'.repeat(1001) },
+        { ...custom, userId: 'another-user' },
+      ]) {
+        expect(
+          (await authed(baseUrl, tokens[0], route, { method: 'PUT', body: JSON.stringify(body) }))
+            .status,
+        ).toBe(400);
+      }
+      const read = vi
+        .spyOn(bundle.users, 'getSpeechPreferences')
+        .mockRejectedValueOnce(new Error('storage'));
+      expect((await authed(baseUrl, tokens[0], route)).status).toBe(503);
+      read.mockRestore();
+      const write = vi
+        .spyOn(bundle.users, 'setSpeechPreferences')
+        .mockRejectedValueOnce(new Error('storage'));
+      expect(
+        (await authed(baseUrl, tokens[0], route, { method: 'PUT', body: JSON.stringify(custom) }))
+          .status,
+      ).toBe(503);
+      write.mockRestore();
+      expect(
+        (
+          await authed(baseUrl, tokens[0], route, {
+            method: 'PUT',
+            body: JSON.stringify(DEFAULT_SPEECH_PREFERENCES),
+          })
+        ).status,
+      ).toBe(200);
+    } finally {
+      await bundle.app.close();
+    }
   });
 
   it('admin bootstraps users; roles are enforced (viewer read-only, audit admin-only)', async () => {

@@ -99,6 +99,35 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
     expect((await users.listByTenant(otherTenantId)).some((u) => u.email === addr)).toBe(false);
   });
 
+  it('persists account voice preferences with both tenant and user fences', async () => {
+    const owner = await users.createUser({
+      tenantId,
+      email: email(),
+      passwordHash: 'h',
+      role: 'developer',
+    });
+    const peer = await users.createUser({
+      tenantId,
+      email: email(),
+      passwordHash: 'h',
+      role: 'developer',
+    });
+    const preferences = { voiceStyle: '标准普通话，亲切耐心的女声。' };
+    expect(await users.getSpeechPreferences(tenantId, owner.id)).toBeNull();
+    expect(await users.setSpeechPreferences(tenantId, owner.id, preferences)).toBe(true);
+    const reopened = new PgUserStore(createDb(pool), fakeHasher);
+    expect(await reopened.getSpeechPreferences(tenantId, owner.id)).toEqual(preferences);
+    expect(await reopened.getSpeechPreferences(tenantId, peer.id)).toBeNull();
+    expect(await reopened.getSpeechPreferences(otherTenantId, owner.id)).toBeNull();
+    expect(
+      await reopened.setSpeechPreferences(otherTenantId, owner.id, { voiceStyle: 'changed' }),
+    ).toBe(false);
+    expect(await reopened.getSpeechPreferences(tenantId, owner.id)).toEqual(preferences);
+    await expect(
+      users.setSpeechPreferences(tenantId, owner.id, { voiceStyle: '' }),
+    ).rejects.toThrow();
+  });
+
   it('stores session metadata and scopes listings by identity role', async () => {
     const owner = await users.createUser({
       tenantId,

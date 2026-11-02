@@ -35,6 +35,22 @@ function actionGuidance(events: readonly SessionEvent[]): string[] {
     if (event.type !== 'tool/result') continue;
     const call = calls.get(event.callId);
     if (!call || ['task', 'skill', 'research', 'recall'].includes(call.name)) continue;
+    if (call.name === 'browser' && event.isError) {
+      const error = browserErrorSchema.safeParse(event.value);
+      if (
+        error.success &&
+        [
+          'INVALID_ARGUMENTS',
+          'NOT_EXECUTED',
+          'PAGE_UNAVAILABLE',
+          'PRIVACY_DENIED',
+          'STALE_TARGET',
+          'LIMIT_REACHED',
+          'ARTIFACT_UNAVAILABLE',
+        ].includes(error.data.code)
+      )
+        continue;
+    }
     if (
       call.name === 'bash' &&
       browserCommand((call.args as { command?: unknown } | null)?.command)
@@ -148,8 +164,16 @@ export function progressGuidance(
           seen.add(signature);
         }
       } else if (!saved) {
-        failures += 1;
         const error = browserErrorSchema.safeParse(event.value);
+        // A protected page, stale snapshot or rejected arguments do not
+        // establish that the live browser channel is unavailable.
+        if (
+          !error.success ||
+          ['DRIVER_FAILED', 'INVALID_OUTPUT', 'TRANSPORT_OVERFLOW', 'CANCELLED'].includes(
+            error.data.code,
+          )
+        )
+          failures += 1;
         if (error.success && ['NOT_AUTHORIZED', 'DISABLED'].includes(error.data.code))
           liveAccessDenied = true;
       }
@@ -204,7 +228,7 @@ export function progressGuidance(
     );
   if (failures >= 3)
     advice.push(
-      'At least three consecutive browser commands failed or returned empty reads without a successful live operation. Successful saved reads do not demonstrate live recovery. Follow the structured error recovery once; change sources only for a source-specific failure. If access remains unavailable, answer from supported evidence or ask the focused question needed to proceed, explicitly reporting incomplete work. Do not keep testing domains or retrying the same unsuccessful sequence.',
+      'At least three browser channel failures or empty reads occurred without a successful live operation. Successful saved reads do not demonstrate live recovery. Follow the structured error recovery once; change sources only for a source-specific failure. If access remains unavailable, answer from supported evidence or ask the focused question needed to proceed, explicitly reporting incomplete work. Do not keep testing domains or retrying the same unsuccessful sequence.',
     );
   if (headingOnlySelection)
     advice.push(
