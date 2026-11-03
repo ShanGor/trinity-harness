@@ -891,3 +891,21 @@ Stock v2 verification now checks for a committed minimal plan before mutation/un
 The [2026-10-25 execution update](intent-execution-design.md#general-action-selection-and-shared-tool-allowance-2026-10-25) extends current-request action-economy/continuation instructions and injects the current run's safe policy snapshot. Replay-derived guidance now covers repeated failures and unchanged reads across tools, without semantic completion judgments or automatic termination. Tools remain inside their configured sandbox; no personal agent access to physical KVM host diagnostics is introduced.
 
 Optional `TASK_MAX_TOOL_CALLS` is shared across parent/children through persisted `task/tool_reservation` events. Complete waves are reserved before approvals/execution; rejected or interrupted reservations remain spent. If a wave cannot fit, no calls in it execute and the next model request concludes with explicit gaps. An omitted ceiling remains unlimited; current request/token/time/cost limits and approvals continue to apply. Enable the new ceiling only after all event readers understand its additive event schema. See [deployment guidance](deployment-guide.md#general-action-controls).
+
+### Single-host Podman packaging
+
+`scripts/deploy-podman.sh` provides a trusted local deployment using a shared
+application image and a Bifrost Bridge frontend image built from a separate source
+checkout. The browser supervisor runs as a fifth container using the same app
+image. PostgreSQL, Redis and the privileged Node Agent remain host services; the
+command ensures the installed Node Agent is started and probes both runtime
+services before starting server/worker. Host networking and a same-path workspace
+mount preserve existing bindings. This command supports the provisioned single-node
+Firecracker/Zendriver topology and never upgrades or restarts active host runtimes.
+`scripts/podman-services.sh start|stop|restart|status` operates the five existing
+containers without builds, migrations or replacement. Start/restart use their saved
+configuration and authenticated runtime readiness probes; stop preserves host
+services and guest VMs. Gateway containers carry their configured web port as a
+label for subsequent readiness checks (legacy deployments default to 8080).
+See the deployment guide for prerequisites and lifecycle limits. This packaging
+does not change module boundaries or the Firecracker maintenance gates.

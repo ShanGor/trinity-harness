@@ -5,6 +5,13 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Single-host Podman deployment (2026-11-02)
+
+- [x] Added `scripts/podman-services.sh start|stop|restart|status` for existing rootless application containers, with saved configuration, authenticated startup probes, reverse shutdown ordering and a command guide in `docs/deployment-guide.md`. Service commands preserve host services/VMs and skip builds/migrations.
+- [x] Added `scripts/deploy-podman.sh` to build the frontend, package installed dependencies, build Bifrost Bridge, apply migrations and start five rootless containers including the browser runtime. The command ensures the provisioned host Node Agent is active and authenticates both runtime endpoints before starting server/worker. Host PostgreSQL/Redis, VM images and runtime identities are preserved.
+- [x] Exercised deployment on the local node: migrations, browser runtime startup, authenticated no-effect runtime validation, gateway health, SPA fallback, JavaScript assets, login and authenticated API access passed. Worker/audit consumers connected. Shell syntax, runtime configuration/probe unit tests, lint, typecheck and frontend build passed.
+- [ ] Host reboot startup, authenticated SSE/WebSocket streams, inactive Node Agent polkit startup and real guest tool execution through this container deployment remain unverified; existing host development consumers remain independent.
+
 ### Telephone reply length and TTS pacing follow-up (2026-11-02)
 
 - [x] Confirmed a brief-mode request reached the model with the expected delivery guidance but still produced a 752-character curriculum. Moved current-request phone guidance to the end of system assembly and narrowed the default to one short paragraph, normally 1–2 sentences / 40–80 Chinese characters including any needed clarification. Ask one relevant question and wait instead of covering all branches/resources; explicit depth requests, material caveats and authorized work still take precedence.

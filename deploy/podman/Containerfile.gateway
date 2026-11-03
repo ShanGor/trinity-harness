@@ -1,0 +1,7 @@
+FROM docker.io/library/node:22-trixie-slim
+COPY bifrost-bridge /usr/local/bin/bifrost-bridge
+COPY dist /srv/web
+COPY gateway.json /etc/bifrost.json
+WORKDIR /tmp
+USER 1000:1000
+ENTRYPOINT ["/usr/local/bin/bifrost-bridge", "-c", "/etc/bifrost.json"]

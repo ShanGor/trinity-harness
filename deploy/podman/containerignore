@@ -1,0 +1,12 @@
+.git
+ref
+docs
+*.md
+.env
+.env.*
+deploy/helm
+scripts
+
+# Runtime skills are shipped instruction packages.
+!skills/
+!skills/**

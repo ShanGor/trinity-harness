@@ -207,6 +207,11 @@ Secrets live server-side only: they are never sent to the frontend and never log
 
 ## Deploying (M5)
 
+For the rootless single-host stack, use `./scripts/deploy-podman.sh` to build and
+deploy, then `./scripts/podman-services.sh start|stop|restart|status` for service
+control without rebuilding. See the [Podman command guide](docs/deployment-guide.md#single-host-podman-deployment)
+for prerequisites, configuration changes and host/VM lifecycle boundaries.
+
 ```bash
 # Build images (from the repo root)
 docker build -f deploy/docker/Dockerfile.server -t trinity-harness/server:0.5.0 .

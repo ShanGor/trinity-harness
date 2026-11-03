@@ -173,3 +173,96 @@ Server and worker now use general action-economy/continuation instructions, a sa
 `TASK_MAX_TOOL_CALLS` optionally sets a shared per-task tool-call ceiling, including parent, children, control calls and attempted rejected waves. Configure the same value in server and worker; Helm exposes `config.taskMaxToolCalls` (default null). Omission remains unlimited. The task captures the setting at creation; changes do not raise previously recorded limits. A complete wave that cannot fit is rejected before approvals/execution, and conservative reservations survive crashes. The next model step concludes without tools if other model budgets permit it. This bounds calls, not semantic quality or the duration of an individual tool. Existing deadlines, quotas, cancellation and per-call timeouts remain separate.
 
 Deploy matching updated event readers/server/worker and rebuild the production web bundle before enabling the new `task/tool_reservation` event writer. These are control-plane changes: no guest image rebuild, Node Agent restart or VM restart is required. Existing development watch processes reload changed sources; production processes need their normal deployment/restart. See [the execution design](intent-execution-design.md#general-action-selection-and-shared-tool-allowance-2026-10-25) and [evaluation procedure](intent-evaluation.md).
+
+## Single-host Podman deployment
+
+### Command guide
+
+Run these commands as the same unprivileged user that deployed the containers.
+The scripts find the checkout from their own location; examples assume the
+repository root. Use `./scripts/podman-services.sh --help` for usage.
+
+| Task                                             | Command                                    | Behavior                                                                   |
+| ------------------------------------------------ | ------------------------------------------ | -------------------------------------------------------------------------- |
+| Initial deployment or updated code/configuration | `./scripts/deploy-podman.sh`               | Build images, apply migrations and replace all five containers             |
+| Start an existing deployment                     | `./scripts/podman-services.sh start`       | Start saved containers and check runtime/API/web readiness                 |
+| Stop application services                        | `./scripts/podman-services.sh stop`        | Stop containers in reverse dependency order, retaining them and their data |
+| Restart application services                     | `./scripts/podman-services.sh restart`     | Stop, then start the same containers with readiness checks                 |
+| Inspect container state                          | `./scripts/podman-services.sh status`      | Show each container; exit nonzero if any is missing or not running         |
+| Read service logs                                | `podman logs --tail 100 -f trinity-server` | Follow logs; substitute any container name below                           |
+
+`deploy-podman.sh` remains the full build-and-deploy command. There was no
+stack-wide service lifecycle script before `podman-services.sh`; the package
+`dev:*`/`start:*` commands launch individual processes rather than manage this
+Podman deployment. Firecracker build/install/release/recovery scripts manage the
+host or guest lifecycle separately; they are not application restart commands.
+
+Service-only commands do not build images, run migrations, pull images or replace
+containers. Start is safe for already-running containers. Start/restart require
+all five containers to exist and validate saved configuration before proceeding;
+if one is missing, use the full deployment command. Stop tolerates missing or
+already-stopped containers. It allows 60 seconds per container for graceful
+shutdown before Podman's forced stop. Stop/restart interrupt active application
+work and connections; schedule them when that interruption is acceptable.
+Readiness failure exits nonzero and leaves the current containers available for
+status/log diagnosis; it does not attempt rollback.
+
+Start/restart read the environment saved in `trinity-server`, and the gateway's
+saved web-port label, without loading the checkout's current `.env`. Changes to
+`.env`, ports, workspace mounts or application code require full deployment.
+For older containers created before the web-port label was added, the default is
+8080; supply the original custom port, for example
+`WEB_PORT=8181 ./scripts/podman-services.sh start`. This override changes the
+readiness check only, not the gateway's listening port. Status reports process
+state, not application or guest health.
+
+These controls cover the five application containers only. PostgreSQL and Redis
+must already be running under their host supervisors. Start/restart ensure the
+installed Node Agent is active using the same polkit path as deployment, but do
+not restart it. Stop leaves it running. None of these service commands stop,
+restart or upgrade guest VMs or host runtimes. The optional control-worker is not
+part of this five-container packaging; these scripts do not enable scheduling.
+
+### Build and deployment prerequisites
+
+Run `./scripts/deploy-podman.sh` from this checkout. It builds the frontend,
+packages this checkout's installed Linux dependencies, builds Bifrost Bridge from
+`/home/sam/sources/Bifrost-Bridge`, applies PostgreSQL migrations, and starts five
+rootless containers: `trinity-browser-runtime`, `trinity-server`,
+`trinity-agent-worker`, `trinity-audit-consumer`, and `trinity-gateway`.
+Prerequisites are Podman, Node.js, pnpm with installed checkout dependencies,
+Cargo, curl, systemd, host PostgreSQL/Redis, and a provisioned Firecracker node.
+This single-host command requires `EXECUTION_DRIVER=firecracker` and
+`BROWSER_DRIVER=zendriver`; it rejects other topologies before deployment.
+
+The installed host `trinity-node-agent.service` owns privileged VM lifecycle.
+The command leaves an active Node Agent running, starts an inactive installed
+service through `pkexec /usr/bin/systemctl start trinity-node-agent.service`
+(which may prompt for human authentication), and verifies authenticated routing.
+It never restarts the Node Agent, upgrades its binaries or guest images, or
+reprovisions guests. Initial node provisioning and host upgrades retain the
+[Firecracker setup and maintenance gates](../deploy/firecracker/README.md).
+A missing service or mismatched credential fails deployment. No privileged start
+is needed when the installed service is already active.
+
+The browser supervisor runs from the same application image as server/worker and
+is started before them. `BROWSER_RUNTIME_ENDPOINT` and the single
+`FIRECRACKER_NODES` endpoint must use distinct loopback HTTP ports. The browser
+container uses the configured endpoint port and `BROWSER_RUNTIME_TOKEN`.
+Authenticated invalid-request probes verify both services without executing guest
+operations. A responsive browser supervisor outside Podman must be stopped through
+its original supervisor before migrating to this command; port conflicts fail
+readiness rather than selecting a different driver.
+
+The script parses `.env` without executing it and passes credentials through a
+temporary private environment file. This trusted single-host deployment uses host
+networking and mounts the absolute `WORKSPACE_ROOT` at the same path with the
+invoking user's identity. Bifrost serves the built SPA and routes `/api` and `/acp`
+to the API. The gateway listens on `0.0.0.0:8080`; the API stays on loopback port 3100. Override `WEB_PORT`, `API_PORT`, `ENV_FILE`, or `BIFROST_DIR` in the invocation.
+Re-running replaces the five containers without deleting workspace or database
+data. Existing development consumers are independent and may consume the same
+queues; stop those through their original supervisor when retiring development.
+Use `podman logs trinity-browser-runtime` (or the other container names) for
+diagnostics. Container restart policies cover process exits; automatic startup
+after a host reboot requires an operator-managed Podman/systemd service. This
+command does not establish production isolation or TLS.

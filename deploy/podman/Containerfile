@@ -1,0 +1,12 @@
+# Package this checkout's installed dependencies and built SPA for the local host.
+FROM docker.io/library/node:22-trixie-slim
+WORKDIR /repo
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+COPY node_modules ./node_modules
+COPY packages ./packages
+COPY apps ./apps
+COPY config ./config
+COPY skills ./skills
+ENV NODE_ENV=production
+USER node
+CMD ["node", "apps/server/node_modules/tsx/dist/cli.mjs", "apps/server/src/main.ts"]

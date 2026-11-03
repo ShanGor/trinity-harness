@@ -106,3 +106,16 @@ The linked documents contain detailed invariants, deployment steps and acceptanc
 - If no reachable polkit agent exists (common over SSH/headless), `pkexec` may fall back to a textual agent. Do not collect credentials through agent tools; provide the exact command for the human to run in their own terminal. Exit 126 indicates dismissal; 127 can indicate authorization/authentication failure or another error. Inspect the result before retrying.
 
 Reference: [polkit pkexec manual](https://www.freedesktop.org/software/polkit/docs/latest/pkexec.1.html).
+
+### Single-host packaging
+
+`./scripts/podman-services.sh start|stop|restart|status` operates existing application
+containers without rebuilding, migrating or replacing them; use the same rootless
+user as deployment. Start/restart use saved container configuration and verify
+runtime readiness. Stop leaves host datastores, Node Agent and guest VMs running.
+
+`./scripts/deploy-podman.sh` builds and starts the rootless single-host Podman
+stack with Bifrost Bridge and the browser runtime, reusing host datastores and
+ensuring the installed host Node Agent is running without restarting it. Read
+`docs/deployment-guide.md` before changing this packaging; preserve configured
+runtime drivers, same-path workspace mounts and private credential handling.
