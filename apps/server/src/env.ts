@@ -87,6 +87,10 @@ const serverEnvSchema = z.object({
    */
   DEFAULT_PERMISSION_POLICY: z.string().min(1).max(4000).optional(),
   /** M4: context manager budget for inline-mode loops (§5.1). */
+  CONTEXT_SEGMENTS_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   CONTEXT_MAX_TOKENS: z.coerce.number().int().positive().default(160_000),
   CONTEXT_KEEP_TOKENS: z.coerce.number().int().positive().default(40_000),
   COMPACTION_MODEL: z.string().min(1).optional(),

@@ -14,6 +14,7 @@ export async function modelContextRecord(
   const data = new TextEncoder().encode(
     JSON.stringify({
       model: request.model,
+      ...(request.cache ? { cache: true } : {}),
       system: request.system,
       messages: request.messages,
       tools: request.tools,

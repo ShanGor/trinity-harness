@@ -288,6 +288,11 @@ export class AiSdkGateway implements LLMPort {
         },
       };
     }
+    if (providerName === 'anthropic' && req.cache)
+      providerOptions['anthropic'] = {
+        ...providerOptions['anthropic'],
+        cacheControl: { type: 'ephemeral' },
+      };
     if (providerName === 'openai' && this.opts.reasoningEffort) {
       providerOptions['openai'] = { reasoningEffort: this.opts.reasoningEffort };
     }

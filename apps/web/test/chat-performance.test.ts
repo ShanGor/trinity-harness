@@ -981,7 +981,9 @@ describe('chat typing and streaming performance', () => {
     expect(container.querySelector('.response-heading time')?.getAttribute('datetime')).toBe(
       assistantAt,
     );
-    expect(container.querySelector('.response-heading time')?.getAttribute('title')).toBe('Oct 8');
+    expect(container.querySelector('.response-heading time')?.getAttribute('title')).toBe(
+      `Oct 8 (${Intl.DateTimeFormat().resolvedOptions().timeZone})`,
+    );
   });
 
   it('reconciles optimistic timestamps without clearing a draft or duplicating messages', async () => {
@@ -1195,4 +1197,60 @@ it('opens history in the main view with the original prompt and independent draf
   ).toEqual([expect.stringContaining('Earlier input'), expect.stringContaining('Original input')]);
   expect(input.value).toBe('History draft');
   expect(container.querySelector('textarea')).toBe(input);
+});
+
+it('groups Main exchanges by prompt date while retaining streaming nodes, focus and drafts across timezone changes', async () => {
+  localStorage.setItem('trinity.history.timezone', 'UTC');
+  const events: ServerEvent[] = [
+    {
+      type: 'message/committed',
+      sessionId: 'main-session',
+      message: { id: 'p1', role: 'user', content: 'Before midnight', at: '2026-11-02T23:59:00Z' },
+    },
+    {
+      type: 'message/committed',
+      sessionId: 'main-session',
+      message: {
+        role: 'assistant',
+        phase: 'final',
+        content: 'After midnight response',
+        at: '2026-11-03T00:01:00Z',
+      },
+    },
+    {
+      type: 'message/committed',
+      sessionId: 'main-session',
+      message: { id: 'p2', role: 'user', content: 'Next request', at: '2026-11-03T00:02:00Z' },
+    },
+  ];
+  await click(
+    Array.from(container.querySelectorAll('.sidebar-navigation button')).find(
+      (button) => button.textContent === 'Main chat',
+    ) ?? null,
+  );
+  for (const event of events) await emit(event);
+  expect(
+    [...container.querySelectorAll('.chat-date-separator')].map((node) => node.textContent),
+  ).toEqual(['2026-11-02', '2026-11-03']);
+  const composer = container.querySelector('textarea')!;
+  await type(composer, 'Keep my draft');
+  composer.focus();
+  const answer = container.querySelector('.md');
+  await emit({
+    type: 'session/update',
+    sessionId: 'main-session',
+    update: { kind: 'agent_message_chunk', text: 'Streaming response' },
+  });
+  await act(async () => {
+    localStorage.setItem('trinity.history.timezone', 'Asia/Hong_Kong');
+    window.dispatchEvent(new Event('trinity-history-timezone'));
+  });
+  expect(
+    [...container.querySelectorAll('.chat-date-separator')].map((node) => node.textContent),
+  ).toEqual(['2026-11-03']);
+  expect(container.querySelector('.md')).toBe(answer);
+  expect(container.querySelector('textarea')).toBe(composer);
+  expect(composer.value).toBe('Keep my draft');
+  expect(document.activeElement).toBe(composer);
+  localStorage.removeItem('trinity.history.timezone');
 });

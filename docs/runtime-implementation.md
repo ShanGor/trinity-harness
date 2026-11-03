@@ -19,6 +19,16 @@
 
 `running` 在当前环境 API 中只表示 systemd 确认 VMM 进程运行，**不表示 guest、Agent 工具、浏览器或安全隔离已就绪**。
 
+Cold-start guest requests wait up to 60 seconds for the environment to leave
+`starting` before dispatch. The worker publishes a normal assistant progress hint:
+“I’m getting your PC ready. This may take a moment…” Startup failures and deadline
+expiry still terminate with an error. The Node Agent separately allows up to 60
+seconds for the generation-bound vsock connection to become available; only
+connection establishment before handing the socket to HTTP can be retried.
+Guest requests are sent once, and lost or invalid operation responses retain
+unknown-effect handling. Cancellation interrupts both waits. This needs matching
+worker/core and Node Agent updates; no guest image or database migration is needed.
+
 ## 尚未完成的目标能力
 
 默认 `EXECUTION_DRIVER=local` 保留现有执行路径。显式 `firecracker` 模式已接上个人会话的 Sandbox 文件 / 命令 / LSP 进程、workspace skills、uploads 与私有 Zendriver MCP 进程。Node Agent 经 PG owner / workspace / generation 复核后转发到专属 vsock；guest 仅持有自己的工作数据和 profile，控制面继续保存 PG 日志、证据与模型凭证。本机开发环境已通过真实 KVM guest、jailer、systemd、generation 间持久盘、私有 vsock、Zendriver 预览和默认拒绝外联验收。开发主机已验证个人 owner 经 BFF → browser-runtime → PG assignment → Node Agent → guest 的真实 Chrome 截图、输入与点击；公网 HTTPS 和 typed web_search 由真实 guest 单独验收；`SANDBOX_PROXY_URL` 为整个 guest 选择宿主提供的 HTTP proxy。尚未证明生产多租户隔离。不能仅启用 inventory 或看到 VMM running 就宣称工具已隔离。

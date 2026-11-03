@@ -239,7 +239,10 @@ export class AcpClient {
   ): Promise<unknown> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
-      headers: { 'content-type': 'application/json', ...this.authHeaders() },
+      headers: {
+        ...this.authHeaders(),
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       ...(signal ? { signal } : {}),
     });

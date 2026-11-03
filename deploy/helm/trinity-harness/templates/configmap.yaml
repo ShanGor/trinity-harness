@@ -49,6 +49,7 @@ data:
   {{- if .Values.config.taskMaxCost }}
   TASK_MAX_COST: {{ .Values.config.taskMaxCost | quote }}
   {{- end }}
+  CONTEXT_SEGMENTS_ENABLED: {{ .Values.config.contextSegmentsEnabled | quote }}
   CONTEXT_MAX_TOKENS: {{ .Values.config.contextMaxTokens | quote }}
   CONTEXT_KEEP_TOKENS: {{ .Values.config.contextKeepTokens | quote }}
   SPILL_THRESHOLD_BYTES: {{ .Values.config.spillThresholdBytes | quote }}

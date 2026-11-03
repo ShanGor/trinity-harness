@@ -336,6 +336,7 @@ async function main(): Promise<void> {
     systemPrompt: env.SYSTEM_PROMPT,
     tools: assemblyFor(workspaceRoot, sessionId).registry,
     personalContext,
+    stableContextSegments: env.CONTEXT_SEGMENTS_ENABLED,
     sessionMetas: auth?.metas,
     skills: assemblyFor(workspaceRoot, sessionId).skills,
     store,

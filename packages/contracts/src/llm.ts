@@ -53,6 +53,8 @@ export interface ConversationMessage {
 export interface LLMRequest {
   /** e.g. "anthropic/claude-sonnet-4-20250514" — routed by the gateway. */
   model: string;
+  /** Request provider-supported prefix caching; unsupported adapters may ignore it. */
+  cache?: boolean | undefined;
   system?: string | undefined;
   messages: ConversationMessage[];
   tools: ToolSchema[];

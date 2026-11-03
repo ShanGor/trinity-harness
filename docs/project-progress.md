@@ -5,6 +5,15 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Main context and date organization (2026-11-03)
+
+- [x] Implemented opt-in stable personal Main dialogue segments through additive `memory/selection` receipts, immutable excerpts, configuration/policy/source/capacity/pressure rebuild reasons and expected-sequence admission. Existing Main locking, active compaction, interrupted objectives and current-policy fences remain in force. Server/worker default `CONTEXT_SEGMENTS_ENABLED` to false; Helm and `.env.example` expose the rollout control. No migration is needed.
+- [x] Moved the current prompt reference after reusable dialogue for segmented Main; preserved completed-turn filtering and purpose-specific assembly. The LLM port requests supported Anthropic automatic caching through the AI SDK; other providers receive no Anthropic cache options. Accounting retains actual provider usage and per-request prices, without assuming a cache discount.
+- [x] Added Main date separators anchored to committed prompts and shared valid browser-local History timezone timestamps. Midnight-spanning replies stay with their prompt. Calendar/DST, invalid timezone fallback, joined pages, streaming, drafts/focus and retained message nodes have deterministic coverage; agent-browser inspected desktop and 390px mobile layouts using synthetic ACP data, with no horizontal overflow.
+- [x] Deterministic source-prefix comparison: ten synthetic turns retained 9,000 reusable source characters with stable segments versus 3,000 for a six-turn sliding baseline. This measures rendering reuse, not provider cache hits, cost or quality.
+- [x] Validation: full repository suite passed (1,439 tests; 25 skipped), repository lint and workspace typecheck passed, and production Web build passed with the existing bundle-size warning. Browser fixtures used synthetic data only; no provider calls, migrations, service restarts or deployment changes were performed.
+- [ ] Real-provider cold/warm/expired-cache and compaction trials, end-to-end queued Main crash/concurrency acceptance, and comparative continuity/recall/topic-contamination/total-task-cost evaluation remain rollout gates. Explicit freshness/relevance controls, daily digests and account-persisted timezone remain follow-ups. See [the implementation and rollout plan](main-chat-context-plan.md).
+
 ### Single-host Podman deployment (2026-11-02)
 
 - [x] Added `scripts/podman-services.sh start|stop|restart|status` for existing rootless application containers, with saved configuration, authenticated startup probes, reverse shutdown ordering and a command guide in `docs/deployment-guide.md`. Service commands preserve host services/VMs and skip builds/migrations.

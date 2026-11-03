@@ -195,6 +195,18 @@ Use a persisted IANA timezone for date browsing and optional daily digests. Midn
 
 Daily digests are optional derived summaries with source ranges and an “as of” watermark. Their failure does not affect conversation continuity. Retention, explicit deletion, model compaction, and UI archiving remain separate policies.
 
+### 6.4.1 Cache-aware working context (2026-11-03 design revision)
+
+Keep a bounded working context stable across related turns, appending new dialogue
+instead of sliding/rebuilding its history on every request. Compact or rebuild at
+recorded pressure, relevance or invalidation boundaries; midnight only changes UI
+organization. Stable eligible prefixes preserve provider-cache opportunities, but
+corrections, forgetting, permissions and relevant input take precedence. Older
+history remains available through `recall`; daily digests are optional retrieval
+aids, not mandatory next-day context. See the [requirements and phased implementation
+plan](main-chat-context-plan.md), including exact replay, cost evaluation and the
+independent Main date-separator delivery. Stable Main segments are implemented behind `CONTEXT_SEGMENTS_ENABLED` (default false), pending real-provider evaluation; inline date separators ship with the Web build.
+
 ### 6.5 Foundations inspected before implementation
 
 The initial repository inspection found these foundations:
@@ -501,7 +513,7 @@ Topic suggestions currently use explicit subject-change cues and conservative le
 
 The memory store currently implements personal namespaces and explicit active/forgotten revisions. Team/project memory namespaces, candidate approval queues, auto-save preferences, effective-time/expiry controls and a dedicated historical-fact query experience remain extensions. Superseded values remain in the append-only history; ordinary recall uses current values. The initial conservative correction/forget policy excludes older episode generations, which can reduce recall of unrelated old decisions. Fresh episodes under the current policy remain eligible. Indexed excerpts are bounded and exact source expansion is explicit; there is no recursively rewritten lifetime summary.
 
-Sharing initially publishes links to selected answers and user-reviewed Work briefs. Automatic transfer of a side conversation's transcript, hidden team context, and merged model instructions is not part of this implementation. Date/timezone browsing is available; its browser preference is retained locally. User-managed archive state, daily digests and richer topic aggregation remain optional follow-ups.
+Sharing initially publishes links to selected answers and user-reviewed Work briefs. Automatic transfer of a side conversation's transcript, hidden team context, and merged model instructions is not part of this implementation. Date/timezone browsing is available in History; its browser preference is retained locally. Inline Main date separators and shared browser-timezone timestamps are implemented. Cache-aware stable Main context segments are opt-in behind `CONTEXT_SEGMENTS_ENABLED` (default false); rollout and remaining evaluation are recorded in [the implementation plan](main-chat-context-plan.md). User-managed archive state, daily digests and richer topic aggregation remain optional follow-ups.
 
 2026-10-24 delivery update: opt-in PG once/daily schedules, missed/overlap outcomes, independent Work runs, pause/resume and a durable Updates inbox are now implemented through `apps/control-worker`; Web initially creates daily schedules. Deployments without matching enabled server/worker/control-worker continue showing unavailable. This supersedes the earlier unavailable-only Scheduled delivery status. Durable batch continuations, long-lived question/approval resumption and external notification channels remain pending. See [runtime implementation](runtime-implementation.md) for the authoritative deployment and scope boundary.
 

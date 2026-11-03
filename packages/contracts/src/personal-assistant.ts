@@ -93,7 +93,16 @@ export const recallReceiptSchema = z.object({
         answer: sourceExcerptSchema,
       }),
     )
-    .max(6)
+    .max(64)
+    .optional(),
+  segment: z
+    .object({
+      id: z.uuid(),
+      revision: z.number().int().positive(),
+      configuration: z.string().regex(/^[a-f0-9]{64}$/),
+      reason: z.enum(['initial', 'capacity', 'policy', 'source', 'configuration', 'pressure']),
+      capacity: z.number().int().nonnegative().max(64_000),
+    })
     .optional(),
   promptId: z.uuid(),
   policyRevision: z.number().int().nonnegative(),
@@ -139,6 +148,7 @@ export interface PersonalContextPort {
     signal?: AbortSignal,
     sourceAt?: string,
     dialogueCharacters?: number,
+    segmentConfiguration?: string,
   ): Promise<RecallReceipt>;
 }
 export const personalContextEventSchema = z.object({

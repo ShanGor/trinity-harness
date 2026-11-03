@@ -72,3 +72,13 @@ When `cacheWrite1h` is configured, a request with cache writes needs a reported 
 Failed/cancelled streams retain usage received before termination; requests that report no usage remain unavailable. Provider-internal attempts that expose no usage cannot be accounted for exactly. These are estimates of configured token charges, not provider invoices: taxes, credits, external tool charges and unsupported billing adjustments are excluded. Configure a separate model route for distinct billing arrangements that cannot be represented by input thresholds.
 
 The existing `model_usage` table remains the tenant token-quota projection. Session accounting is durable in `session_events`, requires no database migration, and survives compaction because the accounting projection reads the complete event log. Auxiliary model calls are included in tenant token quotas; subagent records are forwarded to the parent log without recording the same tokens twice in the quota table.
+
+## Cache-aware Main context
+
+The optional stable Main context path (`CONTEXT_SEGMENTS_ENABLED`) changes input
+selection and requests supported provider prefix caching; it does not change usage
+normalization or prices. Compare total task cost including compaction, cache writes,
+cache reads, retrieval calls and output. Reusable source-character/prefix estimates
+are diagnostic only and must never be counted as actual cache hits or billed tokens.
+Absent provider cache detail or price stays unavailable. The default remains off
+pending [provider evaluation](main-chat-context-plan.md#cost-and-latency-criteria).

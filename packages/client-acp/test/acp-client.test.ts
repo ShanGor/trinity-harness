@@ -39,6 +39,28 @@ function fakeFetch(routes: Record<string, (init?: RequestInit) => Response>) {
 }
 
 describe('AcpClient', () => {
+  it.each(['user', 'assistant'] as const)(
+    'deletes a %s message without advertising an empty JSON body',
+    async (role) => {
+      const { impl, calls } = fakeFetch({
+        [`DELETE http://x/api/sessions/s/messages/p/${role}`]: (init) => {
+          expect(new Headers(init?.headers).get('content-type')).toBeNull();
+          expect(new Headers(init?.headers).get('authorization')).toBe('Bearer secret');
+          expect(init?.body).toBeUndefined();
+          return new Response(null, { status: 204 });
+        },
+      });
+      vi.stubGlobal('fetch', impl);
+      try {
+        const client = new AcpClient({ baseUrl: 'http://x', token: 'secret' });
+        await expect(client.removeMessage('s', 'p', role)).resolves.toBeUndefined();
+        expect(calls).toEqual([`DELETE http://x/api/sessions/s/messages/p/${role}`]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
   it('waits for a terminal event after cancelling and disposes its independent stream', async () => {
     const promptId = crypto.randomUUID();
     const sources: FakeEventSource[] = [];

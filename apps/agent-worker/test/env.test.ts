@@ -68,3 +68,14 @@ it('keeps development interruption separate from production draining', () => {
   vi.stubEnv('NODE_ENV', 'production');
   expect(loadWorkerEnv().NODE_ENV).toBe('production');
 });
+
+it('keeps stable context rollout opt-in and parses explicit false safely', () => {
+  vi.stubEnv('CONTEXT_SEGMENTS_ENABLED', undefined);
+  expect(loadWorkerEnv().CONTEXT_SEGMENTS_ENABLED).toBe(false);
+  vi.stubEnv('CONTEXT_SEGMENTS_ENABLED', 'true');
+  expect(loadWorkerEnv().CONTEXT_SEGMENTS_ENABLED).toBe(true);
+  vi.stubEnv('CONTEXT_SEGMENTS_ENABLED', 'false');
+  expect(loadWorkerEnv().CONTEXT_SEGMENTS_ENABLED).toBe(false);
+  vi.stubEnv('CONTEXT_SEGMENTS_ENABLED', 'invalid');
+  expect(() => loadWorkerEnv()).toThrow('CONTEXT_SEGMENTS_ENABLED');
+});

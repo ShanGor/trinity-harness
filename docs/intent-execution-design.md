@@ -106,6 +106,19 @@ Assistant, compaction and any future review requests have separate assembly path
 
 Keep actual user/assistant/tool chronology intact. Introduce typed context sections in contracts, rendered by the gateway with a provider-compatible representation. Trusted runtime instructions can describe how to use sections; memory and website contents remain reference data rather than being elevated into system instructions. Providers without separate data channels receive explicit labeled provenance alongside the actual request. Labels reduce confusion but do not enforce semantic isolation. Never fabricate tool results without matching calls or make runtime advice look like a fresh user request.
 
+### 4.4 Cache-aware bounded context (opt-in implementation, 2026-11-03)
+
+Bounded dialogue does not require a per-request sliding window. The target assembly
+reuses a replayable stable dialogue segment across related turns, appends new
+eligible content and rebuilds/compacts at recorded boundaries. Static prefixes
+remain deterministic where provider message roles permit; dynamic receipts and
+control guidance must not unnecessarily rewrite earlier sections. Existing
+completed-turn filtering, current-policy validation and exact snapshot manifests
+remain mandatory even when they reduce cache hits. Midnight is not a reset trigger.
+See [Main context requirements and implementation sequence](main-chat-context-plan.md)
+for segment persistence, invalidation, provider-cost measurement and rollout tests.
+Stable personal Main segments are implemented behind `CONTEXT_SEGMENTS_ENABLED` (default false). The baseline above remains available when disabled; real-provider cost/quality trials remain pending.
+
 ## 5. Intent and strategy as revisable working state
 
 Stock v2 verification requires a committed minimal plan before declared mutations or unknown-effect calls, including small edits, aligning admission with the existing final verification requirement. Missing plans return `TASK_PLAN_REQUIRED` before execution/approval; routine reads and direct answers remain plan-free. The plan and its dependent action cannot execute together in one concurrent wave. A rejected unnecessary action can be abandoned without creating an effect or a new user requirement. Plans remain model interpretations and do not grant permission or prove semantic completion.

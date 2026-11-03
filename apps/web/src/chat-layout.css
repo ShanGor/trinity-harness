@@ -1385,3 +1385,29 @@
     bottom: max(16px, env(safe-area-inset-bottom));
   }
 }
+
+.chat-date-row {
+  width: 100%;
+  align-self: stretch;
+}
+
+.chat-date-row .ant-bubble-content {
+  width: 100%;
+  padding: 6px 0;
+}
+
+.chat-date-separator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--ant-color-text-secondary, #626e65);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chat-date-separator::before,
+.chat-date-separator::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid #e1e5df;
+}

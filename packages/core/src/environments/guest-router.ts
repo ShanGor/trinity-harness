@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { setTimeout as delay } from 'node:timers/promises';
 import { guestRpcDuration, tracer } from '../telemetry.js';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -54,6 +55,10 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
     private readonly token: string,
     private readonly workspaceRoot: string,
     private readonly fetcher: typeof fetch = fetch,
+    private readonly startup: {
+      onWaiting?: (sessionId: string) => Promise<void>;
+      wait?: (signal: AbortSignal) => Promise<void>;
+    } = {},
   ) {
     if (token.length < 32 || nodes.length === 0) throw new GuestUnavailableError();
     nodes.forEach((node) => environmentNodeSchema.parse(node));
@@ -154,7 +159,6 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
     const identity = { tenantId: meta.tenantId, userId: meta.userId, role: user.role };
     const environment = await this.measure(operation, 'environment', async () => {
       let environment = await this.store.get(identity);
-      if (environment?.state === 'starting') environment = await this.environments.get(identity);
       if (
         (!environment || environment.state === 'stopped') &&
         ['processRead', 'processWrite', 'processKill', 'desktopFrame', 'desktopInput'].includes(
@@ -162,9 +166,33 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
         )
       )
         throw new GuestUnavailableError();
-      if (!environment || environment.state === 'stopped')
-        environment = await this.environments.wake(identity, signal);
-      if (environment.state !== 'running') throw new GuestUnavailableError();
+      if (!environment || ['stopped', 'starting'].includes(environment.state)) {
+        await this.startup.onWaiting?.(sessionId);
+        const active = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(60_000)]);
+        try {
+          if (!environment || environment.state === 'stopped')
+            environment = await this.environments.wake(identity, active);
+          while (environment?.state === 'starting') {
+            await (this.startup.wait ?? ((abort) => delay(500, undefined, { signal: abort })))(
+              active,
+            );
+            active.throwIfAborted();
+            environment = await this.environments.get(identity, active);
+          }
+          active.throwIfAborted();
+          if (environment?.state !== 'running') throw new Error('VM startup did not complete');
+        } catch (error) {
+          signal?.throwIfAborted();
+          throw Object.assign(
+            new Error('Your PC could not finish starting. Please try again later.'),
+            {
+              code: 'GUEST_STARTUP_FAILED',
+              cause: error,
+            },
+          );
+        }
+      }
+      if (environment?.state !== 'running') throw new GuestUnavailableError();
       return environment;
     });
     const node = this.nodes.find((candidate) => candidate.id === environment.nodeId);
@@ -228,9 +256,7 @@ export class FirecrackerGuestRouter implements GuestRequestPort {
         // a fresh generation) or an unresponsive node on 'quarantined'. The
         // operation itself is never retried here — a lost response can have an
         // unknown effect.
-        await this.environments
-          .get(identity, AbortSignal.timeout(30_000))
-          .catch(() => undefined);
+        await this.environments.get(identity, AbortSignal.timeout(30_000)).catch(() => undefined);
         throw new GuestUnavailableError();
       }
     });

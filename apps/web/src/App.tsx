@@ -1,3 +1,5 @@
+import { chatDateHeadings } from './chat-dates';
+import { useHistoryTimezone } from './history-timezone';
 import { publishResponseSpeech } from './response-speech-events';
 import { XDuCompanion, companionState } from './x-du-companion';
 import type { PromptDelivery } from '@trinity-harness/shared';
@@ -1041,6 +1043,7 @@ export default function App() {
           busy={busy}
           onEvent={user?.role === 'viewer' ? undefined : handleEvent}
           canAmendLast={queuedPrompts.length === 0}
+          groupDates={isMain}
         />
       )}
       {isMain && activities.length > 0 && (
@@ -1743,11 +1746,18 @@ const RecentConversations = memo(function RecentConversations({
 const bubbleRoles = {
   user: { placement: 'end' as const },
   assistant: { placement: 'start' as const },
+  date: { placement: 'start' as const, variant: 'borderless' as const },
 };
 
-type ChatBubbleContent = { item: ChatItem; prompt?: ChatItem; editable: boolean };
+type ChatBubbleContent = { item: ChatItem; prompt?: ChatItem; editable: boolean; date?: string };
 
-function renderChatMessage({ item, prompt, editable }: ChatBubbleContent): ReactElement {
+function renderChatMessage({ item, prompt, editable, date }: ChatBubbleContent): ReactElement {
+  if (date)
+    return (
+      <div className="chat-date-separator" role="separator" aria-label={date}>
+        <time dateTime={date}>{date}</time>
+      </div>
+    );
   return <ChatMessageContent item={item} prompt={prompt} editable={editable} />;
 }
 
@@ -1764,15 +1774,19 @@ const ChatTranscript = memo(function ChatTranscript({
   busy = false,
   onEvent,
   canAmendLast = true,
+  groupDates = false,
 }: {
   items: ChatItem[];
   sessionId?: string | null;
   busy?: boolean;
   onEvent?: (event: ServerEvent) => void;
   canAmendLast?: boolean;
+  groupDates?: boolean;
 }): ReactElement {
   const controlContext = useMemo(() => ({ sessionId, busy, onEvent }), [sessionId, busy, onEvent]);
+  const timezone = useHistoryTimezone();
   const bubbleItems = useMemo(() => {
+    const dates = groupDates ? chatDateHeadings(items, timezone) : new Map<string, string>();
     const lastUser = [...items].reverse().find((item) => item.role === 'user');
     const response = lastUser ? items[items.indexOf(lastUser) + 1] : undefined;
     let prompt: ChatItem | undefined;
@@ -1781,6 +1795,17 @@ const ChatTranscript = memo(function ChatTranscript({
       return item.removed
         ? []
         : [
+            ...(dates.has(item.key)
+              ? [
+                  {
+                    key: `date-${item.key}`,
+                    role: 'date',
+                    className: 'chat-date-row',
+                    content: { item, editable: false, date: dates.get(item.key) },
+                    messageRender: renderChatMessage,
+                  },
+                ]
+              : []),
             {
               key: item.key,
               role: item.role,
@@ -1796,7 +1821,7 @@ const ChatTranscript = memo(function ChatTranscript({
             },
           ];
     });
-  }, [items, canAmendLast]);
+  }, [items, canAmendLast, groupDates, timezone]);
   return (
     <BrowserSessionContext.Provider value={sessionId}>
       <MessageControlContext.Provider value={controlContext}>

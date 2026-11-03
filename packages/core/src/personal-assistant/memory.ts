@@ -1,3 +1,4 @@
+import { selectContextSegment } from './context-segment.js';
 import { createHash } from 'node:crypto';
 import type {
   ConversationIndexPort,
@@ -162,6 +163,7 @@ export class PersonalContext implements PersonalContextPort {
     signal?: AbortSignal,
     sourceAt?: string,
     dialogueCharacters = 32_000,
+    segmentConfiguration?: string,
   ): Promise<RecallReceipt> {
     signal?.throwIfAborted();
     // Team execution receives no personal profile or personal history.
@@ -233,8 +235,10 @@ export class PersonalContext implements PersonalContextPort {
     // History expansion is model-directed through recall. Recency alone does not
     // make another session's outcome relevant to the current request.
     const episodes: RecallReceipt['episodes'] = [];
-    const dialogue: NonNullable<RecallReceipt['dialogue']> = [];
+    let segment: RecallReceipt['segment'];
+    let dialogue: NonNullable<RecallReceipt['dialogue']> = [];
     let remaining = Math.max(0, Math.min(64_000, dialogueCharacters));
+    const capacity = remaining;
     let dialogueOmitted = false;
     if (this.store) {
       const events = await this.store.load(meta.id);
@@ -297,7 +301,10 @@ export class PersonalContext implements PersonalContextPort {
         );
         const answer = events[answerIndex];
         if (answer?.type !== 'message/assistant') continue;
-        if (dialogue.length >= 6 || remaining < 256) {
+        if (
+          dialogue.length >= (segmentConfiguration ? 64 : 6) ||
+          (!segmentConfiguration && remaining < 256)
+        ) {
           dialogueOmitted = true;
           break;
         }
@@ -307,7 +314,7 @@ export class PersonalContext implements PersonalContextPort {
           user,
           start + 1,
           requestText,
-          Math.min(2000, Math.floor(remaining / 4)),
+          Math.min(2000, Math.floor((segmentConfiguration ? capacity : remaining) / 4)),
         );
         const attachments = user.content.flatMap((block) => {
           if (block.kind !== 'image' && block.kind !== 'file') return [];
@@ -331,13 +338,33 @@ export class PersonalContext implements PersonalContextPort {
           answer,
           answerIndex + 1,
           answerText,
-          remaining - request.text.length,
+          (segmentConfiguration ? 64_000 : remaining) - request.text.length,
         );
         dialogueOmitted ||=
           request.to < request.totalCharacters || response.to < response.totalCharacters;
-        remaining -= request.text.length + response.text.length;
+        if (!segmentConfiguration) remaining -= request.text.length + response.text.length;
         dialogue.unshift({ promptId: user.eventId, request, answer: response });
       }
+    }
+    if (segmentConfiguration && this.store) {
+      const events = await this.store.load(meta.id);
+      const previous = events.findLast(
+        (event) => event.type === 'memory/selection' && event.receipt.segment,
+      );
+      const candidates = dialogue;
+      const selected = selectContextSegment(
+        candidates,
+        previous?.type === 'memory/selection' ? previous.receipt : undefined,
+        {
+          id: stableId(`${meta.tenantId}:${meta.userId}:${meta.id}:${promptId}:segment`),
+          configuration: segmentConfiguration,
+          policyRevision: snapshot.revision,
+          capacity,
+        },
+      );
+      dialogue = selected.dialogue;
+      segment = selected.segment;
+      dialogueOmitted ||= dialogue.length < candidates.length;
     }
     // Failed turns have no completed episode. Preserve their original input
     // locally so a follow-up can resume the objective, without replaying tools,
@@ -400,6 +427,7 @@ export class PersonalContext implements PersonalContextPort {
     }
     return {
       version: 2,
+      ...(segment ? { segment } : {}),
       promptId,
       dialogue,
       policyRevision: snapshot.revision,
@@ -416,6 +444,21 @@ export { personalModelMessages } from '../loop/to-model-messages.js';
 
 /** Shrink optional dialogue while retaining exact source ranges for expansion. */
 export function fitDialogue(receipt: RecallReceipt, characterLimit: number): RecallReceipt {
+  if (receipt.segment) {
+    const capacity = Math.max(0, Math.min(64_000, characterLimit));
+    const selected = selectContextSegment(receipt.dialogue ?? [], undefined, {
+      id: stableId(`${receipt.segment.id}:pressure:${capacity}`),
+      configuration: receipt.segment.configuration,
+      policyRevision: receipt.policyRevision,
+      capacity,
+    });
+    return {
+      ...receipt,
+      dialogue: selected.dialogue,
+      omitted: true,
+      segment: { ...selected.segment, revision: receipt.segment.revision + 1, reason: 'pressure' },
+    };
+  }
   let remaining = Math.max(0, characterLimit);
   const dialogue: NonNullable<RecallReceipt['dialogue']> = [];
   for (const exchange of (receipt.dialogue ?? []).toReversed()) {

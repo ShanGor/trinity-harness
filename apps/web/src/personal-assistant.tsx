@@ -1,3 +1,4 @@
+import { readHistoryTimezone, saveHistoryTimezone } from './history-timezone';
 import { useCallback, useEffect, useState, type ReactElement } from 'react';
 import {
   Alert,
@@ -223,11 +224,7 @@ export function AssistantHistory({
   const [before, setBefore] = useState<number | null>(null);
   const [query, setQuery] = useState('');
   const [date, setDate] = useState('');
-  const [timezone, setTimezone] = useState(
-    () =>
-      localStorage.getItem('trinity.history.timezone') ??
-      Intl.DateTimeFormat().resolvedOptions().timeZone,
-  );
+  const [timezone, setTimezone] = useState(readHistoryTimezone);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState<TopicEpisode | null>(null);
   const [title, setTitle] = useState('');
@@ -278,7 +275,7 @@ export function AssistantHistory({
           value={timezone}
           onChange={(event) => {
             setTimezone(event.target.value);
-            localStorage.setItem('trinity.history.timezone', event.target.value);
+            saveHistoryTimezone(event.target.value);
           }}
         />
       </Flex>

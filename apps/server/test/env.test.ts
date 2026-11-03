@@ -68,3 +68,14 @@ it('requires an explicit authenticated runtime for Zendriver and rejects simulta
   vi.stubEnv('BROWSER_CDP_ENDPOINT', '9222');
   expect(() => loadServerEnv()).toThrow('BROWSER_CDP_ENDPOINT');
 });
+
+it('keeps stable context rollout opt-in and parses explicit false safely', () => {
+  vi.stubEnv('CONTEXT_SEGMENTS_ENABLED', undefined);
+  expect(loadServerEnv().CONTEXT_SEGMENTS_ENABLED).toBe(false);
+  vi.stubEnv('CONTEXT_SEGMENTS_ENABLED', 'true');
+  expect(loadServerEnv().CONTEXT_SEGMENTS_ENABLED).toBe(true);
+  vi.stubEnv('CONTEXT_SEGMENTS_ENABLED', 'false');
+  expect(loadServerEnv().CONTEXT_SEGMENTS_ENABLED).toBe(false);
+  vi.stubEnv('CONTEXT_SEGMENTS_ENABLED', 'invalid');
+  expect(() => loadServerEnv()).toThrow('CONTEXT_SEGMENTS_ENABLED');
+});

@@ -110,3 +110,22 @@ Existing owner-controlled CDP is the supported live-reading mode; see [deploymen
 - [ ] Shared browser rollout: deploy matching contracts/DB record readers and Browser Runtime writer. Verify Main/side/personal Work use one browser/profile, cross-chat control exclusion and handoff, source access revocation before input, per-origin command/evidence authority, and side-close lifetime. Local owner-route Main/two-side handoff and one active browser were verified; production authorization and isolation gates remain separate.
 
   Local development evidence (2026-10-26): both disposable guest generations and authenticated owner-route native input checks passed after a drained-node image release. Five frame requests measured 179ms median; clicks with capture measured 225–234ms. Production rollout and its latency/isolation gates remain unchecked.
+
+## Main context rollout gate (opt-in implementation, 2026-11-03)
+
+Applies when enabling [cache-aware context segments](main-chat-context-plan.md),
+with `CONTEXT_SEGMENTS_ENABLED=true` (Helm `config.contextSegmentsEnabled`).
+The default is false; no deployment was changed by the source implementation.
+
+- [ ] Compatible event readers deployed before writers; restart/torn-tail replay,
+      expected-revision concurrency and old-log fallback verified.
+- [ ] Stable prefix and deliberate rebuild fixtures pass; completed-turn filtering,
+      output reserve, exact private manifests and failed-checkpoint recovery retained.
+- [ ] Correction, removal, forgetting, source exclusions and owner/team/child policy
+      fences invalidate stale inputs before the next dispatch/effect.
+- [ ] Provider trials distinguish reported cache hits from estimated common prefixes;
+      compare total task cost including compaction/retrieval and unavailable prices,
+      cold/warm/expired caches, latency, recall and topic contamination.
+- [ ] Main date separators pass midnight/DST, spanning-turn, timezone, pagination,
+      streaming and draft/focus checks plus desktop/mobile agent-browser inspection.
+      No midnight model reset or daily-digest dependency is introduced.

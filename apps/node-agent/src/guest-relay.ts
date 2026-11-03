@@ -1,5 +1,6 @@
 import { Agent, request as httpRequest, type ClientRequestArgs } from 'node:http';
 import { connect } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Duplex } from 'node:stream';
 import {
   GUEST_WIRE_BYTES,
@@ -48,38 +49,69 @@ export class FirecrackerGuestRelay implements GuestRelayPort, BrowserGuestRelayP
       callback?: (error: Error | null, stream: Duplex) => void,
     ): undefined => {
       if (!callback) throw new Error('Async vsock callback required');
-      const socket = connect({ path: socketPath, signal: active });
-      let header = Buffer.alloc(0);
-      let complete = false;
-      const fail = (error: Error): void => {
-        if (!complete) {
+      // Only connection establishment is retried. No HTTP request bytes have
+      // reached the guest until callback succeeds; never retry an RPC.
+      const connecting = AbortSignal.any([active, AbortSignal.timeout(60_000)]);
+      const attempt = (): void => {
+        const socket = connect({ path: socketPath, signal: active });
+        let header = Buffer.alloc(0);
+        let complete = false;
+        const fail = (error: Error): void => {
+          if (!complete) {
+            complete = true;
+            connecting.removeEventListener('abort', aborted);
+            const code = (error as NodeJS.ErrnoException).code;
+            if (
+              !connecting.aborted &&
+              ['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'GUEST_BOOTING'].includes(
+                code ?? '',
+              )
+            ) {
+              void delay(500, undefined, { signal: connecting }).then(attempt, (failure: unknown) =>
+                callback(failure as Error, socket),
+              );
+            } else callback(error, socket);
+          }
+          socket.destroy();
+        };
+        const aborted = (): void =>
+          fail(new Error('Guest connection startup timed out or was cancelled'));
+        connecting.addEventListener('abort', aborted, { once: true });
+        socket.once('error', fail);
+        if (connecting.aborted) {
+          aborted();
+          return;
+        }
+        const read = (chunk: Buffer): void => {
+          header = Buffer.concat([header, chunk]);
+          const newline = header.indexOf(10);
+          if (newline < 0) {
+            if (header.length > 80) fail(new Error('Invalid vsock handshake'));
+            return;
+          }
+          if (newline > 80 || !/^OK [0-9]+$/.test(header.subarray(0, newline).toString('ascii'))) {
+            fail(
+              Object.assign(new Error('Rejected vsock connection'), {
+                code: header.subarray(0, newline).toString('ascii').startsWith('ERR ')
+                  ? 'GUEST_BOOTING'
+                  : 'INVALID_HANDSHAKE',
+              }),
+            );
+            return;
+          }
           complete = true;
-          callback(error, socket);
-        }
-        socket.destroy();
+          connecting.removeEventListener('abort', aborted);
+          socket.removeListener('data', read);
+          socket.removeListener('error', fail);
+          socket.pause();
+          if (newline + 1 < header.length) socket.unshift(header.subarray(newline + 1));
+          callback(null, socket);
+          socket.resume();
+        };
+        socket.on('data', read);
+        socket.once('connect', () => socket.write(`CONNECT ${port}\n`));
       };
-      socket.once('error', fail);
-      const read = (chunk: Buffer): void => {
-        header = Buffer.concat([header, chunk]);
-        const newline = header.indexOf(10);
-        if (newline < 0) {
-          if (header.length > 80) fail(new Error('Invalid vsock handshake'));
-          return;
-        }
-        if (newline > 80 || !/^OK [0-9]+$/.test(header.subarray(0, newline).toString('ascii'))) {
-          fail(new Error('Rejected vsock connection'));
-          return;
-        }
-        complete = true;
-        socket.removeListener('data', read);
-        socket.removeListener('error', fail);
-        socket.pause();
-        if (newline + 1 < header.length) socket.unshift(header.subarray(newline + 1));
-        callback(null, socket);
-        socket.resume();
-      };
-      socket.on('data', read);
-      socket.once('connect', () => socket.write(`CONNECT ${port}\n`));
+      attempt();
       return undefined;
     };
     try {

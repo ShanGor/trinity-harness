@@ -131,6 +131,7 @@ config:
   taskMaxTokens: null
   taskMaxDurationMs: null
   taskMaxCost: '' # Optional currency ceiling, e.g. USD:1.50; never model rates.
+  contextSegmentsEnabled: false # Opt-in after compatible readers and provider evaluation.
   contextMaxTokens: 160000
   contextKeepTokens: 40000
   spillThresholdBytes: 50000

@@ -381,6 +381,20 @@ typed `browser` 无论 registry 的 concurrency 设置都形成独占 wave；同
 
 ## 7. 会话持久化：事件溯源
 
+2026-11-03 opt-in context revision: Main keeps one continuous timeline with date
+separators independent of model input. Bounded dialogue should remain stable across
+related requests and append eligible new content, with recorded compaction/rebuild
+boundaries rather than per-request sliding-window churn or midnight resets. Preserve
+cache-compatible prefixes where possible, without retaining filtered tool history
+or bypassing correction/forget/permission fences. Older history uses explicit
+`recall`; optional daily digests are retrieval aids. No new module or service is
+introduced. Requirements, existing-module ownership and phased implementation:
+[Main chat context plan](main-chat-context-plan.md). Stable personal Main segments
+are implemented behind `CONTEXT_SEGMENTS_ENABLED` (default false), reusing additive
+`memory/selection` receipts and private request artifacts, with no new DB table.
+Web includes Main date separators and shared browser-timezone timestamps.
+Real-provider cache/cost/quality acceptance remains pending.
+
 直接借鉴 dsh 的成熟设计，但持久化到 PostgreSQL 而非本地 JSONL：
 
 - **`session_events` 表**：`(session_id, seq, event_type, payload_jsonb, actor, created_at, prev_hash)`，append-only，`seq` 单调；`prev_hash` 形成哈希链，防篡改（审计要求）。

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { SandboxPort } from '@trinity-harness/contracts';
 import {
   RemoteSandbox,
@@ -138,6 +139,23 @@ async function main(): Promise<void> {
           env.FIRECRACKER_NODES,
           env.NODE_RUNTIME_TOKEN!,
           env.WORKSPACE_ROOT,
+          fetch,
+          {
+            onWaiting: async (sessionId): Promise<void> => {
+              await store.append(sessionId, [
+                {
+                  type: 'message/assistant',
+                  eventId: randomUUID(),
+                  at: new Date().toISOString(),
+                  phase: 'progress',
+                  surfaceOp: 'append',
+                  content: [
+                    { kind: 'text', text: 'I’m getting your PC ready. This may take a moment…' },
+                  ],
+                },
+              ]);
+            },
+          },
         )
       : undefined;
   // M5: sandbox env scrubbing — worker secrets never reach tool children.
@@ -362,6 +380,7 @@ async function main(): Promise<void> {
         systemPrompt: env.SYSTEM_PROMPT,
         tools: assemblyFor(workspaceRoot, sessionId).registry,
         personalContext,
+        stableContextSegments: env.CONTEXT_SEGMENTS_ENABLED,
         sessionMetas: metas,
         skills: assemblyFor(workspaceRoot, sessionId).skills,
         store,

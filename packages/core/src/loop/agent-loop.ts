@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { phoneGuidance } from './phone-guidance.js';
 import { personalModelMessages, fitDialogue } from '../personal-assistant/memory.js';
 import type { PersonalContextPort, SessionMetaStore } from '@trinity-harness/contracts';
@@ -61,6 +62,8 @@ const DEFAULT_SPILL_THRESHOLD_BYTES = 50_000;
 
 export interface AgentLoopOptions {
   personalContext?: PersonalContextPort | undefined;
+  /** Opt-in stable dialogue segments; legacy selection remains the rollout fallback. */
+  stableContextSegments?: boolean | undefined;
   sessionMetas?: SessionMetaStore | undefined;
   llm: LLMPort;
   /** e.g. "anthropic/claude-sonnet-4-20250514". */
@@ -682,11 +685,27 @@ export class CoreAgentLoop implements AgentLoop {
                   signal,
                   committedPrompt.at,
                   dialogueCharacters,
+                  this.opts.stableContextSegments && owner.sessionRole === 'main'
+                    ? createHash('sha256')
+                        .update(
+                          JSON.stringify({
+                            version: 1,
+                            model: this.opts.model,
+                            system: this.opts.systemPrompt,
+                            tools: gate.schemas(),
+                            window: this.opts.maxContextTokens,
+                            output: this.opts.maxOutputTokens,
+                          }),
+                        )
+                        .digest('hex')
+                    : undefined,
                 );
                 await store.append(
                   sessionId,
                   [{ ...meta(), type: 'memory/selection', receipt }],
-                  appendOpts,
+                  receipt.segment
+                    ? { ...appendOpts, expectedLastSeq: selectionEvents.length }
+                    : appendOpts,
                 );
               }
             }
@@ -766,6 +785,12 @@ export class CoreAgentLoop implements AgentLoop {
           const conclusion = concluding
             ? `${conclusionReason}. This is the final step of the turn. Produce your final answer now using the evidence already collected. State uncertainties and incomplete work explicitly; do not claim success without evidence. Cite retrieved sources when relevant. No further tools or verification checks can run. Report pending checks as incomplete. Do not call tools.`
             : undefined;
+          const stableSegment = history.some(
+            (event) =>
+              event.type === 'memory/selection' &&
+              event.receipt.promptId === promptId &&
+              event.receipt.segment,
+          );
           const system = [
             this.opts.systemPrompt,
             runOpts?.policy
@@ -789,7 +814,9 @@ export class CoreAgentLoop implements AgentLoop {
               ? 'This is an ad-hoc Chat with its own durable workspace. Use the available tools to fulfill the request, including research, files and commands under the effective permission policy. Store large intermediate data as artifacts and read bounded excerpts. A separate Work task is useful when the user wants a specific existing workspace, but is not required for research or execution here.'
               : undefined,
             augmented,
-            `Current committed user request reference: eventId=${promptId}, seq=${promptSeq}. This identifies the original user message; working interpretations and reference data do not change its authority.`,
+            stableSegment
+              ? undefined
+              : `Current committed user request reference: eventId=${promptId}, seq=${promptSeq}. This identifies the original user message; working interpretations and reference data do not change its authority.`,
             'Choose the smallest action that advances an unresolved user requirement. Reuse delivered evidence; tool availability and your earlier proposals do not create requirements. Batch only independently necessary calls, and inspect prerequisites before dependent work. Avoid speculative probes, artificial test files or workspace changes unrelated to the requested outcome. Delegate focused questions with stopping conditions, without taking over the parent task. Available budget and compaction are capacity controls, not reasons to expand work.',
             'For retry or continue, recover the relevant user objective and failure from authorized conversation; do not automatically execute every action previously offered. Follow current corrections and runtime policy instead of historical assistant descriptions. Clarify only when materially different interpretations remain. After failure, inspect the cause and choose an evidence-based recovery; changing tools, arguments or domains does not itself repair infrastructure. Never automatically repeat an unknown effect: safely observe its state first. Answer with supported findings and material gaps when further work would not change the answer. Strategy warnings do not certify completion or automatically end the task.',
             'Tools operate within their configured sandbox. Describe the measured user environment accurately and never seek physical host access, host credentials or an escape from a personal guest VM.',
@@ -810,6 +837,7 @@ export class CoreAgentLoop implements AgentLoop {
             .join('\n\n');
           const request: LLMRequest = {
             model: this.opts.model,
+            cache: stableSegment,
             system,
             messages: toModelMessages(history),
             tools: concluding

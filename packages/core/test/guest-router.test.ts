@@ -9,7 +9,7 @@ import type {
 } from '@trinity-harness/contracts';
 import { guestOperationSchema } from '@trinity-harness/contracts';
 
-function fixture() {
+function fixture(startup: ConstructorParameters<typeof FirecrackerGuestRouter>[8] = {}) {
   const user: User = {
     id: randomUUID(),
     tenantId: randomUUID(),
@@ -62,6 +62,7 @@ function fixture() {
     't'.repeat(32),
     '/workspace',
     fetcher,
+    startup,
   );
   return { router, user, meta, record, get, environmentGet, fetcher, wake };
 }
@@ -346,9 +347,7 @@ it('never accepts a read failure as acknowledgement of a mutation', async () => 
 it('reconciles with the owning node after a transport failure without retrying the operation', async () => {
   const f = fixture();
   f.fetcher.mockRejectedValueOnce(new Error('vsock disappeared after host reboot'));
-  await expect(f.router.call(f.meta.id, { kind: 'skillsList' })).rejects.toThrow(
-    'unknown effect',
-  );
+  await expect(f.router.call(f.meta.id, { kind: 'skillsList' })).rejects.toThrow('unknown effect');
   expect(f.fetcher).toHaveBeenCalledTimes(1);
   // The router asks the node for the real unit state so a dead VM lands on
   // 'stopped' (next call wakes a fresh generation) instead of failing forever.
@@ -365,4 +364,72 @@ it('still reports guest unavailability when the reconciling probe fails too', as
   });
   expect(f.fetcher).toHaveBeenCalledTimes(1);
   expect(f.environmentGet).toHaveBeenCalledTimes(1);
+});
+
+it('shows preparation progress and waits through cold start before sending an operation once', async () => {
+  const onWaiting = vi.fn(async () => undefined);
+  const wait = vi.fn(async () => undefined);
+  const f = fixture({ onWaiting, wait });
+  f.get.mockResolvedValueOnce({ ...f.record, state: 'stopped' });
+  f.wake.mockResolvedValueOnce({ ...f.record, state: 'starting' });
+  f.environmentGet.mockResolvedValueOnce({ ...f.record, state: 'starting' });
+  await f.router.call(f.meta.id, { kind: 'write', path: 'file', content: 'effect' });
+  expect(onWaiting).toHaveBeenCalledExactlyOnceWith(f.meta.id);
+  expect(wait).toHaveBeenCalledTimes(2);
+  expect(f.wake).toHaveBeenCalledOnce();
+  expect(f.fetcher).toHaveBeenCalledOnce();
+});
+
+it('waits for a concurrent startup without issuing another start', async () => {
+  const f = fixture({ wait: async () => undefined });
+  f.get.mockResolvedValueOnce({ ...f.record, state: 'starting' });
+  await f.router.call(f.meta.id, { kind: 'skillsList' });
+  expect(f.wake).not.toHaveBeenCalled();
+  expect(f.fetcher).toHaveBeenCalledOnce();
+});
+
+it('keeps failed startup visible and sends no guest operation', async () => {
+  const f = fixture({ wait: async () => undefined });
+  f.get.mockResolvedValueOnce({ ...f.record, state: 'starting' });
+  f.environmentGet.mockResolvedValueOnce({ ...f.record, state: 'quarantined' });
+  await expect(f.router.call(f.meta.id, { kind: 'skillsList' })).rejects.toMatchObject({
+    code: 'GUEST_STARTUP_FAILED',
+  });
+  expect(f.fetcher).not.toHaveBeenCalled();
+});
+
+it('cancels startup waiting without dispatching the operation', async () => {
+  const controller = new AbortController();
+  const f = fixture({
+    wait: async () => {
+      controller.abort();
+    },
+  });
+  f.get.mockResolvedValueOnce({ ...f.record, state: 'starting' });
+  await expect(
+    f.router.call(f.meta.id, { kind: 'skillsList' }, controller.signal),
+  ).rejects.toThrow();
+  expect(f.fetcher).not.toHaveBeenCalled();
+});
+
+it('reports a startup deadline as a real failure without sending the operation', async () => {
+  const f = fixture({
+    wait: async () => {
+      throw new DOMException('timed out', 'TimeoutError');
+    },
+  });
+  f.get.mockResolvedValueOnce({ ...f.record, state: 'starting' });
+  await expect(f.router.call(f.meta.id, { kind: 'skillsList' })).rejects.toMatchObject({
+    code: 'GUEST_STARTUP_FAILED',
+    message: expect.stringContaining('could not finish starting'),
+  });
+  expect(f.fetcher).not.toHaveBeenCalled();
+});
+
+it('does not show a preparation hint for an already running environment', async () => {
+  const onWaiting = vi.fn(async () => undefined);
+  const f = fixture({ onWaiting });
+  await f.router.call(f.meta.id, { kind: 'skillsList' });
+  expect(onWaiting).not.toHaveBeenCalled();
+  expect(f.wake).not.toHaveBeenCalled();
 });

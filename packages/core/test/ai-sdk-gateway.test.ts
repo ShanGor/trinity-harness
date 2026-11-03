@@ -530,3 +530,23 @@ it('retains exact cache, output and reasoning counts from the SDK', async () => 
     reasoningTokens: 5,
   });
 });
+
+it.each(['anthropic', 'openai', 'fake'])(
+  'uses only supported cache options for %s',
+  async (provider) => {
+    const captured: CapturedCall = {};
+    const model = fakeModel([FINISH_STOP], captured);
+    const gateway = new AiSdkGateway({ [provider]: () => model });
+    for await (const chunk of await gateway.stream({
+      ...baseRequest,
+      model: `${provider}/model`,
+      cache: true,
+      messages: [{ role: 'user', content: 'Reusable prefix' }],
+    }))
+      void chunk;
+    const options = captured.options?.providerOptions as Record<string, unknown> | undefined;
+    if (provider === 'anthropic')
+      expect(options?.anthropic).toMatchObject({ cacheControl: { type: 'ephemeral' } });
+    else expect(options?.anthropic).toBeUndefined();
+  },
+);

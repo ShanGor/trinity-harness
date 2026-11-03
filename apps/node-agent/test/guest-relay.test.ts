@@ -44,8 +44,11 @@ it.each([
       operation: { kind: 'read', path: 'file', maxBytes: 10 },
     };
     let handshake = '';
+    let connections = 0;
+    let requests = 0;
     let responseValue: unknown = value;
     const http = createHttpServer((request, reply) => {
+      requests += 1;
       expect(request.url).toBe('/rpc');
       const chunks: Buffer[] = [];
       request.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -64,6 +67,11 @@ it.each([
     const server = createNetServer((socket) => {
       socket.once('data', (chunk: Buffer) => {
         handshake = chunk.toString();
+        connections += 1;
+        if (connections === 1) {
+          socket.end('ERR guest not ready\n');
+          return;
+        }
         socket.write('OK 42\n');
         http.emit('connection', socket);
       });
@@ -78,6 +86,8 @@ it.each([
         ),
       ).toEqual(value);
       expect(handshake).toBe('CONNECT 4050\n');
+      expect(connections).toBe(2);
+      expect(requests).toBe(1);
       envelope = { ...envelope, requestId: randomUUID(), operation: { kind: 'desktopFrame' } };
       responseValue = { kind: 'ok' };
       expect(
@@ -88,6 +98,11 @@ it.each([
         ),
       ).toEqual({ kind: 'ok' });
       expect(handshake).toBe('CONNECT 4051\n');
+      expect(requests).toBe(2);
+      responseValue = { invalid: true };
+      await expect(new FirecrackerGuestRelay(root).call(environment, envelope)).rejects.toThrow();
+      expect(connections).toBe(4);
+      expect(requests).toBe(3);
     } finally {
       http.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

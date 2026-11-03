@@ -58,6 +58,10 @@ const workerEnvSchema = z.object({
   REASONING_BUDGET_TOKENS: z.coerce.number().int().positive().optional(),
   REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
   /** M4: context manager budget (docs/design.md §5.1 Context Manager). */
+  CONTEXT_SEGMENTS_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   CONTEXT_MAX_TOKENS: z.coerce.number().int().positive().default(160_000),
   CONTEXT_KEEP_TOKENS: z.coerce.number().int().positive().default(40_000),
   /** M4: summarizer model (defaults to MODEL when unset). */

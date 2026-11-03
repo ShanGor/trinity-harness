@@ -266,3 +266,26 @@ Use `podman logs trinity-browser-runtime` (or the other container names) for
 diagnostics. Container restart policies cover process exits; automatic startup
 after a host reboot requires an operator-managed Podman/systemd service. This
 command does not establish production isolation or TLS.
+
+## Cache-aware Main context rollout
+
+Stable personal Main dialogue segments are opt-in through
+`CONTEXT_SEGMENTS_ENABLED=true`, set consistently on server and agent-worker
+(Helm: `config.contextSegmentsEnabled: true`). The default false retains legacy
+selection. Deploy all event/receipt readers before enabling writers: receipts can
+now hold up to 64 dialogue exchanges plus additive segment metadata. There is no
+DB migration. Existing execution locks and authenticated memory/source checks
+remain mandatory. See [the implementation and evaluation plan](main-chat-context-plan.md)
+and [release gates](production-checklist.md#main-context-rollout-gate-opt-in-implementation-2026-11-03).
+
+Turning the flag off makes new prompts use legacy selection; an already committed
+active prompt keeps its exact receipt until completion or invalidation. Old segment
+receipts remain replayable. Roll back configuration using the compatible code;
+do not downgrade to readers that reject the expanded receipts. Native cache misses
+or expiry change cost/performance, never conversation correctness. Provider trials
+must use recorded input/read/write/output usage and model price snapshots rather
+than an assumed tenfold discount. This change does not restart services or alter
+existing deployments automatically.
+
+Main date separators require only the updated Web build; they share History's
+browser-local timezone preference and do not reset context at midnight.
