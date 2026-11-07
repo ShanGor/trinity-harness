@@ -4,6 +4,7 @@ import type { EventSourceLike } from '../src/index.js';
 import { AcpClient } from '../src/index.js';
 
 class FakeEventSource implements EventSourceLike {
+  onopen: (() => void) | null = null;
   onmessage: ((msg: { data: unknown; lastEventId?: string }) => void) | null = null;
   onerror: ((err: unknown) => void) | null = null;
   readyState?: number;
@@ -468,6 +469,146 @@ describe('AcpClient', () => {
       vi.useRealTimers();
     }
   });
+
+  it('separates transport state from processing errors and reports idle recovery', () => {
+    const source = new FakeEventSource('');
+    const client = new AcpClient({ eventSourceFactory: () => source });
+    const onConnectionState = vi.fn();
+    const onError = vi.fn();
+    const handle = client.openEventStream('abc', {
+      onEvent: () => undefined,
+      onConnectionState,
+      onError,
+    });
+    expect(onConnectionState).toHaveBeenLastCalledWith({ state: 'connecting' });
+    source.readyState = 0;
+    source.onerror?.(new Event('error'));
+    expect(onError).not.toHaveBeenCalled();
+    expect(onConnectionState).toHaveBeenLastCalledWith({
+      state: 'reconnecting',
+      since: expect.any(Number),
+      retryCount: 1,
+      disconnectedForMs: expect.any(Number),
+      readyState: 0,
+    });
+    source.onopen?.(); // no messages required to clear the reconnect notice
+    expect(onConnectionState).toHaveBeenLastCalledWith({ state: 'open' });
+    const transitions = onConnectionState.mock.calls.length;
+    source.onmessage?.({ data: 'invalid JSON' });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onConnectionState).toHaveBeenCalledTimes(transitions);
+    handle.close();
+    source.onopen?.();
+    source.onerror?.(new Event('error'));
+    expect(onConnectionState).toHaveBeenCalledTimes(transitions);
+  });
+
+  it.each([
+    [401, 'authentication'],
+    [403, 'access'],
+    [404, 'not_found'],
+  ] as const)('stops retrying after a confirmed HTTP %s access failure', async (status, reason) => {
+    vi.useFakeTimers();
+    const request = vi.fn(async () => new Response(null, { status }));
+    vi.stubGlobal('fetch', request);
+    try {
+      const sources: FakeEventSource[] = [];
+      const onConnectionState = vi.fn();
+      const client = new AcpClient({
+        baseUrl: 'http://x',
+        token: 'private-token',
+        eventSourceFactory: (url) => {
+          const source = new FakeEventSource(url);
+          sources.push(source);
+          return source;
+        },
+      });
+      const handle = client.openEventStream('abc', {
+        onEvent: () => undefined,
+        onConnectionState,
+      });
+      sources[0]!.failTerminally();
+      expect(request).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+      sources[1]!.failTerminally();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(request).toHaveBeenCalledExactlyOnceWith('http://x/api/sessions/abc/settings', {
+        headers: { authorization: 'Bearer private-token' },
+        cache: 'no-store',
+        signal: expect.any(AbortSignal),
+      });
+      expect(onConnectionState).toHaveBeenLastCalledWith({ state: 'blocked', reason });
+      expect(JSON.stringify(onConnectionState.mock.calls)).not.toContain('private-token');
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sources).toHaveLength(2);
+      handle.close();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each(['unavailable', 'network', 'recovered', 'closed'] as const)(
+    'keeps diagnostics bounded and ignores stale diagnostic results: %s',
+    async (outcome) => {
+      vi.useFakeTimers();
+      let settle!: (res: Response) => void;
+      let reject!: (err: Error) => void;
+      const pending = new Promise<Response>((resolve, fail) => {
+        settle = resolve;
+        reject = fail;
+      });
+      const request = vi.fn(() => pending);
+      vi.stubGlobal('fetch', request);
+      try {
+        const sources: FakeEventSource[] = [];
+        const onConnectionState = vi.fn();
+        const client = new AcpClient({
+          eventSourceFactory: (url) => {
+            const source = new FakeEventSource(url);
+            sources.push(source);
+            return source;
+          },
+        });
+        const handle = client.openEventStream('abc', {
+          onEvent: () => undefined,
+          onConnectionState,
+        });
+        sources[0]!.failTerminally();
+        await vi.advanceTimersByTimeAsync(1000);
+        sources[1]!.failTerminally();
+        await vi.advanceTimersByTimeAsync(2000);
+        if (outcome === 'recovered') sources[2]!.onopen?.();
+        if (outcome === 'closed') handle.close();
+        const transitions = onConnectionState.mock.calls.length;
+        if (outcome === 'network') reject(new Error('private diagnostic detail'));
+        else settle(new Response(null, { status: outcome === 'unavailable' ? 503 : 401 }));
+        await vi.advanceTimersByTimeAsync(0);
+        if (outcome === 'recovered' || outcome === 'closed') {
+          expect(onConnectionState).toHaveBeenCalledTimes(transitions);
+        } else {
+          expect(onConnectionState).toHaveBeenLastCalledWith(
+            expect.objectContaining({ state: 'reconnecting' }),
+          );
+          if (outcome === 'unavailable')
+            expect(onConnectionState).toHaveBeenLastCalledWith(
+              expect.objectContaining({ httpStatus: 503 }),
+            );
+          sources[2]!.failTerminally();
+          await vi.advanceTimersByTimeAsync(4000);
+          expect(sources).toHaveLength(4);
+        }
+        expect(request).toHaveBeenCalledTimes(1);
+        expect(JSON.stringify(onConnectionState.mock.calls)).not.toContain(
+          'private diagnostic detail',
+        );
+        handle.close();
+      } finally {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it('reconnects each subscriber from its own delivered cursor', async () => {
     vi.useFakeTimers();

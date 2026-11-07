@@ -51,6 +51,19 @@ export interface EventStreamHandle {
   close(): void;
 }
 
+/** Local connection metadata only; never includes URLs, credentials or event contents. */
+export type EventStreamStatus =
+  | { state: 'connecting' | 'open' }
+  | {
+      state: 'reconnecting';
+      since: number;
+      retryCount: number;
+      disconnectedForMs: number;
+      readyState: number | undefined;
+      httpStatus?: number;
+    }
+  | { state: 'blocked'; reason: 'authentication' | 'access' | 'not_found' };
+
 export type { SessionSummary } from '@trinity-harness/shared';
 
 export interface TeamMemberView {
@@ -585,6 +598,9 @@ export class AcpClient {
     handlers: {
       onEvent: (event: ServerEvent) => void;
       onSeq?: (seq: number) => void;
+      /** Transport lifecycle. Without this handler, transport errors use onError for compatibility. */
+      onConnectionState?: (status: EventStreamStatus) => void;
+      /** Event parsing/processing errors; also legacy transport errors without onConnectionState. */
       onError?: (err: unknown) => void;
     },
     opts?: {
@@ -598,13 +614,77 @@ export class AcpClient {
     let closed = false;
     let attempts = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let disconnectedSince: number | null = null;
+    let retryCount = 0;
+    let diagnosed = false;
+    let diagnostic: AbortController | null = null;
+    let blocked = false;
+
+    const reportReconnecting = (httpStatus?: number): void => {
+      if (closed || blocked) return;
+      disconnectedSince ??= Date.now();
+      handlers.onConnectionState?.({
+        state: 'reconnecting',
+        since: disconnectedSince,
+        retryCount,
+        disconnectedForMs: Math.max(0, Date.now() - disconnectedSince),
+        readyState: source?.readyState,
+        ...(httpStatus !== undefined ? { httpStatus } : {}),
+      });
+    };
+
+    const diagnose = async (): Promise<void> => {
+      const controller = new AbortController();
+      diagnostic = controller;
+      try {
+        // Native EventSource hides HTTP status. One bounded read per outage can
+        // confirm auth/access failures without logging the token-bearing SSE URL.
+        const res = await fetch(
+          `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/settings`,
+          {
+            headers: this.authHeaders(),
+            cache: 'no-store',
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]),
+          },
+        );
+        await res.body?.cancel();
+        if (closed || controller.signal.aborted || diagnostic !== controller) return;
+        if (res.status === 401 || res.status === 403 || res.status === 404) {
+          blocked = true;
+          if (timer) clearTimeout(timer);
+          timer = null;
+          source?.close();
+          handlers.onConnectionState?.({
+            state: 'blocked',
+            reason:
+              res.status === 401 ? 'authentication' : res.status === 403 ? 'access' : 'not_found',
+          });
+        } else {
+          reportReconnecting(res.status);
+        }
+      } catch {
+        // An unavailable diagnostic cannot classify the outage; retain retries.
+        if (!controller.signal.aborted && diagnostic === controller) reportReconnecting();
+      } finally {
+        if (diagnostic === controller) diagnostic = null;
+      }
+    };
 
     const connect = (fromSeq: number): void => {
       const url = `${this.baseUrl}/api/sessions/${sessionId}/events?afterSeq=${fromSeq}${this.tokenQuery()}`;
       const next = this.eventSourceFactory(url);
       source = next;
+      next.onopen = () => {
+        if (closed || blocked || source !== next) return;
+        disconnectedSince = null;
+        retryCount = 0;
+        diagnosed = false;
+        diagnostic?.abort();
+        diagnostic = null;
+        handlers.onConnectionState?.({ state: 'open' });
+      };
       next.onmessage = (msg: { data: unknown; lastEventId?: string }) => {
-        if (closed || source !== next) return;
+        if (closed || blocked || source !== next) return;
         try {
           const parsed = serverEventSchema.parse(JSON.parse(String(msg.data)));
           attempts = 0; // healthy delivery resets the reconnect backoff
@@ -629,8 +709,10 @@ export class AcpClient {
         }
       };
       next.onerror = (err: unknown) => {
-        if (closed || source !== next) return;
-        handlers.onError?.(err);
+        if (closed || blocked || source !== next) return;
+        retryCount += 1;
+        reportReconnecting();
+        if (!handlers.onConnectionState) handlers.onError?.(err);
         // Native EventSource retries transient network failures itself, but
         // permanently CLOSES after an HTTP error response (e.g. a proxy 500
         // while the server restarts). Detect that state and re-establish the
@@ -642,14 +724,20 @@ export class AcpClient {
         const delayMs = Math.min(1000 * 2 ** (attempts - 1), 15_000);
         timer = setTimeout(() => {
           timer = null;
-          if (!closed) connect(deliveredSeq);
+          if (!closed && !blocked) connect(deliveredSeq);
         }, delayMs);
+        if (handlers.onConnectionState && retryCount >= 2 && !diagnosed) {
+          diagnosed = true;
+          void diagnose();
+        }
       };
     };
+    handlers.onConnectionState?.({ state: 'connecting' });
     connect(startSeq);
     return {
       close: () => {
         closed = true;
+        diagnostic?.abort();
         if (timer) clearTimeout(timer);
         source?.close();
       },
@@ -726,6 +814,7 @@ export class AcpClient {
 
 /** Structural subset of EventSource the client relies on. */
 export interface EventSourceLike {
+  onopen?: (() => void) | null;
   onmessage: ((msg: { data: unknown; lastEventId?: string }) => void) | null;
   onerror: ((err: unknown) => void) | null;
   /** EventSource readyState; 2 (CLOSED) means the native retry loop stopped. */

@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { App as AntdApp } from 'antd';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TimelinePage, ServerEvent } from '@trinity-harness/shared';
+import type { EventStreamStatus } from '@trinity-harness/client-acp';
 
 import App from '../src/App';
 import type { UseVoiceCallOptions } from '../src/use-voice-call';
@@ -12,6 +13,8 @@ import type * as VoiceCallModule from '../src/use-voice-call';
 const fake = vi.hoisted(() => ({
   voiceOptions: undefined as UseVoiceCallOptions | undefined,
   onEvent: undefined as ((event: ServerEvent) => void) | undefined,
+  onConnectionState: undefined as ((status: EventStreamStatus) => void) | undefined,
+  onStreamError: undefined as ((error: unknown) => void) | undefined,
   markdown: vi.fn(),
   getTimeline: vi.fn<() => Promise<TimelinePage>>(),
   createSession: vi.fn<(...args: unknown[]) => Promise<string>>(async () => 'new-session'),
@@ -82,8 +85,18 @@ vi.mock('@trinity-harness/client-acp', () => ({
     stopAndWait = fake.stopAndWait;
     cancelTurn = fake.cancelTurn;
     respondApproval = fake.respondApproval;
-    openEventStream(_id: string, handlers: { onEvent: (event: ServerEvent) => void }) {
+    openEventStream(
+      _id: string,
+      handlers: {
+        onEvent: (event: ServerEvent) => void;
+        onConnectionState?: (status: EventStreamStatus) => void;
+        onError?: (error: unknown) => void;
+      },
+    ) {
       fake.onEvent = handlers.onEvent;
+      fake.onConnectionState = handlers.onConnectionState;
+      fake.onStreamError = handlers.onError;
+      handlers.onConnectionState?.({ state: 'connecting' });
       return { close: () => undefined };
     }
     queryAudit = async () => ({ records: [], total: 0 });
@@ -172,6 +185,51 @@ afterEach(async () => {
 });
 
 describe('chat typing and streaming performance', () => {
+  it('shows one reconnect notice, clears it on recovery, and preserves drafts, focus and history', async () => {
+    await click(container.querySelector('.history-item'));
+    await emit({
+      type: 'message/committed',
+      sessionId: 's0',
+      message: { role: 'assistant', content: 'Existing answer' },
+    });
+    const composer = container.querySelector('textarea')!;
+    await type(composer, 'Keep my draft');
+    composer.focus();
+    const answer = container.querySelector('.chat-messages');
+    const interrupted = {
+      state: 'reconnecting' as const,
+      since: Date.now(),
+      retryCount: 1,
+      disconnectedForMs: 0,
+      readyState: 0,
+    };
+    await act(async () => fake.onConnectionState?.(interrupted));
+    await act(async () => fake.onConnectionState?.(interrupted));
+    expect(container.querySelectorAll('[aria-label="Live update connection"]')).toHaveLength(1);
+    expect(container.textContent).toContain('Connection interrupted—reconnecting');
+    expect(document.body.textContent).not.toContain('[object Event]');
+    expect(container.querySelector('textarea')).toBe(composer);
+    expect(composer.value).toBe('Keep my draft');
+    expect(document.activeElement).toBe(composer);
+    expect(container.querySelector('.chat-messages')).toBe(answer);
+    await act(async () => fake.onConnectionState?.({ state: 'open' }));
+    expect(container.querySelector('[aria-label="Live update connection"]')).toBeNull();
+    expect(container.textContent).toContain('Existing answer');
+    const oldState = fake.onConnectionState;
+    const oldError = fake.onStreamError;
+    await click(container.querySelectorAll('.history-item')[1]);
+    await act(async () => {
+      oldState?.(interrupted);
+      oldError?.(new Error('stale error'));
+    });
+    expect(container.querySelector('[aria-label="Live update connection"]')).toBeNull();
+    expect(document.body.textContent).not.toContain('A live update could not be processed');
+    await act(async () => fake.onStreamError?.(new Error('payload with private data')));
+    expect(document.body.textContent).toContain('A live update could not be processed');
+    expect(document.body.textContent).not.toContain('payload with private data');
+    expect(container.querySelector('[aria-label="Live update connection"]')).toBeNull();
+  });
+
   it('keeps the text draft, focus and staged attachments separate from a phone prompt', async () => {
     await click(container.querySelector('.history-item'));
     const composer = container.querySelector('textarea')!;

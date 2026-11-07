@@ -5,6 +5,13 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Conversation event connection feedback (2026-11-07)
+
+- [x] Replaced generic `[object Event]` warnings with one connection notice, idle-stream recovery, a 15-second persistent-outage warning and explicit Retry. Event parsing/processing failures have a separate, deduplicated message; notices preserve the composer and conversation history.
+- [x] Added an optional client connection-state callback and bounded metadata-only console diagnostics. Repeated CLOSED failures perform one cancellable five-second authenticated session-settings read per outage; confirmed 401/403/404 pauses retries with a useful reason. Network/temporary failures retain the existing backoff and delivered-cursor replay, and legacy subscribers keep their behavior.
+- [x] Validation: all 298 frontend/client tests passed (the localhost proxy test required an unsandboxed rerun); repository lint, workspace typecheck, scoped formatting and production Web build passed, with the existing bundle-size warning. An isolated agent-browser fixture verified persistent-outage feedback, idle-stream recovery, authentication failure, explicit Retry and retained draft/focus/transcript. No real prompts, approvals or deployment changes were made.
+- [ ] This change does not establish the cause of the originally reported intermittent disconnect; deployed API/proxy/network evidence is still needed.
+
 ### Main context and date organization (2026-11-03)
 
 - [x] Implemented opt-in stable personal Main dialogue segments through additive `memory/selection` receipts, immutable excerpts, configuration/policy/source/capacity/pressure rebuild reasons and expected-sequence admission. Existing Main locking, active compaction, interrupted objectives and current-policy fences remain in force. Server/worker default `CONTEXT_SEGMENTS_ENABLED` to false; Helm and `.env.example` expose the rollout control. No migration is needed.

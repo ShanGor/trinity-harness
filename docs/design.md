@@ -607,6 +607,8 @@ data: { ... }
 
 当前 HTTP 客户端保留原生 EventSource 对瞬时网络故障的重连；HTTP 错误导致原生连接进入 CLOSED 时，由 `packages/client-acp` 按每个订阅自身已交付的 seq 重建连接，退避为 1s、2s、4s，最高 15s，有效事件交付后重置。关闭订阅取消待执行重连并忽略旧连接回调。Vite 开发代理在上游响应未完整结束就断开时同步销毁下游连接，避免浏览器保留一个永远没有后续数据、也不触发错误的 SSE 连接。连接级回归用本地 HTTP 后端中断测试覆盖；客户端恢复和去重用 fake EventSource 覆盖。
 
+The conversation UI consumes the client's optional connection-state callback separately from event parsing/processing errors. A single inline reconnect notice clears on `open`, including idle streams; after 15 seconds it offers explicit Retry. Repeated CLOSED failures trigger at most one authenticated session-settings read per outage, bounded to five seconds and cancelled on recovery/disposal. Confirmed 401/403/404 stops automatic retries and explains authentication/access/unavailability; inconclusive reads retain transport retries. Retry recreates the subscription from its remembered cursor without resubmitting prompts or approvals. Console diagnostics contain connection state, counts, duration and optional diagnostic HTTP status only, never the credential-bearing stream URL, identity or event contents. Callers without a connection-state handler retain the legacy error callback and retry behavior. These notices are local UI state, excluded from conversation events and model history.
+
 **POST 侧的可靠性（与续传互补）：**
 
 | 问题                         | 设计                                                                                                                                           |

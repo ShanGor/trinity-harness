@@ -48,6 +48,7 @@ import remarkGfm from 'remark-gfm';
 
 import {
   AcpClient,
+  type EventStreamStatus,
   type SessionSummary,
   type TeamView,
   type WorkspaceSelection,
@@ -55,6 +56,7 @@ import {
 
 import { HistorySidebar, HistoryDivider } from './history-sidebar';
 import { ChatComposer } from './chat-composer';
+import { EventStreamNotice } from './event-stream-notice';
 import './chat-layout.css';
 import { MessageControls } from './message-controls';
 import { MessageTimestamp } from './message-timestamp';
@@ -214,6 +216,10 @@ export default function App() {
   currentView.current = { items, usage: usageRecords, busy, approval, staged };
   const sessionRef = useRef<string | null>(null);
   const streamRef = useRef<{ close(): void } | null>(null);
+  const [streamStatus, setStreamStatus] = useState<{
+    sessionId: string;
+    status: EventStreamStatus;
+  } | null>(null);
   const stopVoiceCallRef = useRef<(() => void) | null>(null);
   const voiceCallTerminalRef = useRef<((sessionId: string, promptId?: string) => void) | null>(
     null,
@@ -425,7 +431,25 @@ export default function App() {
           onEvent: (event) => {
             if (sessionRef.current === id) handleEvent(event);
           },
-          onError: (err) => message.warning(`event stream error (reconnecting): ${String(err)}`),
+          onConnectionState: (status) => {
+            if (sessionRef.current !== id) return;
+            setStreamStatus({ sessionId: id, status });
+            if (
+              status.state === 'blocked' ||
+              (status.state === 'reconnecting' &&
+                (status.retryCount >= 2 || status.disconnectedForMs >= 15_000))
+            ) {
+              // Bounded metadata only: EventSource URLs carry credentials.
+              console.warn('Conversation event connection', status);
+            }
+          },
+          onError: () => {
+            if (sessionRef.current !== id) return;
+            message.warning({
+              key: 'event-stream-processing',
+              content: 'A live update could not be processed. Reload to resync the conversation.',
+            });
+          },
         },
         fromSeq !== undefined ? { afterSeq: fromSeq } : undefined,
       );
@@ -1513,6 +1537,13 @@ export default function App() {
               )}
             </Flex>
           </Flex>
+          {sessionId && streamStatus?.sessionId === sessionId && (
+            <EventStreamNotice
+              key={sessionId}
+              status={streamStatus.status}
+              onRetry={() => openStream(sessionId)}
+            />
+          )}
           {settingsOpen && sessionId && page === 'conversation' && (
             <SessionSettingsModal
               key={sessionId}
