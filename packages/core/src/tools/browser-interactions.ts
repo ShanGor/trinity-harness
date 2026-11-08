@@ -51,9 +51,14 @@ export function browserSurfaceScript(
       const secret=sensitive(el);
       const labelled=(el.getAttribute('aria-labelledby')||'').split(/\\s+/).slice(0,10).map(id=>document.getElementById(id)?.innerText||'').join(' ');
       const name=secret?'[sensitive control]':(el.getAttribute('aria-label')||labelled.trim()||Array.from(el.labels||[]).map(l=>l.innerText).join(' ')||el.getAttribute('alt')||el.getAttribute('placeholder')||el.innerText||'');
+      let actionKind='unknown';
+      if(tag==='A'&&el.hasAttribute('href')) {
+        try { const url=new URL(el.getAttribute('href'),location.href); if(['http:','https:'].includes(url.protocol)&&!url.username&&!url.password) actionKind='navigation'; } catch { /* Unparseable destinations remain unknown. */ }
+      } else if(tag==='SUMMARY'&&el.parentElement?.tagName==='DETAILS') actionKind='expand';
+      else if((tag==='INPUT'&&el.type==='search')||el.closest('form[role=search]')) actionKind='search';
       const r=el.getBoundingClientRect();
       const elementPath=path(el); if(elementPath.length>80){truncated=true;continue;}
-      targets.push({ref:'r'+targets.length,role:role.slice(0,100),name:Array.from(name.replace(/\\s+/g,' ').trim()).slice(0,150).join(''),path:elementPath,disabled:Boolean(el.disabled)||el.getAttribute('aria-disabled')==='true',sensitive:secret,activation:tag==='BUTTON'||(tag==='A'&&el.hasAttribute('href'))||(tag==='INPUT'&&['button','submit','reset'].includes(el.type))?'dom':tag==='INPUT'&&['checkbox','radio'].includes(el.type)?'dom':'pointer',box:{x:r.x,y:r.y,width:r.width,height:r.height}});
+      targets.push({actionKind,ref:'r'+targets.length,role:role.slice(0,100),name:Array.from(name.replace(/\\s+/g,' ').trim()).slice(0,150).join(''),path:elementPath,disabled:Boolean(el.disabled)||el.getAttribute('aria-disabled')==='true',sensitive:secret,activation:tag==='BUTTON'||(tag==='A'&&el.hasAttribute('href'))||(tag==='INPUT'&&['button','submit','reset'].includes(el.type))?'dom':tag==='INPUT'&&['checkbox','radio'].includes(el.type)?'dom':'pointer',box:{x:r.x,y:r.y,width:r.width,height:r.height}});
     }
     return {context:{width:innerWidth,height:innerHeight,scrollX,scrollY,devicePixelRatio,locale:navigator.language.slice(0,100),timezone:Intl.DateTimeFormat().resolvedOptions().timeZone.slice(0,100)},targets,truncated,privacyDenied};
   })()`;

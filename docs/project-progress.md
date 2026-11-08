@@ -5,6 +5,13 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Consequence-based approvals and attachment reads (2026-11-08)
+
+- [x] Added adapter-owned bounded Tool Runtime preflight, named consequence summaries, no-effect unknown-target responses, routine browser control recognition and existing-file protection. Explicit restrictions, sensitive-file checks, durable approvals and execution freshness remain in force.
+- [x] Added Unicode attachment continuation/search and authorized workspace-copy paths; literal read commands remain plan-free. Removed the stock blanket browser CLI prefix and rejected ineffective compound-command/rejected-action grants.
+- [x] Validation: full repository suite passed (1,502 tests; 25 skipped), repository lint and workspace typecheck passed; scoped formatting and diff whitespace checks passed. No migrations, service restarts or deployment changes were performed.
+- [ ] Real-model attachment turn and real-site browser acceptance on matching deployed services; broad natural-language write/financial consent, arbitrary custom controls and atomic overwrite protection remain limitations. See [approval strategy](approval-strategy.md).
+
 ### Large pastes and global attachment originals (2026-11-07)
 
 - [x] Large clipboard text stages as a previewable/removable attachment at 8,000 approximate tokens with a 20 MiB UTF-8 limit. Surrounding instruction, selection, drafts, focus and phone attachments remain independent. Whole-draft splitting is omitted.

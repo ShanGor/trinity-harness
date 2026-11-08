@@ -1,3 +1,4 @@
+import { parsePermissionPolicy } from '@trinity-harness/contracts';
 import { describe, expect, it } from 'vitest';
 import {
   projectMessages,
@@ -175,7 +176,19 @@ describe('final answer grounding', () => {
       () => textChunks('Product A supports apps. [Announcement](https://example.com/announcement)'),
     );
     const loop = new CoreAgentLoop({ llm, tools, store, model: 'fake', workspaceRoot: '/ws' });
-    expect(await loop.run('s', 'Research this', { emit: () => {} })).toEqual({
+    expect(
+      await loop.run(
+        's',
+        'Research this',
+        { emit: () => {} },
+        {
+          policy: {
+            ...parsePermissionPolicy('workspace-write'),
+            commandPrefixes: [['agent-browser']],
+          },
+        },
+      ),
+    ).toEqual({
       reason: 'completed',
       steps: 3,
     });

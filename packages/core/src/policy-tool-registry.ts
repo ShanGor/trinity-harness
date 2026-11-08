@@ -7,6 +7,7 @@ import type {
   ToolResult,
   ToolSchema,
   ToolEffect,
+  ToolAssessment,
 } from '@trinity-harness/contracts';
 
 import { matchesCommandPrefix } from './tools/command-prefix.js';
@@ -24,8 +25,8 @@ import { browserActionOperations } from '@trinity-harness/contracts';
  * - `ask`     → return an `ask` verdict; the CALLER (Agent Loop) owns the
  *   human-in-the-loop round trip — a registry must never block on I/O.
  *
- * No policy preserves M1/M2 behavior except browser actions and maintained
- * sensitive-file paths, which require agent-owned approval.
+ * Adapter-owned preflight adds consequence checks to the static policy.
+ * Unknown targets remain unavailable; sensitive-file reads require approval.
  */
 export class PolicyToolRegistry implements ToolRegistry {
   constructor(
@@ -54,6 +55,8 @@ export class PolicyToolRegistry implements ToolRegistry {
   /** Policy decision for one call; 'ask' means the loop must gate it. */
   decide(call: ToolCall): PermissionDecision {
     const policy = this.policy;
+    const rawCommand = (call.args as { command?: unknown } | null)?.command;
+    const command = typeof rawCommand === 'string' ? rawCommand : undefined;
     if (call.name === 'browser') {
       const operation = (call.args as { operation?: unknown } | null)?.operation;
       if (
@@ -62,7 +65,7 @@ export class PolicyToolRegistry implements ToolRegistry {
       ) {
         if (policy?.tools['browser'] === 'denied' || policy?.tools['*'] === 'denied')
           return 'denied';
-        return policy?.tools[`browser.${operation}`] ?? policy?.tools['*'] ?? 'ask';
+        return policy?.tools[`browser.${operation}`] ?? policy?.tools['*'] ?? 'allowed';
       }
     }
     const configuredDecision = policy?.tools[call.name] ?? policy?.tools['*'];
@@ -72,48 +75,65 @@ export class PolicyToolRegistry implements ToolRegistry {
       (call.name === 'read_file' &&
         typeof readPath === 'string' &&
         isSensitiveFilePath(readPath)) ||
-      (call.name === 'bash' &&
-        bashReferencesSensitiveFile(
-          (call.args as { command?: unknown } | null)?.command as string | undefined,
-        ))
+      (call.name === 'bash' && bashReferencesSensitiveFile(command))
     )
       return 'ask';
     if (!policy) return 'allowed';
     const decision = configuredDecision ?? (call.name === 'bash' ? 'ask' : 'allowed');
     if (decision !== 'ask') return decision;
-    if (
-      call.name === 'bash' &&
-      matchesCommandPrefix(
-        (call.args as { command?: unknown } | null)?.command,
-        policy.commandPrefixes ?? [],
-      )
-    )
+    if (call.name === 'bash' && matchesCommandPrefix(command, policy.commandPrefixes ?? []))
       return 'allowed';
     if (
       call.name === 'bash' &&
       policy.allowWorkspaceInternalBash &&
-      classifyBashCommand(
-        (call.args as { command?: unknown } | null)?.['command'] as string | undefined,
-      ) === 'workspace-internal'
+      classifyBashCommand(command) === 'workspace-internal'
     ) {
       return 'allowed';
     }
     return 'ask';
   }
 
-  async execute(call: ToolCall, ctx: ToolContextInput): Promise<ToolResult> {
+  async assess(call: ToolCall, ctx: ToolContextInput): Promise<ToolAssessment> {
     const decision = this.decide(call);
+    if (decision === 'denied')
+      return { decision: 'unavailable', summary: 'The session policy denies this action.' };
+    const assessment = (await this.inner.assess?.(call, ctx)) ?? {
+      decision: 'allowed' as const,
+      summary: '',
+    };
+    if (assessment.decision !== 'allowed') return assessment;
+    if (
+      assessment.authorized &&
+      this.policy?.tools[call.name] === undefined &&
+      this.policy?.tools['*'] === undefined &&
+      call.name === 'bash' &&
+      !bashReferencesSensitiveFile((call.args as { command?: string }).command)
+    )
+      return assessment;
+    return { decision, summary: assessment.summary };
+  }
+
+  async execute(call: ToolCall, ctx: ToolContextInput): Promise<ToolResult> {
+    let decision = this.decide(call);
     if (decision === 'denied') {
       return {
         value: { message: `tool '${call.name}' is denied by the session permission policy` },
         isError: true,
       };
     }
-    if (decision === 'ask' && !ctx.permissionGranted) {
-      return {
-        value: { message: `tool '${call.name}' requires agent approval before execution` },
-        isError: true,
-      };
+    if (!ctx.permissionGranted) {
+      const assessment = await this.assess(call, ctx);
+      if (assessment.decision === 'unavailable')
+        return { isError: true, value: { message: assessment.summary } };
+      decision = assessment.decision;
+      if (decision === 'ask')
+        return {
+          isError: true,
+          value: {
+            message: `tool '${call.name}' requires agent approval before execution`,
+            consequence: assessment.summary,
+          },
+        };
     }
     return this.inner.execute(call, ctx);
   }

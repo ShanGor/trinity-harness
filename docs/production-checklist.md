@@ -4,6 +4,12 @@
 > Walk top to bottom before declaring a release ready; record evidence
 > (command output / screenshot) next to each item.
 
+## Approval strategy rollout
+
+- [ ] Deploy matching server, worker and Browser Runtime preflight/classified-target code; refresh old snapshots. No migration or guest image change is needed. Preserve explicit custom session policies and grants.
+- [ ] Verify a real-model long-attachment analysis uses bounded continuation/search without approvals or runtime-cache probes. Deterministic fixtures do not prove optimal call quality.
+- [ ] Validate representative real-site search/navigation and payment/send/delete controls: no coordinate prompts, generic effects remain unavailable, approvals show a named site/target, and changed pages invalidate old targets. Record the conservative named-file/consent limits and non-atomic overwrite behavior from [approval strategy](approval-strategy.md).
+
 ## 1. Data & migrations
 
 - [ ] Apply attachment catalog migration 0018 before matching server/worker readers and writers. Verify cross-tenant pooling, scoped aliases, guest workspace materialization and lost-response recovery in the target deployment. Do not expose raw attachment-pool keys.

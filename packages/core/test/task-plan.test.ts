@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   sessionEventSchema,
+  parsePermissionPolicy,
   taskToolInputSchema,
   taskStatusSchema,
   type SessionEvent,
@@ -261,9 +262,16 @@ describe('revisable agent plans', () => {
       store,
       verification: true,
     });
-    expect((await loop.run('s', 'show me the system info', { emit: () => undefined })).reason).toBe(
-      'completed',
-    );
+    expect(
+      (
+        await loop.run(
+          's',
+          'show me the system info',
+          { emit: () => undefined },
+          { policy: parsePermissionPolicy('danger-full-access') },
+        )
+      ).reason,
+    ).toBe('completed');
     const events = await store.load('s');
     expect(events.filter((event) => event.type === 'task/recovery')).toHaveLength(1);
     expect(events.filter((event) => event.type === 'task/check')).toHaveLength(2);

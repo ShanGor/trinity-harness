@@ -82,3 +82,44 @@ describe('conversation command approvals', () => {
     }
   });
 });
+
+it('rejects ineffective compound-command grants and grants on rejected actions', async () => {
+  const store = new MemorySessionStore();
+  const app = await buildServer({ store, workspaceRoot: '/tmp' });
+  try {
+    const sessionId = (
+      await app.inject({ method: 'POST', url: '/api/sessions', payload: {} })
+    ).json().sessionId as string;
+    for (const command of ["cd uploads && sed -n '1,20p' book.txt", 'custom-cli inspect']) {
+      const approvalId = crypto.randomUUID();
+      const callId = crypto.randomUUID();
+      const meta = { eventId: crypto.randomUUID(), at: new Date().toISOString() };
+      await store.append(sessionId, [
+        { ...meta, type: 'tool/call', callId, name: 'bash', args: { command } },
+        {
+          ...meta,
+          eventId: crypto.randomUUID(),
+          type: 'approval/requested',
+          approvalId,
+          toolCallId: callId,
+          toolName: 'bash',
+          argsPreview: '{}',
+        },
+      ]);
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sessionId}/approvals/${approvalId}/respond`,
+        payload: {
+          outcome: command.startsWith('cd') ? 'allowed' : 'rejected',
+          commandPrefix: [command.split(' ')[0]!],
+        },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(
+      (await store.load(sessionId)).some((event) => event.type === 'approval/command_granted'),
+    ).toBe(false);
+  } finally {
+    await app.close();
+  }
+});

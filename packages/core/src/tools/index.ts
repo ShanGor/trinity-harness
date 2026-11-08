@@ -16,3 +16,5 @@ export * from './browser-session-scope.js';
 export * from './zendriver-mcp.js';
 export * from './browser-preview.js';
 export { agentBrowserDriver } from './browser-agent-browser.js';
+
+export { matchesCommandPrefix } from './command-prefix.js';

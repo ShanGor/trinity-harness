@@ -1,3 +1,4 @@
+import { parsePermissionPolicy } from '@trinity-harness/contracts';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -556,7 +557,7 @@ it('reserves the last configured model step for an answer', async () => {
     },
   );
   const { loop, store } = makeLoop(llm, new FakeSandbox(), { maxSteps: 64 });
-  expect(await loop.run('s', 'go', new CollectingSink())).toEqual({
+  expect(await loop.run('s', 'update x', new CollectingSink())).toEqual({
     reason: 'completed',
     steps: 64,
   });
@@ -574,7 +575,7 @@ it('continues past 64 steps by default without disabling tools or forcing a conc
     () => textChunks('Done.'),
   );
   const { loop, store } = makeLoop(llm);
-  expect(await loop.run('s', 'go', new CollectingSink())).toEqual({
+  expect(await loop.run('s', 'update x', new CollectingSink())).toEqual({
     reason: 'completed',
     steps: 66,
   });
@@ -615,7 +616,11 @@ it('persists repeated-read guidance, clears it after new evidence, and keeps exe
     model: 'fake',
     workspaceRoot: '/ws',
   });
-  expect(await loop.run('s', 'research', new CollectingSink())).toEqual({
+  expect(
+    await loop.run('s', 'research', new CollectingSink(), {
+      policy: { ...parsePermissionPolicy('workspace-write'), commandPrefixes: [['agent-browser']] },
+    }),
+  ).toEqual({
     reason: 'completed',
     steps: 6,
   });

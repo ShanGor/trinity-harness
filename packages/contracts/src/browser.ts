@@ -79,6 +79,8 @@ export const browserTargetSchema = z.object({
   disabled: z.boolean(),
   sensitive: z.boolean(),
   activation: z.enum(['dom', 'enter', 'space', 'pointer']).optional(),
+  /** Fixed extractor metadata, never supplied by model tool arguments. */
+  actionKind: z.enum(['navigation', 'search', 'expand', 'unknown']).optional(),
   box: z.object({
     x: z.number().finite(),
     y: z.number().finite(),

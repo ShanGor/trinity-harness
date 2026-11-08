@@ -33,11 +33,16 @@ describe('literal command permissions', () => {
   ])('rejects %s', (command) => {
     expect(matchesCommandPrefix(command, [['agent-browser']])).toBe(false);
   });
-  it('allows the browser under workspace-write and preserves explicit denial', () => {
+  it('requires an explicit CLI grant and preserves explicit denial', () => {
     const inner = new CoreToolRegistry(new FakeSandbox());
     const policy = parsePermissionPolicy('workspace-write');
     const call = { id: 'c', name: 'bash', args: { command: 'agent-browser --cdp 9222 get url' } };
-    expect(new PolicyToolRegistry(inner, policy).decide(call)).toBe('allowed');
+    expect(new PolicyToolRegistry(inner, policy).decide(call)).toBe('ask');
+    expect(
+      new PolicyToolRegistry(inner, { ...policy, commandPrefixes: [['agent-browser']] }).decide(
+        call,
+      ),
+    ).toBe('allowed');
     expect(
       new PolicyToolRegistry(inner, { ...policy, tools: { bash: 'denied' } }).decide(call),
     ).toBe('denied');

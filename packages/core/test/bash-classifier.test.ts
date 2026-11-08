@@ -21,8 +21,8 @@ describe('classifyBashCommand', () => {
     expect(classifyBashCommand('ls; rm -rf /')).toBe('needs-approval');
   });
 
-  it('asks for absolute or traversing paths', () => {
-    expect(classifyBashCommand('ls /etc')).toBe('needs-approval');
+  it('recognizes literal absolute reads but rejects traversal', () => {
+    expect(classifyBashCommand('ls /etc')).toBe('workspace-internal');
     expect(classifyBashCommand('cat ../secret')).toBe('needs-approval');
   });
 
@@ -31,7 +31,7 @@ describe('classifyBashCommand', () => {
     expect(classifyBashCommand('node -e "readFileSync(\'.env.local\')"')).toBe('needs-approval');
     expect(classifyBashCommand('cat *.env')).toBe('needs-approval');
     expect(classifyBashCommand('cat .env.example')).toBe('workspace-internal');
-    expect(classifyBashCommand('cat *.env.example')).toBe('workspace-internal');
+    expect(classifyBashCommand('cat *.env.example')).toBe('needs-approval');
     expect(bashReferencesSensitiveFile('cat config/credentials.json')).toBe(true);
     expect(bashReferencesSensitiveFile('cat .env.example')).toBe(false);
   });
@@ -50,4 +50,32 @@ describe('classifyBashCommand', () => {
     expect(classifyBashCommand(undefined)).toBe('needs-approval');
     expect(classifyBashCommand('unknown-binary --x')).toBe('needs-approval');
   });
+});
+
+it.each([
+  'rm -rf output',
+  'mv a b',
+  'cp a b',
+  'chmod 777 a',
+  'node script.js',
+  'python3 -c "print(1)"',
+  'git reset --hard',
+  'git clean -fd',
+  'git push',
+  "sed -i 's/a/b/' file",
+  "sed -n '1e' file",
+  'find . -delete',
+  "find . -exec rm '{}' ';'",
+  'rg --pre evil query',
+])('never automatically allows destructive or programmable invocation %s', (command) => {
+  expect(classifyBashCommand(command)).toBe('needs-approval');
+});
+
+it.each([
+  "sed -n '833,1000p' uploads/book.txt",
+  'grep -n insight uploads/book.txt',
+  'cat uploads/book.txt | head -20',
+  'rg insight uploads/book.txt | tail -n 40',
+])('recognizes a bounded literal attachment read: %s', (command) => {
+  expect(classifyBashCommand(command)).toBe('workspace-internal');
 });

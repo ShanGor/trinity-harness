@@ -59,6 +59,7 @@ const surface = {
       ref: 'r0',
       role: 'button',
       name: 'Read more',
+      actionKind: 'expand' as 'expand' | 'unknown',
       path: [1, 0],
       disabled: false,
       sensitive: false,
@@ -68,6 +69,7 @@ const surface = {
       ref: 'r1',
       role: 'textbox',
       name: 'Search',
+      actionKind: 'search' as const,
       path: [1, 1],
       disabled: false,
       sensitive: false,
@@ -1970,4 +1972,102 @@ it('keeps exact heading selection distinct from section and cursor reads', () =>
   )!;
   expect(cursor.blocks.map((block) => block.id)).toEqual(['b0', 'b1']);
   expect(section.receipt.map((range) => range.blockId)).toEqual(['b0', 'b1']);
+});
+
+it('preflights routine navigation and search without exposing input or requesting approval', async () => {
+  const { registry, run, calls } = await assembly();
+  await run('snapshot', { operation: 'read_page', filter: 'interactive' });
+  const before = calls.length;
+  for (const args of [
+    { operation: 'click', snapshotId: 'observation', ref: 'r0' },
+    { operation: 'fill', snapshotId: 'observation', ref: 'r1', text: 'insight' },
+    { operation: 'key', snapshotId: 'observation', ref: 'r1', key: 'Enter' },
+    { operation: 'scroll', snapshotId: 'observation', direction: 'down', pixels: 100 },
+  ])
+    expect(
+      await registry.assess(
+        { id: 'assess', name: 'browser', args },
+        { sessionId: 's', workspaceRoot: '/ws' },
+      ),
+    ).toMatchObject({ decision: 'allowed' });
+  expect(calls).toHaveLength(before);
+});
+
+it.each([
+  ['Delete report.txt', 'ask'],
+  ['Pay HK$680', 'ask'],
+  ['Publish announcement', 'ask'],
+  ['Unexplained control', 'unavailable'],
+])('preflights %s as %s using delivered target names', async (name, decision) => {
+  const original = surface.targets[0]!.name;
+  try {
+    surface.targets[0]!.name = name;
+    if (name === 'Unexplained control') surface.targets[0]!.actionKind = 'unknown';
+    const { registry, run, calls } = await assembly();
+    await run('snapshot', { operation: 'read_page', filter: 'interactive' });
+    const before = calls.length;
+    const result = await registry.assess(
+      {
+        id: 'action',
+        name: 'browser',
+        args: { operation: 'click', snapshotId: 'observation', ref: 'r0' },
+      },
+      { sessionId: 's', workspaceRoot: '/ws' },
+    );
+    expect(result.decision).toBe(decision);
+    if (decision === 'ask') expect(result.summary).toContain(name);
+    expect(calls).toHaveLength(before);
+  } finally {
+    surface.targets[0]!.name = original;
+    surface.targets[0]!.actionKind = 'expand';
+  }
+});
+
+it('does not ask for approval of coordinates or stale browser evidence', async () => {
+  const { registry, run } = await assembly();
+  await run('snapshot', { operation: 'read_page' });
+  for (const args of [
+    { operation: 'click', snapshotId: 'observation', point: { x: 10, y: 10 } },
+    { operation: 'click', snapshotId: 'old', ref: 'r0' },
+  ])
+    expect(
+      (
+        await registry.assess(
+          { id: 'action', name: 'browser', args },
+          { sessionId: 's', workspaceRoot: '/ws' },
+        )
+      ).decision,
+    ).toBe('unavailable');
+});
+
+it('does not approve a generic final-action button and reuses exact current site/action authorization', async () => {
+  const original = surface.targets[0]!.name;
+  try {
+    surface.targets[0]!.name = 'Pay';
+    const generic = await assembly();
+    await generic.run('snapshot', { operation: 'read_page' });
+    const call = {
+      id: 'pay',
+      name: 'browser',
+      args: { operation: 'click', snapshotId: 'observation', ref: 'r0' },
+    };
+    expect(
+      (await generic.registry.assess(call, { sessionId: 's', workspaceRoot: '/ws' })).decision,
+    ).toBe('unavailable');
+    surface.targets[0]!.name = 'Pay HK$680';
+    const named = await assembly();
+    await named.run('snapshot', { operation: 'read_page' });
+    expect(
+      (
+        await named.registry.assess(call, {
+          sessionId: 's',
+          workspaceRoot: '/ws',
+          userRequest: `Pay HK$680 on ${new URL(capture.url).origin}`,
+        })
+      ).decision,
+    ).toBe('allowed');
+  } finally {
+    surface.targets[0]!.name = original;
+    surface.targets[0]!.actionKind = 'expand';
+  }
 });

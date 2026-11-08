@@ -8,9 +8,14 @@ import type {
   ToolResult,
   ToolSchema,
   ToolEffect,
+  ToolAssessment,
 } from '@trinity-harness/contracts';
 import { z } from 'zod';
-import { browserErrorSchema, toolEffectSchema } from '@trinity-harness/contracts';
+import {
+  browserErrorSchema,
+  toolEffectSchema,
+  toolAssessmentSchema,
+} from '@trinity-harness/contracts';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -59,6 +64,43 @@ export class CoreToolRegistry implements ToolRegistry {
     const classified = def.effectFor ? def.effectFor(args.data) : def.effect;
     const parsed = toolEffectSchema.safeParse(classified);
     return parsed.success ? parsed.data : { kind: 'unknown', scope: 'unknown' };
+  }
+
+  async assess(call: ToolCall, ctx: ToolContextInput): Promise<ToolAssessment> {
+    const def = this.tools.get(call.name);
+    const parsed = def?.parameters.safeParse(call.args);
+    if (!def || !parsed?.success)
+      return {
+        decision: 'unavailable',
+        summary:
+          call.name === 'browser' || !parsed
+            ? 'Invalid or disabled tool arguments. Check the advertised schema; nothing was executed.'
+            : `Invalid tool arguments: ${(parsed.error?.issues ?? [])
+                .slice(0, 4)
+                .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+                .join('; ')}`.slice(0, 2000),
+      };
+    if (!def.assess) return { decision: 'allowed', summary: '' };
+    const signal = AbortSignal.any([
+      AbortSignal.timeout(30_000),
+      ...(ctx.signal ? [ctx.signal] : []),
+    ]);
+    try {
+      return toolAssessmentSchema.parse(
+        await def.assess(parsed.data, {
+          ...ctx,
+          callId: call.id,
+          signal,
+          sandbox: this.sandbox.withSignal?.(signal) ?? this.sandbox,
+        }),
+      );
+    } catch {
+      return {
+        decision: 'unavailable',
+        summary:
+          'Could not establish the action target or consequence. Nothing was executed. Inspect the target before proceeding.',
+      };
+    }
   }
 
   async execute(call: ToolCall, ctx: ToolContextInput): Promise<ToolResult> {

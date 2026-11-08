@@ -1,5 +1,6 @@
 import {
   AttachmentService,
+  matchesCommandPrefix,
   MemoryAttachmentCatalog,
   hasAttachmentReference,
 } from '@trinity-harness/core';
@@ -3408,13 +3409,11 @@ export async function buildServer(
         call?.type === 'tool/call' && call.name === 'bash'
           ? (call.args as { command?: unknown } | null)?.command
           : undefined;
-      const literal = prefix.join(' ');
-      if (
-        typeof command !== 'string' ||
-        !(command.trim() === literal || command.trim().startsWith(literal + ' '))
-      ) {
+      if (typeof command !== 'string' || !matchesCommandPrefix(command, [prefix])) {
         return reply.code(400).send({ error: 'command prefix must match the pending Bash call' });
       }
+      if (body.data.outcome !== 'allowed')
+        return reply.code(400).send({ error: 'a rejected action cannot grant a command prefix' });
       await deps.store.append(
         granted.sessionId,
         [

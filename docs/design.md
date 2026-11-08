@@ -169,7 +169,7 @@ trinity-harness/
 | `LLM Gateway`              | 统一模型访问：流式、工具调用、多模态、重试、计量                                                                                                                           | `ModelProvider`                                                                                        |
 | `Agent Loop`               | turn/step 驱动、工具调度、并发控制、取消、预算预留与验收                                                                                                                   | `ToolRegistry`、`SessionStore`、`LLMPort`、`ApprovalPort`、`TaskExecutionPort`                         |
 | `Guest execution`          | Opt-in personal-session Sandbox and skill RPC via authenticated Node Agent and generation-bound Firecracker vsock; guest owns subprocesses/LSP, never PG/model credentials | `GuestRequestPort`, `GuestRelayPort`, `SandboxPort`, `SkillCatalogPort`                                |
-| `Tool Runtime`             | 工具注册、参数校验、执行管线（pre/execute/post）；有界 browser reading；上线边界见 §8.2                                                                                    | `SandboxPort`、`BrowserAccessPort`、`BlobStore`、`SessionStore`                                        |
+| `Tool Runtime`             | 工具注册、参数校验、adapter-owned bounded action assessment、执行管线（pre/execute/post）；有界 browser reading；上线边界见 §8.2                                           | `SandboxPort`、`BrowserAccessPort`、`BlobStore`、`SessionStore`                                        |
 | `Browser Driver / Runtime` | Typed drivers and authenticated managed Zendriver; owner-shared browser/control scope with per-origin command journals and evidence                                        | `BrowserDriverPort`, `BrowserRuntimePort`, `BrowserRuntimeStore`, `BrowserSessionScope`, `SandboxPort` |
 | `Session Core`             | 事件溯源日志、消息投影、压缩（compaction）、fork                                                                                                                           | `EventBus`                                                                                             |
 | `Personal Assistant`       | Immutable Chat/Work identity, ongoing Main chat, versioned explicit memory and topic/source indexing                                                                       | `MemoryStorePort`, `ConversationIndexPort`, `SessionStore`, `SessionMetaStore`                         |
@@ -668,11 +668,13 @@ Retry explicitly resubmits the original unsuccessful request, including attachme
 
 ## 12. 安全、权限与审批
 
+2026-11-08 更新：[Approval strategy](approval-strategy.md) 规定逐 effect 审批，取代 browser 每次 input 默认审批。Tool Runtime 的可选 `assess` 使用 contracts 中 Zod `ToolAssessment`，在执行前返回 allowed / ask / unavailable 与有界说明；未知目标/效果返回无效果检查指引，不向用户请求坐标审批。明确 denied / ask、敏感路径、owner/privacy/freshness 与原有 durable approval 流不变。此保守基线不提供通用网站副作用或自然语言授权的语义证明。
+
 1. **工具执行策略**（每会话可配，预置模板借鉴 dsh 的 permission-presets）：
    - `workspace-write + ask`（默认）：工作区内写自由，危险命令需审批；
    - `read-only`：Bash 禁止执行，文件写入需审批；
    - `danger-full-access + never`（CI 场景，其它工具调用不审批；敏感文件清单仍需审批）。
-   - `commandPrefixes` 支持管理员配置的 literal argv 前缀白名单，workspace-write 默认含 `agent-browser`。匹配仅接受单一 literal 命令，拒绝 shell composition/expansion，仅允许一个有限行数的 stdin `head`/`tail` 输出过滤器（无文件参数、文件重定向或后续命令；可合并 stderr 到 stdout `2>&1`）；不通过字符串 startsWith 授权，不允许同名后缀 executable 绕过。显式 tool denied 始终优先。
+   - `commandPrefixes` 支持管理员配置的 literal argv 前缀白名单，workspace-write 不再默认授予 `agent-browser` executable 前缀（普通浏览使用 typed browser）。匹配仅接受单一 literal 命令，拒绝 shell composition/expansion，仅允许一个有限行数的 stdin `head`/`tail` 输出过滤器（无文件参数、文件重定向或后续命令；可合并 stderr 到 stdout `2>&1`）；不通过字符串 startsWith 授权，不允许同名后缀 executable 绕过。显式 tool denied 始终优先。
    - `packages/core/src/tools/sensitive-files.ts` 维护敏感 workspace 文件匹配列表。命中列表的 `read_file` 路径在读取前触发 agent-owned 审批，即使普通 read 或 wildcard policy 为 allowed；命令中直接引用敏感路径的 Bash 调用也触发审批，且不能由可复用 command-prefix grant 自动放行。`.env.example`、`.env.sample`、`.env.template` 是模板例外。该检查补充模型指引，不是对任意动态 shell 文件访问的 OS 级拦截。
    - 审批 UI 支持一次或当前 conversation 的 executable/argument-prefix approval。REST 鉴权后核对当前 session 的待决请求和实际 Bash call，先追加 `approval/command_granted` 再通知 worker。Loop 从 PG event log 读取授权，跨 turn/restart 生效，不能覆盖 denied 或绕过沙箱。无原始命令的截断预览不能定义权限。
 2. **审批流**：工具命中策略 → `ApprovalPort.request` → 事件发布到 Redis Stream → API Server 推送到前端对话框（或 ACP `session/request_permission`）→ 结果写回事件日志（**审批请求与结果均留痕**）。无应答器时 fail-closed。
@@ -680,7 +682,7 @@ Retry explicitly resubmits the original unsuccessful request, including attachme
 4. **RBAC**：租户 → 角色（admin/developer/viewer）→ 会话与工具策略；密钥（模型 API Key 等）由服务端统一托管（K8s Secret + 信封加密），**永不下发前端**。
 5. **输入输出安全**：prompt 注入提示、工具结果大小上限、出站网络 egress 白名单。
 
-Managed Zendriver 通过 `SandboxPort.openProcess({ processGroup: true })` 创建 owned POSIX process group；取消/timeout/dispose 停止此组，不触及 existing CDP Chrome。runtime secret 不传给子进程，profile 路径由经过验证的 session metadata 派生，profile bytes 不进入事件或模型上下文。`BROWSER_PROFILE_DIR` 必须是仅 browser-runtime 可访问的加密持久 volume；每个 `(tenant,user)` 使用独立目录和跨进程独占锁。`trusted-managed` owner 校验与逐动作审批保持 fail-closed；LocalSandbox 不代表 enforced egress/租户隔离，未确认旧 runtime 已停时拒绝 takeover。
+Managed Zendriver 通过 `SandboxPort.openProcess({ processGroup: true })` 创建 owned POSIX process group；取消/timeout/dispose 停止此组，不触及 existing CDP Chrome。runtime secret 不传给子进程，profile 路径由经过验证的 session metadata 派生，profile bytes 不进入事件或模型上下文。`BROWSER_PROFILE_DIR` 必须是仅 browser-runtime 可访问的加密持久 volume；每个 `(tenant,user)` 使用独立目录和跨进程独占锁。`trusted-managed` owner 校验与逐动作策略/preflight 校验保持 fail-closed；LocalSandbox 不代表 enforced egress/租户隔离，未确认旧 runtime 已停时拒绝 takeover。
 
 **Browser 改进的上线安全边界（trusted CDP / trusted-managed / 未来 enforced 部署，§8.2）**：导航只接受解析后的无凭据 HTTP(S) URL，逐操作校验实际目标与持久化授权，明确区分站点读取、填写与提交/购买/发送等行为。browser 所在网络边界须默认拒绝未授权出站，覆盖重定向、子资源、脚本请求、WebSockets、service workers、DNS 解析后的目标 IP，并限制 private/link-local/loopback 与控制端点；worker 的 NetworkPolicy 不能代表远端 CDP Chrome 的出站限制。这些是未来 enforced 部署的门槛；当前明确配置的 trusted CDP 使用现有权限与 owner 校验，不宣称具备上述网络边界。managed Zendriver 仅按上文显式 opt-in 启动；enforced research profile 仍为部署目标；显式用户 CDP 仅限同一认证 owner/trust domain，pinned tab 不隔离 cookies/accounts。下载默认阻止或隔离，上传禁用；敏感 URL、表单值与截图区域在持久化前处理。模型可直连 browser control 或经 Bash 绕过 adapter 时，不得宣称已有隔离/预算保证。
 

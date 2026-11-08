@@ -2277,6 +2277,13 @@ function ApprovalModal({
     }
     setPattern(command.trim().split(/\s+/)[0] ?? '');
   }, [approval?.approvalId, approval?.argsPreview]);
+  let consequence = approval?.argsPreview ?? '';
+  try {
+    const details = JSON.parse(consequence) as { summary?: unknown };
+    if (typeof details.summary === 'string') consequence = details.summary;
+  } catch {
+    // Legacy previews and named browser consequences are plain text.
+  }
   const prefix = pattern.trim().split(/\s+/).filter(Boolean);
   const valid = prefix.length > 0 && prefix.every((word) => /^[a-zA-Z0-9_./:@=+-]+$/.test(word));
   return (
@@ -2314,7 +2321,7 @@ function ApprovalModal({
           />
         </>
       )}
-      <Typography.Paragraph>The agent wants to run a gated tool call:</Typography.Paragraph>
+      <Typography.Paragraph>{consequence}</Typography.Paragraph>
       <Typography.Text code style={{ whiteSpace: 'pre-wrap', display: 'block' }}>
         {approval?.title ?? ''}
       </Typography.Text>

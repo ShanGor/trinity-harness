@@ -162,18 +162,18 @@ describe('PolicyToolRegistry', () => {
   });
 });
 
-it('asks for each browser action independently of broad browser or CLI grants', () => {
+it('allows routine browser operations subject to adapter assessment and explicit operation rules', () => {
   const inner = new CoreToolRegistry(new FakeSandbox());
   const registry = new PolicyToolRegistry(inner, {
     ...parsePermissionPolicy('workspace-write'),
     tools: { browser: 'allowed' },
   });
   for (const operation of ['click', 'fill', 'key', 'scroll'])
-    expect(registry.decide(call('browser', { operation }))).toBe('ask');
+    expect(registry.decide(call('browser', { operation }))).toBe('allowed');
   expect(registry.decide(call('browser', { operation: 'get_page_text' }))).toBe('allowed');
   expect(
     new PolicyToolRegistry(inner, undefined).decide(call('browser', { operation: 'click' })),
-  ).toBe('ask');
+  ).toBe('allowed');
   expect(
     new PolicyToolRegistry(inner, {
       ...parsePermissionPolicy('workspace-write'),

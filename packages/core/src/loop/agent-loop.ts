@@ -833,6 +833,7 @@ export class CoreAgentLoop implements AgentLoop {
               : `Current committed user request reference: eventId=${promptId}, seq=${promptSeq}. This identifies the original user message; working interpretations and reference data do not change its authority.`,
             'Choose the smallest action that advances an unresolved user requirement. Reuse delivered evidence; tool availability and your earlier proposals do not create requirements. Batch only independently necessary calls, and inspect prerequisites before dependent work. Avoid speculative probes, artificial test files or workspace changes unrelated to the requested outcome. Delegate focused questions with stopping conditions, without taking over the parent task. Available budget and compaction are capacity controls, not reasons to expand work.',
             'For retry or continue, recover the relevant user objective and failure from authorized conversation; do not automatically execute every action previously offered. Follow current corrections and runtime policy instead of historical assistant descriptions. Clarify only when materially different interpretations remain. After failure, inspect the cause and choose an evidence-based recovery; changing tools, arguments or domains does not itself repair infrastructure. Never automatically repeat an unknown effect: safely observe its state first. Answer with supported findings and material gaps when further work would not change the answer. Strategy warnings do not certify completion or automatically end the task.',
+            'Approval protects consequential effects, not tool syntax. Reading supplied files, public research, navigation, scrolling and search need no extra user confirmation. A request to change a file authorizes its necessary edits. Before payment, deletion, unrelated overwrite, external sending/publishing, private-data disclosure or access changes, establish the exact target and consequence and whether the current user request authorizes it. Do all safe preparation first. Do not ask users to interpret commands or pixel coordinates. Unknown effect means inspect or constrain the action, not request a vague approval. Do not repeat approvals or actions merely to repair bookkeeping. Use read_blob query or nextOffset for attachments; never hunt for them in runtime caches or outside the workspace.',
             'Tools operate within their configured sandbox. Describe the measured user environment accurately and never seek physical host access, host credentials or an escape from a personal guest VM.',
             verificationEnabled && !concluding
               ? 'Before mutations or commands with unknown effects, record a minimal task plan tied to the requested outcome and constraints, including required tests/builds. In this verification-enabled runtime even a small edit needs its plan before execution; do not add unnecessary diagnostics or checks. Direct answers and routine reads need no checklist; tool use alone does not create a new user requirement. Use optional intent sourceEventIds to link your current outcome, deliverables, constraints and action purpose to the committed user messages. The plan is your working interpretation, not a replacement for the user request. Listing an assumption does not resolve it: investigate or clarify assumptions that would change the task before building dependent checks or broadening research. Resolve task-defining terminology with a focused source lookup or clarification before constructing a broad survey around an assumption. Keep checks proportional to the requested outcome; do not invent prerequisites for answering a clarification question. If tools remain unavailable, return supported partial findings or a focused clarification and report pending work explicitly rather than repeatedly probing or claiming verification. Correct mistaken methods or assumptions using a complete revised plan and revisionReason; do not discard user requirements to claim completion. Execute checks through normal tools, then call task verify using exact resultSeq values from the current eligible evidence list (preferred), or their exact recorded call IDs. Changed checks or interpretations and relevant later effects require fresh evidence. Unchanged checks can retain valid evidence, and an initial plan may bind earlier current-request reads. If a chosen method was irrelevant, revise it with a reason rather than expanding the task to satisfy it. A verified checklist proves recorded checks passed, not that the task was understood or completed. If work or verification is incomplete, say so explicitly.'
@@ -1329,6 +1330,7 @@ export class CoreAgentLoop implements AgentLoop {
                 });
                 continue;
               }
+              let commandGranted = false;
               let decision = gate?.decide(call) ?? 'allowed';
               if (decision === 'ask' && call.name === 'bash') {
                 const commandValue = (call.args as { command?: unknown } | null)?.command;
@@ -1342,10 +1344,37 @@ export class CoreAgentLoop implements AgentLoop {
                       command,
                       grants.map((event) => event.prefix),
                     )
-                  )
+                  ) {
                     decision = 'allowed';
+                    commandGranted = true;
+                  }
                 }
               }
+              const assessment =
+                decision === 'denied' || commandGranted
+                  ? undefined
+                  : await tools.assess?.(call, ctx);
+              if (assessment?.decision === 'unavailable') {
+                presolved.set(call.id, {
+                  isError: true,
+                  value: {
+                    code: 'ACTION_NOT_ESTABLISHED',
+                    effect: 'none',
+                    message: assessment.summary,
+                  },
+                });
+                continue;
+              }
+              if (assessment?.decision === 'ask') decision = 'ask';
+              if (
+                assessment?.decision === 'allowed' &&
+                assessment.authorized &&
+                runOpts?.policy?.tools[call.name] === undefined &&
+                runOpts?.policy?.tools['*'] === undefined &&
+                call.name === 'bash' &&
+                !bashReferencesSensitiveFile((call.args as { command?: string }).command)
+              )
+                decision = 'allowed';
               const effect = tools.effectOf?.(call) ?? { kind: 'unknown', scope: 'unknown' };
               if (
                 decision !== 'denied' &&
@@ -1377,7 +1406,7 @@ export class CoreAgentLoop implements AgentLoop {
                 const outcome = await this.gateCall(
                   sessionId,
                   call,
-                  preview(call.args),
+                  assessment?.summary || preview(call.args),
                   sink,
                   appendOpts,
                   signal,

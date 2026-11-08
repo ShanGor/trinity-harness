@@ -176,3 +176,23 @@ it('compares article selection with Readability while retaining canonical punctu
     '论文标题：Late-life treatment 查看更多 期刊：Nature “原文” 😀',
   );
 });
+
+it('classifies native navigation/search/expansion separately from friendly custom button labels', () => {
+  setup(`
+    <a href="https://example.com/article">Read article</a>
+    <a href="javascript:alert(1)">Read article</a>
+    <details><summary>More</summary>Details</details>
+    <input type="search" aria-label="Search">
+    <button>Read more</button>
+  `);
+  const result = browserSurfaceSchema.parse(
+    browser.window.eval(browserSurfaceScript('interactive')),
+  );
+  expect(result.targets.map((target) => target.actionKind)).toEqual([
+    'navigation',
+    'unknown',
+    'expand',
+    'search',
+    'unknown',
+  ]);
+});

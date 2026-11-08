@@ -1,4 +1,4 @@
-import type { z } from 'zod';
+import { z } from 'zod';
 import type { ModelUsage } from './usage.js';
 import type { TaskBudgetScope } from './task.js';
 
@@ -49,7 +49,17 @@ export interface ToolContext {
   sandbox: SandboxPort;
 }
 
+/** Adapter-owned preflight; it must not perform the requested effect. */
+export const toolAssessmentSchema = z.object({
+  decision: z.enum(['allowed', 'ask', 'unavailable']),
+  summary: z.string().max(2000),
+  /** Exact bounded authorization established from the committed request, never model args. */
+  authorized: z.boolean().optional(),
+});
+export type ToolAssessment = z.infer<typeof toolAssessmentSchema>;
+
 export interface ToolDefinition<A = unknown, V = unknown> {
+  assess?(args: A, ctx: ToolContext): Promise<ToolAssessment>;
   /** Adapter-owned effect classification; model arguments never supply this metadata. */
   effect?: ToolEffect;
   effectFor?(args: A): ToolEffect;
@@ -70,6 +80,7 @@ export interface ToolDefinition<A = unknown, V = unknown> {
 export type ToolContextInput = Omit<ToolContext, 'sandbox'>;
 
 export interface ToolRegistry {
+  assess?(call: ToolCall, ctx: ToolContextInput): Promise<ToolAssessment>;
   effectOf?(call: ToolCall): ToolEffect;
   /** Registers a tool; returns a handle that unregisters on dispose. */
   register(def: ToolDefinition): Disposable;

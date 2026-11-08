@@ -1,5 +1,7 @@
 # Zendriver browser integration
 
+Approval update: [2026-11-08 consequence preflight](approval-strategy.md) supersedes blanket input approvals and requires fresh classified targets.
+
 Status: implemented as an opt-in trusted-owner runtime; production enforcement and site-specific comparisons remain rollout gates. The sections below retain the approved design rationale; this status section records implementation scope.
 Date: 2026-10-21.
 
@@ -75,7 +77,7 @@ Use high-level driver commands instead of a public `evaluate(script)` or `callTo
 | `navigate`        | `browser_goto`, fixed extraction                               | Final URL checks, capture and overview                               |
 | `get_page_text`   | `browser_evaluate` with fixed semantic extractor               | Visible canonical blocks, pagination and exact ranges                |
 | `read_page`       | `browser_evaluate` with fixed surface extractor                | Scoped snapshots and Trinity refs                                    |
-| `click`           | `browser_click` or checked mouse input                         | Fresh target validation and per-operation approval                   |
+| `click`           | `browser_click` or checked mouse input                         | Fresh target validation and consequence preflight/approval           |
 | `fill`            | `browser_type` / `browser_set_value`, subject to parity checks | Exact replacement semantics and sensitive-control denial             |
 | `key`, `scroll`   | `browser_press`, `browser_scroll`                              | Validated keys, scope and bounded motion                             |
 | `screenshot`      | `browser_screenshot`                                           | Existing pixel/byte limits, crop metadata and evidence authorization |

@@ -1,34 +1,71 @@
 import { bashReferencesSensitiveFile } from './sensitive-files.js';
-
-/**
- * Bash command classification for the `workspace-write + ask` preset
- * (docs/design.md §12.1: workspace-internal writes are free, dangerous
- * commands ask). Purely lexical — no execution, no FS access — so it is
- * deterministic and unit-testable. Conservative by design: anything involving
- * redirections, pipes, command substitution, absolute paths, sensitive-file
- * references, or non-sandbox tooling falls back to 'ask'.
- */
+import { literalCommandArgv, prefixCommandArgv } from './command-prefix.js';
 
 export type BashCommandClass = 'workspace-internal' | 'needs-approval';
 
-/** Compound-command metacharacters that could smuggle a dangerous subcommand. */
-const SHELL_METACHARS = /[>|`$(){}[\];]/;
-/** Absolute paths or parent-relative traversal leave the workspace root. */
-const PATH_TRAVERSAL = /(^|\s)(\/|\.\.(\/|$))/;
-/** Well-known sandbox-bound binaries (the LocalSandbox execs `bash -c` on the host). */
-const SAFE_BINARIES =
-  /^\s*(ls|pwd|cat|head|tail|find|grep|rg|sed|awk|sort|uniq|wc|diff|stat|file|tree|du|df|which|echo|true|false|mkdir|touch|cp|mv|rm|chmod|ln|tar|zip|unzip|gzip|gunzip|make|git|npm|npx|pnpm|yarn|node|deno|bun|bunx|python3?|pip3?|pytest|cargo|rustc|go|javac|java|mvn|gradle|ruby|gcc|g\+\+|clang|cc|tsc|vitest|jest|eslint|prettier|drizzle-kit|tsx|ts-node|jq)\b/;
+/** Recognize bounded literal reads, never arbitrary programs sharing an executable name. */
+export function isReadOnlyBashCommand(command: string | undefined): boolean {
+  if (bashReferencesSensitiveFile(command)) return false;
+  const argv = prefixCommandArgv(command);
+  if (!argv) return false;
+  const [binary, ...args] = argv;
+  if (args.some((arg) => arg.includes('../') || arg === '..')) return false;
+  if (
+    [
+      'pwd',
+      'ls',
+      'cat',
+      'head',
+      'tail',
+      'wc',
+      'stat',
+      'tree',
+      'du',
+      'which',
+      'true',
+      'false',
+    ].includes(binary!)
+  )
+    return !args.some((arg) => arg === '--files0-from' || arg.startsWith('--files0-from='));
+  if (binary === 'agent-browser') return args.length === 1 && args[0] === '--version';
+  if (binary === 'rg')
+    return !args.some((arg) =>
+      /^(?:--pre(?:=|$)|--hostname-bin(?:=|$)|--search-zip$|--no-ignore$|--hidden$)/.test(arg),
+    );
+  if (binary === 'grep') return !args.includes('--dereference-recursive');
+  if (binary === 'sed')
+    return (
+      args.length === 3 && args[0] === '-n' && /^\d+(?:,\d+)?p(?:;\d+(?:,\d+)?p)*$/.test(args[1]!)
+    );
+  if (binary === 'find')
+    return !args.some((arg) =>
+      /^-(?:exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/.test(arg),
+    );
+  if (binary === 'git')
+    return (
+      ['status', 'diff', 'log', 'show', 'ls-files'].includes(args[0] ?? '') &&
+      !args.some((arg) => /^(?:--output(?:=|$)|--ext-diff$|--textconv$)/.test(arg))
+    );
+  return false;
+}
 
-/**
- * Classify a single `bash -c` command string. `undefined`/empty ⇒ ask (the
- * model must say SOMETHING; fail-closed).
- */
+/** Unknown shell syntax is not proof of danger. The preflight asks for a concrete action. */
 export function classifyBashCommand(command: string | undefined): BashCommandClass {
-  const cmd = (command ?? '').trim();
-  if (cmd.length === 0) return 'needs-approval';
-  if (SHELL_METACHARS.test(cmd)) return 'needs-approval';
-  if (PATH_TRAVERSAL.test(cmd)) return 'needs-approval';
-  if (bashReferencesSensitiveFile(cmd)) return 'needs-approval';
-  if (!SAFE_BINARIES.test(cmd)) return 'needs-approval';
-  return 'workspace-internal';
+  if (isReadOnlyBashCommand(command)) return 'workspace-internal';
+  if (bashReferencesSensitiveFile(command)) return 'needs-approval';
+  const argv = literalCommandArgv(command);
+  if (!argv || argv.some((arg) => arg === '..' || arg.includes('../') || arg.startsWith('/')))
+    return 'needs-approval';
+  const [binary, ...args] = argv;
+  if (['npm', 'pnpm', 'yarn'].includes(binary!)) {
+    const script = args[0] === 'run' ? args[1] : args[0];
+    if (['test', 'build', 'lint', 'typecheck', 'format:check'].includes(script ?? ''))
+      return 'workspace-internal';
+  }
+  if (['vitest', 'jest', 'eslint', 'tsc', 'pytest'].includes(binary!)) return 'workspace-internal';
+  if (binary === 'make' && args.every((arg) => ['test', 'build', 'lint', 'check'].includes(arg)))
+    return 'workspace-internal';
+  if (binary === 'mkdir' && args.every((arg) => arg !== '-m' && !arg.startsWith('--mode')))
+    return 'workspace-internal';
+  return 'needs-approval';
 }

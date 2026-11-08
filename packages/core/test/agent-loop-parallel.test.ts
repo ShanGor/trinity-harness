@@ -396,6 +396,7 @@ it.each(['missing', 'allowed', 'rejected'] as const)(
     tools.register({
       name: 'browser',
       description: 'browser',
+      assess: async () => ({ decision: 'ask', summary: 'Delete the selected document.' }),
       parameters: z.object({ operation: z.literal('click') }),
       execute: async (_args, ctx) => {
         expect(ctx.permissionGranted).toBe(true);

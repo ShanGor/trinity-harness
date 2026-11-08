@@ -167,3 +167,44 @@ describe('end-to-end: ingest → read back from disk', () => {
     expect(await second.get(uri)).toEqual(pdf);
   });
 });
+
+it('continues Unicode text without splitting characters and paginates bounded search matches', async () => {
+  const source = '前言📖 café\n' + 'insight 中文\n'.repeat(30);
+  const meta = await blobs.put(undefined, new TextEncoder().encode(source), {
+    mimeType: 'text/plain',
+  });
+  const tool = createReadBlobTool(blobs);
+  const ctx = { sessionId: 's1', workspaceRoot: '/ws', sandbox: {} as never };
+  let offset = 0;
+  let reconstructed = '';
+  for (;;) {
+    const result = await tool.execute(
+      tool.parameters.parse({ uri: meta.uri, offset, maxBytes: 5 }),
+      ctx,
+    );
+    expect(result.isError).toBe(false);
+    const value = result.value as { content: string; nextOffset: number | null };
+    expect(Buffer.byteLength(value.content)).toBeLessThanOrEqual(5);
+    expect(value.content).not.toContain('�');
+    reconstructed += value.content;
+    if (value.nextOffset === null) break;
+    expect(value.nextOffset).toBeGreaterThan(offset);
+    offset = value.nextOffset;
+  }
+  expect(reconstructed).toBe(source);
+  const first = await tool.execute(tool.parameters.parse({ uri: meta.uri, query: 'insight' }), ctx);
+  const page = first.value as { matches: { offset: number }[]; nextOffset: number };
+  expect(page.matches).toHaveLength(20);
+  const second = await tool.execute(
+    tool.parameters.parse({ uri: meta.uri, query: 'insight', offset: page.nextOffset }),
+    ctx,
+  );
+  expect(second.value).toMatchObject({
+    matches: expect.any(Array),
+    nextOffset: null,
+    truncated: false,
+  });
+  expect((second.value as { matches: unknown[] }).matches).toHaveLength(10);
+  const tiny = await tool.execute(tool.parameters.parse({ uri: meta.uri, maxBytes: 1 }), ctx);
+  expect(tiny.isError).toBe(true);
+});

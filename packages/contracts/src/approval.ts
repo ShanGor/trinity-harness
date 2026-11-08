@@ -43,7 +43,7 @@ export const PERMISSION_PRESETS = {
     onAsk: 'ask',
     tools: {},
     allowWorkspaceInternalBash: true,
-    commandPrefixes: [['agent-browser']],
+    commandPrefixes: [],
   },
   'read-only': {
     onAsk: 'ask',
