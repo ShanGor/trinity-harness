@@ -6,6 +6,9 @@
 
 ## 1. Data & migrations
 
+- [ ] Apply attachment catalog migration 0018 before matching server/worker readers and writers. Verify cross-tenant pooling, scoped aliases, guest workspace materialization and lost-response recovery in the target deployment. Do not expose raw attachment-pool keys.
+- [ ] Record pooled-original/ingestion retention and storage quota policy. Current code retains them conservatively; automatic collection and abandoned staging cleanup are not enabled. Confirm pool boundaries match encryption/residency requirements.
+
 - [ ] `pnpm db:migrate` applied against the production DSN; `migrations/` is at
       the release tag (0000–0004 present, including `model_usage` + `tenants.quota`).
 - [ ] `session_events` append-only trigger verified: `UPDATE session_events SET …`

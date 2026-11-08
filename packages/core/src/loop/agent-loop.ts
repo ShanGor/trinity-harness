@@ -260,6 +260,20 @@ export class CoreAgentLoop implements AgentLoop {
         .filter((block) => block.kind === 'text')
         .map((block) => block.text)
         .join('\n');
+      const attachmentHistory = await store.load(sessionId);
+      for (const block of committedPrompt.content) {
+        if (block.kind !== 'file' || block.mimeType !== 'text/plain') continue;
+        const source = attachmentHistory.find(
+          (event) =>
+            event.type === 'session/attachment' &&
+            event.uri === block.uri &&
+            event.origin === 'paste',
+        );
+        if (!source) continue;
+        if (!this.opts.resolveBlob) throw new Error('Pasted user request unavailable');
+        const bytes = await this.opts.resolveBlob(block.uri);
+        ctx.userRequest += `\n${new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)}`;
+      }
       promptPreview =
         ctx.userRequest ||
         committedPrompt.content

@@ -30,3 +30,4 @@ export * from './environments.js';
 export * from './guest.js';
 export * from './media.js';
 export * from './prompt-delivery.js';
+export * from './attachments.js';

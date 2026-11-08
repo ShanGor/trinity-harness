@@ -40,14 +40,18 @@ import {
 import { buildBrowserRuntimeServer } from './server.js';
 import { loadBrowserRuntimeEnv } from './env.js';
 import { startTelemetry } from '@trinity-harness/otel';
+import { formatStartupError, type StartupPhase } from './startup-error.js';
 import {
   acquireBrowserProfileLease,
   prepareBrowserProfile,
   reclaimStaleBrowserProfileLocks,
 } from './profile.js';
 
+let startupPhase: StartupPhase = 'configuration';
+
 async function main(): Promise<void> {
   const env = loadBrowserRuntimeEnv();
+  startupPhase = 'deployment';
   validateGuestDeployment({ ...env, BROWSER_DRIVER: 'zendriver' }, true);
   const telemetry = startTelemetry({ serviceName: 'trinity-browser-runtime' });
   const pool = createPool(env.DATABASE_URL, {
@@ -63,6 +67,7 @@ async function main(): Promise<void> {
   const browserScope = new PersonalBrowserSessionScope(metas);
   const blobs = new LocalBlobStore(path.join(env.WORKSPACE_ROOT, '.trinity', 'blobs'));
   if (env.EXECUTION_DRIVER !== 'firecracker') {
+    startupPhase = 'executable';
     const probe = await new LocalSandbox(env.WORKSPACE_ROOT, { envMode: 'minimal' }).execArgv(
       env.ZENDRIVER_BINARY,
       ['--version'],
@@ -382,6 +387,7 @@ async function main(): Promise<void> {
     },
   });
   const app = buildBrowserRuntimeServer(supervisor, env.BROWSER_RUNTIME_TOKEN);
+  startupPhase = 'database';
   const notifications = await pool.connect();
   notifications.on('notification', (message) => {
     if (message.channel === 'trinity_session_closed' && z.uuid().safeParse(message.payload).success)
@@ -418,10 +424,11 @@ async function main(): Promise<void> {
   process.once('SIGTERM', () => {
     void shutdown(143);
   });
+  startupPhase = 'listen';
   await app.listen({ host: env.BROWSER_RUNTIME_HOST, port: env.BROWSER_RUNTIME_PORT });
 }
 
-void main().catch(() => {
-  console.error('Browser runtime startup failed');
+void main().catch((error: unknown) => {
+  console.error(formatStartupError(error, startupPhase));
   process.exit(1);
 });

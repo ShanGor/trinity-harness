@@ -49,11 +49,12 @@ export async function saveWorkspaceAttachment(
   data: Uint8Array,
   filename = 'attachment',
   sandbox?: SandboxPort,
+  attachmentId: string = randomUUID(),
 ): Promise<string> {
   if (sandbox) {
     if (!sandbox.writeBytes) throw new Error('Guest binary upload unavailable');
     const name = filename.replace(/[^\p{L}\p{N}._-]/gu, '_').slice(0, 120);
-    const relative = `uploads/${randomUUID()}-${name}`;
+    const relative = `uploads/${attachmentId}-${name}`;
     await sandbox.writeBytes(relative, data);
     return relative;
   }
@@ -62,7 +63,7 @@ export async function saveWorkspaceAttachment(
   const stat = await lstat(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Invalid uploads directory');
   const name = filename.replace(/[^\p{L}\p{N}._-]/gu, '_').slice(0, 120);
-  const relative = `uploads/${randomUUID()}-${name}`;
+  const relative = `uploads/${attachmentId}-${name}`;
   await writeFile(path.join(workspaceRoot, relative), data, { flag: 'wx', mode: 0o600 });
   return relative;
 }

@@ -780,27 +780,37 @@ export default function App() {
 
   /** Stage locally; first submit commits the immutable session identity. */
   const onStageFile = useCallback(
-    async (file: File) => {
+    (file: File, origin: 'file' | 'paste' = 'file') => {
       if (
         file.size > 20 * 1024 * 1024 ||
-        !['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'application/pdf'].includes(
-          file.type,
-        )
+        ![
+          'image/png',
+          'image/jpeg',
+          'image/webp',
+          'image/gif',
+          'application/pdf',
+          'text/plain',
+        ].includes(file.type)
       ) {
-        message.error('Choose an image or PDF up to 20 MB.');
-        return;
+        message.error('Choose an image, PDF, or UTF-8 text file up to 20 MB.');
+        return false;
       }
       const uri = URL.createObjectURL(file);
       localFiles.current.set(uri, file);
+      const operationId = newId();
       setStaged((prev) => [
         ...prev,
         {
-          kind: file.type === 'application/pdf' ? 'file' : 'image',
+          kind: file.type.startsWith('image/') ? 'image' : 'file',
+          origin,
+          operationId,
+          size: file.size,
           uri,
           mimeType: file.type,
           name: file.name,
         },
       ]);
+      return true;
     },
     [message],
   );
@@ -821,7 +831,14 @@ export default function App() {
           for (const attachment of submittedAttachments) {
             const file = localFiles.current.get(attachment.uri);
             const uploaded = file
-              ? await client.uploadAttachment(mainSessionId, file, file.type, file.name)
+              ? await client.uploadAttachment(
+                  mainSessionId,
+                  file,
+                  file.type,
+                  file.name,
+                  attachment.operationId,
+                  attachment.origin,
+                )
               : attachment;
             attachments.push({
               uri: uploaded.uri,
@@ -835,7 +852,14 @@ export default function App() {
             ...(delivery ? [delivery] : []),
           );
           if (promptId) onPromptId?.(promptId);
-          if (!delivery) setStaged([]);
+          if (!delivery)
+            setStaged((current) =>
+              current.filter((item) => !submittedAttachments.some((sent) => sent.uri === item.uri)),
+            );
+          for (const attachment of submittedAttachments) {
+            URL.revokeObjectURL(attachment.uri);
+            localFiles.current.delete(attachment.uri);
+          }
           return true;
         } catch (error) {
           message.error(error instanceof Error ? error.message : String(error));
@@ -847,8 +871,9 @@ export default function App() {
       const mimeList = submittedAttachments.map(({ uri, mimeType }) => ({
         uri,
         mimeType: mimeType ?? 'application/octet-stream',
+        operationId: submittedAttachments.find((item) => item.uri === uri)?.operationId,
+        origin: submittedAttachments.find((item) => item.uri === uri)?.origin,
       }));
-      if (!delivery) setStaged([]);
       setBusy(true);
       const userKey = newItemKey();
       setItems((prev) => [
@@ -878,7 +903,14 @@ export default function App() {
         for (const attachment of mimeList) {
           const file = localFiles.current.get(attachment.uri);
           if (file) {
-            const uploaded = await client.uploadAttachment(id, file, file.type, file.name);
+            const uploaded = await client.uploadAttachment(
+              id,
+              file,
+              file.type,
+              file.name,
+              attachment.operationId,
+              attachment.origin,
+            );
             attachment.uri = uploaded.uri;
           }
         }
@@ -910,13 +942,16 @@ export default function App() {
             localFiles.current.delete(attachment.uri);
           }
         }
+        if (!delivery)
+          setStaged((current) =>
+            current.filter((item) => !submittedAttachments.some((sent) => sent.uri === item.uri)),
+          );
         await refreshSessions();
         return true;
       } catch (err) {
         message.error(err instanceof Error ? err.message : String(err));
         setBusy(false);
         setItems((items) => settleAssistantItems(items, 'error'));
-        if (!delivery) setStaged(staged);
         return false;
       }
     },
@@ -1220,7 +1255,36 @@ export default function App() {
                     closable
                     onClose={() => setStaged((prev) => prev.filter((s) => s.uri !== att.uri))}
                   >
-                    📄 {att.name}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const file = localFiles.current.get(att.uri);
+                        if (att.mimeType === 'text/plain' && file)
+                          void file
+                            .slice(0, 8000)
+                            .text()
+                            .then((text) => {
+                              modal.info({
+                                title: att.name,
+                                content: (
+                                  <pre
+                                    style={{
+                                      whiteSpace: 'pre-wrap',
+                                      maxHeight: 400,
+                                      overflow: 'auto',
+                                    }}
+                                  >
+                                    {text}
+                                    {file.size > 8000 ? '\n…Preview truncated' : ''}
+                                  </pre>
+                                ),
+                                width: 700,
+                              });
+                            });
+                      }}
+                    >
+                      📄 {att.name} {att.size ? `(${att.size.toLocaleString()} bytes)` : ''}
+                    </button>
                   </Tag>
                 ),
               )}
@@ -1233,7 +1297,7 @@ export default function App() {
                 return false; // keep antd from posting the file itself
               }}
               showUploadList={false}
-              accept="image/png,image/jpeg,image/webp,image/gif,application/pdf"
+              accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,.txt"
               disabled={busy && !isMain}
             >
               <Button
@@ -1255,6 +1319,9 @@ export default function App() {
                 onStartVoiceCall={startVoiceCall}
                 voiceCallDisabled={
                   busy || !!approval || creationPending || voiceCall.snapshot.active
+                }
+                onStagePaste={(text) =>
+                  onStageFile(new File([text], 'pasted-text.txt', { type: 'text/plain' }), 'paste')
                 }
                 onSubmit={onSubmit}
                 onCancel={onCancelTurn}

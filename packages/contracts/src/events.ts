@@ -74,6 +74,13 @@ export const sessionWorkspaceBoundEventSchema = z.object({
 export const sessionAttachmentEventSchema = z.object({
   ...baseFields,
   type: z.literal('session/attachment'),
+  attachmentId: z.uuid().optional(),
+  sha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  filename: z.string().max(200).optional(),
+  origin: z.enum(['file', 'paste']).optional(),
   uri: z.string().startsWith('blob://'),
   workspacePath: z.string().min(1).max(500),
   mimeType: z.string().min(1).max(100),

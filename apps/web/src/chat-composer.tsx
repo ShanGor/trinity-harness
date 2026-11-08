@@ -1,3 +1,4 @@
+import { isLargePaste } from '@trinity-harness/shared';
 import { memo, useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { App as AntdApp, Button, Flex } from 'antd';
 import { AudioOutlined, PhoneOutlined, StopOutlined } from '@ant-design/icons';
@@ -30,6 +31,7 @@ export const ChatComposer = memo(function ChatComposer({
   onStartVoiceCall,
   voiceCallDisabled = false,
   onSubmit,
+  onStagePaste,
   onCancel,
 }: {
   busy: boolean;
@@ -49,10 +51,12 @@ export const ChatComposer = memo(function ChatComposer({
   onStartVoiceCall?: () => void;
   voiceCallDisabled?: boolean;
   onSubmit: (text: string) => void | Promise<boolean | void>;
+  onStagePaste?: (text: string) => boolean;
   onCancel: () => void;
 }): ReactElement {
   const [input, setInput] = useState('');
   const submitting = useRef(false);
+  const previousResetVersion = useRef(resetVersion);
   const drafts = useRef(draftStore ?? new Map<string, string>());
   const currentKey = useRef(draftKey);
   currentKey.current = draftKey;
@@ -87,6 +91,8 @@ export const ChatComposer = memo(function ChatComposer({
   }, [draftKey, draftOwner]);
 
   useEffect(() => {
+    if (previousResetVersion.current === resetVersion) return;
+    previousResetVersion.current = resetVersion;
     setInput('');
   }, [resetVersion]);
 
@@ -209,7 +215,26 @@ export const ChatComposer = memo(function ChatComposer({
 
   return (
     <Flex gap={8} align="center">
-      <div className="chat-composer-sender">
+      <div
+        className="chat-composer-sender"
+        onPasteCapture={(event) => {
+          if (!onStagePaste || !(event.target instanceof HTMLTextAreaElement)) return;
+          const text = event.clipboardData.getData('text/plain');
+          if (!isLargePaste(text)) return;
+          event.preventDefault();
+          if (!onStagePaste(text)) return;
+          const textarea = event.target;
+          const start = textarea.selectionStart;
+          const marker = '[pasted text attached]';
+          const next = `${input.slice(0, start)}${marker}${input.slice(textarea.selectionEnd)}`;
+          persistDraft(draftKey, next);
+          setInput(next);
+          requestAnimationFrame(() => {
+            if (textarea.isConnected)
+              textarea.setSelectionRange(start + marker.length, start + marker.length);
+          });
+        }}
+      >
         <Sender
           components={senderComponents}
           value={input}

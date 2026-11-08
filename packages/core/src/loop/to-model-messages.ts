@@ -39,7 +39,9 @@ function textFromContent(
 function mediaBlocksFromContent(
   content: Extract<SessionEvent, { type: 'message/user' }>['content'],
 ): ConversationMessage['blocks'] {
-  const blocks = content.filter((b) => b.kind === 'image' || b.kind === 'file');
+  const blocks = content.filter(
+    (b) => b.kind === 'image' || (b.kind === 'file' && b.mimeType !== 'text/plain'),
+  );
   return blocks.length > 0 ? blocks : undefined;
 }
 

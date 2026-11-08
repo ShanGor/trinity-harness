@@ -127,6 +127,13 @@
       "when": 1793601090478,
       "tag": "0017_hard_triton",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1794062871764,
+      "tag": "0018_sudden_ultimates",
+      "breakpoints": true
     }
   ]
 }

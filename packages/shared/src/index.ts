@@ -74,3 +74,10 @@ export type {
 } from '@trinity-harness/contracts';
 
 export { promptDeliverySchema, type PromptDelivery } from '@trinity-harness/contracts';
+export * from './paste.js';
+export {
+  attachmentUploadResponseSchema,
+  type AttachmentUploadResponse,
+} from '@trinity-harness/contracts';
+
+export { attachmentUploadErrorSchema } from '@trinity-harness/contracts';

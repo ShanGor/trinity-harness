@@ -1,3 +1,6 @@
+import { PgAttachmentCatalog } from '@trinity-harness/db';
+import { AttachmentService, readAttachmentBlob } from '@trinity-harness/core';
+import type { AttachmentCatalog, AttachmentReader } from '@trinity-harness/contracts';
 import { randomUUID } from 'node:crypto';
 import type { SandboxPort } from '@trinity-harness/contracts';
 import {
@@ -165,6 +168,14 @@ async function main(): Promise<void> {
   // sandbox + tool registries are built PER ROOT and cached — the sandbox's
   // path-escape check is the isolation boundary between users/teams.
   const blobStore = new LocalBlobStore(path.join(env.WORKSPACE_ROOT, '.trinity', 'blobs'));
+  const attachmentCatalog: AttachmentCatalog = new PgAttachmentCatalog(db, runPool);
+  const attachmentReader: AttachmentReader = {
+    get: (sessionId, uri) =>
+      new AttachmentService(blobStore, attachmentCatalog, store).get(sessionId, uri),
+    meta: (sessionId, uri) =>
+      new AttachmentService(blobStore, attachmentCatalog, store).meta(sessionId, uri),
+  };
+
   // M4: LSP service + tools (lazy per-workspace language servers, §9). Rooted
   // at the deployment root so it can index every session subdirectory.
   const globalSandbox = new LocalSandbox(env.WORKSPACE_ROOT, {
@@ -180,8 +191,8 @@ async function main(): Promise<void> {
         })
       : null;
 
-  const resolveBlob = async (uri: string): Promise<Uint8Array> => {
-    const bytes = await blobStore.get(uri);
+  const resolveBlob = async (uri: string, sessionId: string): Promise<Uint8Array> => {
+    const bytes = await readAttachmentBlob(blobStore, attachmentReader, sessionId, uri, store);
     if (bytes === null) throw new Error(`blob not found: ${uri}`);
     return bytes;
   };
@@ -243,7 +254,7 @@ async function main(): Promise<void> {
     for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
       registry.register(tool);
     }
-    registry.register(createReadBlobTool(blobStore));
+    registry.register(createReadBlobTool(blobStore, attachmentReader, store));
     registry.register(createRecallTool({ memory, index: conversationIndex, metas, store }));
     if (sessionLsp) {
       for (const tool of createLspTools(sessionLsp)) {
@@ -265,7 +276,7 @@ async function main(): Promise<void> {
           for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
             childRegistry.register(tool);
           }
-          childRegistry.register(createReadBlobTool(blobStore));
+          childRegistry.register(createReadBlobTool(blobStore, attachmentReader, store));
           childRegistry.register(createSkillTool(childSkills));
           childRegistry.register(createTaskTool(childStore));
           childRegistry.register(createResearchTool(childStore, blobStore));
@@ -314,7 +325,7 @@ async function main(): Promise<void> {
             }),
             spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
             usage,
-            resolveBlob,
+            resolveBlob: (uri) => resolveBlob(uri, childSessionId),
           });
         },
       }),
@@ -391,7 +402,7 @@ async function main(): Promise<void> {
         // M4: compaction + spill + multimodal + diagnostics injection.
         context,
         spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
-        resolveBlob,
+        resolveBlob: (uri) => resolveBlob(uri, sessionId),
         augmentSystem: assemblyFor(workspaceRoot, sessionId).lsp
           ? makeDiagnosticsAugment(assemblyFor(workspaceRoot, sessionId).lsp!, () => store)
           : undefined,

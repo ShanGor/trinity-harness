@@ -1,3 +1,9 @@
+import {
+  AttachmentService,
+  MemoryAttachmentCatalog,
+  hasAttachmentReference,
+} from '@trinity-harness/core';
+import type { AttachmentCatalog } from '@trinity-harness/contracts';
 import type { SandboxPort } from '@trinity-harness/contracts';
 import { turnMessageProjection } from '@trinity-harness/contracts';
 import {
@@ -14,12 +20,7 @@ import {
   type EnvironmentPort,
   type EnvironmentMaintenancePort,
 } from '@trinity-harness/contracts';
-import {
-  chatWorkspaceDir,
-  runOrderedPrompts,
-  saveWorkspaceAttachment,
-  sessionWorkspaceRoot,
-} from '@trinity-harness/core';
+import { chatWorkspaceDir, runOrderedPrompts, sessionWorkspaceRoot } from '@trinity-harness/core';
 import type { SessionRunPort, TurnTask } from '@trinity-harness/contracts';
 import {
   memoryCommandSchema,
@@ -244,6 +245,7 @@ const ATTACHMENT_MIME_ALLOWLIST = [
   'image/webp',
   'image/gif',
   'application/pdf',
+  'text/plain',
 ];
 
 /**
@@ -259,7 +261,7 @@ function promptContent(
   const blocks: ContentBlock[] = [{ kind: 'text', text }];
   for (const att of attachments ?? []) {
     blocks.push(
-      att.mimeType === 'application/pdf'
+      !att.mimeType.startsWith('image/')
         ? { kind: 'file', uri: att.uri, mimeType: att.mimeType }
         : { kind: 'image', uri: att.uri, mimeType: att.mimeType },
     );
@@ -277,6 +279,7 @@ function promptContent(
 async function acpBlocksToContent(
   blobs: BlobStore | undefined,
   raw: unknown,
+  upload?: (data: Uint8Array, mime: string) => Promise<{ uri: string }>,
 ): Promise<ContentBlock[] | null> {
   const resourceSchema = z.object({
     uri: z.string().min(1).max(2000).optional(),
@@ -335,7 +338,9 @@ async function acpBlocksToContent(
       }
       const mime =
         resource.mimeType ?? (kind === 'image' ? 'image/png' : 'application/octet-stream');
-      const blob = await blobs.put(undefined, bytes, { mimeType: mime });
+      const blob = upload
+        ? await upload(bytes, mime)
+        : await blobs.put(undefined, bytes, { mimeType: mime });
       blocks.push({ kind, uri: blob.uri, mimeType: mime });
     } else if (resource.uri !== undefined) {
       if (resource.uri.startsWith('blob://')) {
@@ -629,6 +634,7 @@ export interface ServerDeps {
   defaultPolicy?: PermissionPolicy;
   /** M4: attachment + spill storage (docs/design.md §10). */
   blobs?: BlobStore;
+  attachmentCatalog?: AttachmentCatalog;
   /**
    * Voice I/O proxy targets (docs/design.md §10): local Fun-ASR STT and
    * Qwen3-TTS services. Present ⇒ the /api/speech/* routes are served;
@@ -738,6 +744,13 @@ export async function buildServer(
   };
 
   const auth = deps.auth;
+  const attachments = deps.blobs
+    ? new AttachmentService(
+        deps.blobs,
+        deps.attachmentCatalog ?? new MemoryAttachmentCatalog(),
+        deps.store,
+      )
+    : undefined;
   if (auth) {
     app.addHook('onRequest', async (req, reply) => {
       const url = req.raw.url ?? '';
@@ -2101,6 +2114,29 @@ export async function buildServer(
     let expectedLastSeq: number | undefined;
     const promptId = revision?.operationId ?? newId();
     let content = promptContent(body.data.text, body.data.attachments);
+    if (attachments) {
+      for (const block of content) {
+        if (block.kind !== 'file' && block.kind !== 'image') continue;
+        if (block.uri.includes('attachment-pool'))
+          return reply.code(400).send({ error: 'Invalid attachment' });
+        if (
+          auth &&
+          block.uri.startsWith('blob://') &&
+          !block.uri.startsWith('blob://attachment/') &&
+          !hasAttachmentReference(await deps.store.load(sessionId), block.uri)
+        )
+          return reply.code(400).send({ error: 'Invalid attachment' });
+        if (block.uri.startsWith('blob://attachment/')) {
+          const record = await attachments.record(sessionId, block.uri);
+          if (
+            !record ||
+            record.mimeType !== block.mimeType ||
+            (record.mimeType.startsWith('image/') ? block.kind !== 'image' : block.kind !== 'file')
+          )
+            return reply.code(400).send({ error: 'Invalid attachment' });
+        }
+      }
+    }
     if (revision) {
       const events = await deps.store.load(sessionId);
       // The operation ID is also the new prompt identity, including queued Main requests.
@@ -2432,6 +2468,8 @@ export async function buildServer(
           .object({
             mime: z.string().min(1).max(100),
             filename: z.string().min(1).max(200).optional(),
+            operationId: z.uuid().optional(),
+            origin: z.enum(['file', 'paste']).default('file'),
           })
           .safeParse(req.query);
         if (!query.success || !ATTACHMENT_MIME_ALLOWLIST.includes(query.data.mime)) {
@@ -2443,49 +2481,61 @@ export async function buildServer(
         if (!Buffer.isBuffer(data) || data.byteLength === 0) {
           return reply.code(400).send({ error: 'binary body required (application/octet-stream)' });
         }
-        const blob = await deps.blobs!.put(undefined, new Uint8Array(data), {
-          mimeType: query.data.mime,
-        });
-        const workspacePath = await saveWorkspaceAttachment(
-          await workspaceRootFor(granted.meta, sessionId),
-          new Uint8Array(data),
-          query.data.filename,
-          deps.workspaceSandbox?.(sessionId, await workspaceRootFor(granted.meta, sessionId)),
-        );
-        await deps.store.append(
-          sessionId,
-          [
-            {
-              type: 'session/attachment',
-              eventId: newId(),
-              at: new Date().toISOString(),
-              uri: blob.uri,
-              workspacePath,
-              mimeType: query.data.mime,
-              size: data.byteLength,
-            },
-          ],
-          { actor: identity?.userId ?? 'anonymous' },
-        );
-        emitAudit({
-          id: newId(),
-          at: new Date().toISOString(),
-          tenantId: identity?.tenantId ?? NIL_TENANT,
-          userId: identity?.userId ?? 'anonymous',
-          sessionId: granted.sessionId,
-          action: 'session/attachment',
-          target: blob.uri,
-          result: 'ok',
-          detail: { mimeType: query.data.mime, size: data.byteLength },
-        });
-        return reply
-          .code(201)
-          .send({ uri: blob.uri, mimeType: query.data.mime, size: data.byteLength, workspacePath });
+        const workspaceRoot = await workspaceRootFor(granted.meta, sessionId);
+        try {
+          const uploaded = await attachments!.upload({
+            sessionId,
+            operationId: query.data.operationId ?? newId(),
+            data: new Uint8Array(data),
+            mimeType: query.data.mime,
+            filename: query.data.filename ?? 'attachment',
+            origin: query.data.origin,
+            workspaceRoot,
+            sandbox: deps.workspaceSandbox?.(sessionId, workspaceRoot),
+            actor: identity?.userId ?? 'anonymous',
+            signal: AbortSignal.timeout(120_000),
+          });
+          emitAudit({
+            id: newId(),
+            at: new Date().toISOString(),
+            tenantId: identity?.tenantId ?? NIL_TENANT,
+            userId: identity?.userId ?? 'anonymous',
+            sessionId,
+            action: 'session/attachment',
+            target: uploaded.uri,
+            result: 'ok',
+            detail: { mimeType: uploaded.mimeType, size: uploaded.size },
+          });
+          return reply.code(201).send(uploaded);
+        } catch (error) {
+          if (error instanceof TypeError)
+            return reply.code(400).send({ error: 'Invalid UTF-8 paste' });
+          if (
+            error instanceof Error &&
+            'code' in error &&
+            error.code === 'ATTACHMENT_WRITE_UNCERTAIN'
+          )
+            return reply.code(409).send({
+              code: 'ATTACHMENT_WRITE_UNCERTAIN',
+              error:
+                'The upload could not verify its workspace file. Your draft is retained; inspect the upload before trying again.',
+            });
+          if (error instanceof Error && 'code' in error && error.code === 'ATTACHMENT_CONFLICT')
+            return reply.code(409).send({
+              code: 'ATTACHMENT_CONFLICT',
+              error:
+                'This upload operation belongs to different content. Remove and attach the file again.',
+            });
+
+          return reply.code(409).send({
+            error:
+              'Attachment upload did not complete; keep the draft and retry with the same operation ID.',
+          });
+        }
       },
     );
 
-    // Blob download (UI image rendering, spill retrieval). Keys are
-    // unguessable UUIDs; ownership hardening (per-session ACL) is M5+.
+    // Attachment aliases resolve through session access; legacy keys require a historical reference.
     app.get('/api/blobs/*', async (req, reply) => {
       const key = (req.params as Record<string, string>)['*'] ?? '';
       if (!key || key.includes('..') || key.includes('\\')) {
@@ -2499,6 +2549,35 @@ export async function buildServer(
         return reply
           .code(403)
           .send({ error: 'browser observations require authorized bounded saved reads' });
+      }
+      if (key.split('/').includes('attachment-pool'))
+        return reply.code(404).send({ error: 'blob not found' });
+      if (key.startsWith('attachment/')) {
+        const sessionId = key.split('/')[1] ?? '';
+        if (!(await authorizeSession(sessionId, req.identity, reply))) return;
+        const uri = `blob://${key}`;
+        const meta = await attachments!.meta(sessionId, uri);
+        const bytes = meta ? await attachments!.get(sessionId, uri) : null;
+        if (!meta || !bytes) return reply.code(404).send({ error: 'blob not found' });
+        return reply
+          .header('content-type', meta.mimeType)
+          .header('x-content-type-options', 'nosniff')
+          .header('content-disposition', 'attachment')
+          .header('cache-control', 'private, no-store')
+          .send(Buffer.from(bytes));
+      }
+      if (auth) {
+        if (!req.identity) return reply.code(404).send({ error: 'blob not found' });
+        const sessions = await auth.metas.listForIdentity(req.identity);
+        let authorized = false;
+        for (const session of sessions) {
+          if (session.closedAt) continue;
+          if (hasAttachmentReference(await deps.store.load(session.id), `blob://${key}`)) {
+            authorized = true;
+            break;
+          }
+        }
+        if (!authorized) return reply.code(404).send({ error: 'blob not found' });
       }
       const meta = await deps.blobs!.getMeta(`blob://${key}`);
       const data = meta ? await deps.blobs!.get(meta.uri) : null;
@@ -3837,6 +3916,8 @@ export async function buildServer(
         }
 
         case 'session/prompt': {
+          if (identity?.role === 'viewer')
+            return reply.send(jsonRpcError(id, -32603, 'viewer role is read-only'));
           const sessionId = String(params['sessionId'] ?? '');
           const granted = await authorizeSession(sessionId, identity, reply);
           if (!granted) return;
@@ -3871,7 +3952,43 @@ export async function buildServer(
             content = null;
           } else {
             try {
-              content = await acpBlocksToContent(deps.blobs, rawBlocks);
+              content = await acpBlocksToContent(deps.blobs, rawBlocks, async (data, mimeType) => {
+                if (!attachments || !ATTACHMENT_MIME_ALLOWLIST.includes(mimeType))
+                  throw new Error('Unsupported attachment');
+                const workspaceRoot = await workspaceRootFor(granted.meta, sessionId);
+                return attachments.upload({
+                  sessionId,
+                  operationId: newId(),
+                  data,
+                  mimeType,
+                  filename: 'attachment',
+                  origin: 'file',
+                  workspaceRoot,
+                  sandbox: deps.workspaceSandbox?.(sessionId, workspaceRoot),
+                });
+              });
+              for (const block of content ?? []) {
+                if (block.kind !== 'file' && block.kind !== 'image') continue;
+                if (block.uri.includes('attachment-pool')) throw new Error('Invalid attachment');
+                if (
+                  auth &&
+                  block.uri.startsWith('blob://') &&
+                  !block.uri.startsWith('blob://attachment/') &&
+                  !hasAttachmentReference(await deps.store.load(sessionId), block.uri)
+                )
+                  throw new Error('Invalid attachment');
+                if (block.uri.startsWith('blob://attachment/')) {
+                  const record = await attachments?.record(sessionId, block.uri);
+                  if (
+                    !record ||
+                    record.mimeType !== block.mimeType ||
+                    (record.mimeType.startsWith('image/')
+                      ? block.kind !== 'image'
+                      : block.kind !== 'file')
+                  )
+                    throw new Error('Invalid attachment');
+                }
+              }
             } catch (err) {
               return reply.send(
                 jsonRpcError(

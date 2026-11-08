@@ -22,7 +22,14 @@ export type ToolCallView = {
 };
 
 /** M4 multimodal: an attachment reference rendered from the blob store. */
-export type AttachmentView = { kind: 'image' | 'file'; uri: string; mimeType?: string };
+export type AttachmentView = {
+  kind: 'image' | 'file';
+  uri: string;
+  mimeType?: string;
+  origin?: 'file' | 'paste';
+  operationId?: string;
+  size?: number;
+};
 
 export type ChatItem = {
   messageId?: string;

@@ -375,3 +375,26 @@ export const episodeChanges = pgTable('episode_changes', {
   episodeId: text('episode_id').notNull(),
   payload: jsonb('payload').notNull(),
 });
+
+/** Global immutable originals. Retained while any ingestion/event can reference them. */
+export const attachmentContents = pgTable(
+  'attachment_contents',
+  {
+    sha256: text('sha256').notNull(),
+    size: bigint('size', { mode: 'number' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.sha256, t.size] })],
+);
+
+/** Progress is mutable; committed session/attachment receipts remain append-only. */
+export const attachmentIngestions = pgTable(
+  'attachment_ingestions',
+  {
+    id: uuid('id').primaryKey(),
+    sessionId: uuid('session_id').notNull(),
+    operationId: uuid('operation_id').notNull(),
+    record: jsonb('record').notNull(),
+  },
+  (t) => [uniqueIndex('attachment_ingestion_operation').on(t.sessionId, t.operationId)],
+);

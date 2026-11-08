@@ -15,3 +15,4 @@ export * from './session-runs.js';
 export * from './prompt-dispatcher.js';
 export * from './schedule-store.js';
 export * from './environment-store.js';
+export * from './attachment-catalog.js';

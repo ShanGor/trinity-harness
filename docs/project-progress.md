@@ -5,6 +5,14 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Large pastes and global attachment originals (2026-11-07)
+
+- [x] Large clipboard text stages as a previewable/removable attachment at 8,000 approximate tokens with a 20 MiB UTF-8 limit. Surrounding instruction, selection, drafts, focus and phone attachments remain independent. Whole-draft splitting is omitted.
+- [x] Added global exact-byte immutable publication, PG content/ingestion catalogs (migration 0018), session-owned aliases, and independent workspace copies routed through the configured Sandbox. Ordinary images/PDFs/text and ACP inline resources share ingestion. Stable upload operations recover receipts without repeating uncertain writes; raw pool keys cannot authorize downloads, prompts, tools or provider reads.
+- [x] Text attachments stay out of provider media; the Loop resolves original pasted user text for tool/delegation provenance. Historical references remain replayable and writable copy edits preserve originals.
+- [x] Validation: 389 relevant tests passed, including isolated PostgreSQL cross-tenant/concurrency/recreation tests and jsdom draft/focus/selection checks. Repository lint, workspace typecheck, scoped formatting and production Web build passed (existing bundle-size warning). Migration 0018 was reviewed and applied to the local database. Final API regressions also cover viewer denial before ACP ingestion.
+- [ ] Conservative retention keeps originals/ingestions indefinitely. Automatic collection, abandoned staging cleanup, logical storage quotas, metadata-only transfer avoidance, and real guest/deployment acceptance remain follow-ups. No service restart or production rollout is included.
+
 ### Conversation event connection feedback (2026-11-07)
 
 - [x] Replaced generic `[object Event]` warnings with one connection notice, idle-stream recovery, a 15-second persistent-outage warning and explicit Retry. Event parsing/processing failures have a separate, deduplicated message; notices preserve the composer and conversation history.

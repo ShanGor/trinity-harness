@@ -1,4 +1,9 @@
 import {
+  attachmentUploadResponseSchema,
+  attachmentUploadErrorSchema,
+  type AttachmentUploadResponse,
+} from '@trinity-harness/shared';
+import {
   speechPreferencesSchema,
   promptDeliverySchema,
   type PromptDelivery,
@@ -542,7 +547,7 @@ export class AcpClient {
   }
 
   /**
-   * M4 multimodal: upload an image/PDF attachment (raw octet-stream body).
+   * M4 multimodal: upload an image/PDF/UTF-8 text attachment (raw octet-stream body).
    * Returns the `blob://` URI to reference from a subsequent prompt.
    */
   async uploadAttachment(
@@ -550,9 +555,13 @@ export class AcpClient {
     data: Blob,
     mimeType: string,
     filename?: string,
-  ): Promise<{ uri: string; mimeType: string; size: number }> {
+    operationId?: string,
+    origin: 'file' | 'paste' = 'file',
+  ): Promise<AttachmentUploadResponse> {
     const params = new URLSearchParams({ mime: mimeType });
     if (filename) params.set('filename', filename);
+    if (operationId) params.set('operationId', operationId);
+    params.set('origin', origin);
     const res = await fetch(
       `${this.baseUrl}/api/sessions/${sessionId}/attachments?${params.toString()}`,
       {
@@ -562,9 +571,13 @@ export class AcpClient {
       },
     );
     if (res.status !== 201) {
-      throw new Error(`uploadAttachment failed: ${res.status}`);
+      const body: unknown = await res.json().catch(() => null);
+      const failure = attachmentUploadErrorSchema.safeParse(body);
+      throw new Error(
+        failure.success ? failure.data.error : `uploadAttachment failed: ${res.status}`,
+      );
     }
-    return (await res.json()) as { uri: string; mimeType: string; size: number };
+    return attachmentUploadResponseSchema.parse(await res.json());
   }
 
   /** Fetch an attachment with the same bearer authentication as other API calls. */

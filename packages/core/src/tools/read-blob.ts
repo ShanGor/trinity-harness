@@ -1,3 +1,5 @@
+import type { AttachmentReader, SessionStore } from '@trinity-harness/contracts';
+import { readAttachmentBlob } from '../multimodal/attachment-service.js';
 import { BLOB_URI_SCHEME } from '@trinity-harness/contracts';
 import type { BlobStore, ToolDefinition } from '@trinity-harness/contracts';
 import { z } from 'zod';
@@ -12,7 +14,11 @@ const STAT_MAX_BYTES = 2 * 1024 * 1024;
  * (docs/design.md §7 "spill 到对象存储仅留引用"): the event log stores
  * `blob://` references; the model pulls content back on demand via this tool.
  */
-export function createReadBlobTool(blobStore: BlobStore): ToolDefinition {
+export function createReadBlobTool(
+  blobStore: BlobStore,
+  attachments?: AttachmentReader,
+  events?: SessionStore,
+): ToolDefinition {
   return defineTool({
     name: 'read_blob',
     effect: { kind: 'read', scope: 'reference', evidence: 'immutable-observation' },
@@ -28,7 +34,7 @@ export function createReadBlobTool(blobStore: BlobStore): ToolDefinition {
         .optional()
         .describe('Max bytes to return'),
     }),
-    execute: async (args): Promise<{ value: unknown; isError: boolean }> => {
+    execute: async (args, ctx): Promise<{ value: unknown; isError: boolean }> => {
       if (!args.uri.startsWith(BLOB_URI_SCHEME)) {
         return {
           value: { message: `not a blob URI (${BLOB_URI_SCHEME}…): ${args.uri}` },
@@ -51,7 +57,13 @@ export function createReadBlobTool(blobStore: BlobStore): ToolDefinition {
           value: { message: 'Browser evidence requires bounded browser read_observation' },
           isError: true,
         };
-      const data = await blobStore.get(args.uri);
+      const data = await readAttachmentBlob(
+        blobStore,
+        attachments,
+        ctx.sessionId,
+        args.uri,
+        events,
+      );
       if (data === null) {
         return { value: { message: `blob not found: ${args.uri}` }, isError: true };
       }

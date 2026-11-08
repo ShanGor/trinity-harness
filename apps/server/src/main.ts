@@ -1,3 +1,10 @@
+import { PgAttachmentCatalog } from '@trinity-harness/db';
+import {
+  AttachmentService,
+  MemoryAttachmentCatalog,
+  readAttachmentBlob,
+} from '@trinity-harness/core';
+import type { AttachmentCatalog, AttachmentReader } from '@trinity-harness/contracts';
 import { createRecallTool } from '@trinity-harness/core';
 import {
   PgSessionRuns,
@@ -193,7 +200,7 @@ async function main(): Promise<void> {
       for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, bashTool]) {
         registry.register(tool);
       }
-      registry.register(createReadBlobTool(blobStore));
+      registry.register(createReadBlobTool(blobStore, attachmentReader, store));
       if (memory && conversationIndex && auth)
         registry.register(
           createRecallTool({ memory, index: conversationIndex, metas: auth.metas, store }),
@@ -218,7 +225,7 @@ async function main(): Promise<void> {
               editFileTool,
               globTool,
               bashTool,
-              createReadBlobTool(blobStore),
+              createReadBlobTool(blobStore, attachmentReader, store),
               createSkillTool(childSkills),
               createTaskTool(childStore),
               createResearchTool(childStore, blobStore),
@@ -255,7 +262,7 @@ async function main(): Promise<void> {
               maxContextTokens: env.MODEL_CONTEXT_TOKENS,
               maxOutputTokens: env.MODEL_OUTPUT_TOKENS,
               usage,
-              resolveBlob,
+              resolveBlob: (uri) => resolveBlob(uri, childSessionId),
               spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
               context: new ContextManager({
                 llm,
@@ -285,6 +292,13 @@ async function main(): Promise<void> {
   // M4: blob store backs attachments (upload endpoint) and spilled results.
   // Shares the workspace disk with the agent-worker (single-node topology).
   const blobStore = new LocalBlobStore(path.join(env.WORKSPACE_ROOT, '.trinity', 'blobs'));
+  let attachmentCatalog: AttachmentCatalog = new MemoryAttachmentCatalog();
+  const attachmentReader: AttachmentReader = {
+    get: (sessionId, uri) =>
+      new AttachmentService(blobStore, attachmentCatalog, store).get(sessionId, uri),
+    meta: (sessionId, uri) =>
+      new AttachmentService(blobStore, attachmentCatalog, store).meta(sessionId, uri),
+  };
 
   const databaseUrl = process.env['DATABASE_URL'];
   if (env.SCHEDULING_ENABLED && (!databaseUrl || !env.REDIS_URL))
@@ -301,8 +315,8 @@ async function main(): Promise<void> {
     reasoningBudgetTokens: env.REASONING_BUDGET_TOKENS,
     reasoningEffort: env.REASONING_EFFORT,
   });
-  const resolveBlob = async (uri: string): Promise<Uint8Array> => {
-    const bytes = await blobStore.get(uri);
+  const resolveBlob = async (uri: string, sessionId: string): Promise<Uint8Array> => {
+    const bytes = await readAttachmentBlob(blobStore, attachmentReader, sessionId, uri, store);
     if (bytes === null) throw new Error(`blob not found: ${uri}`);
     return bytes;
   };
@@ -342,7 +356,7 @@ async function main(): Promise<void> {
     store,
     workspaceRoot,
     spill: { store: blobStore, thresholdBytes: env.SPILL_THRESHOLD_BYTES },
-    resolveBlob,
+    resolveBlob: (uri) => resolveBlob(uri, sessionId),
     // M5: quota gate + usage recording for inline-mode turns (distributed
     // turns carry the same assembly on the agent-worker).
     usage,
@@ -410,6 +424,7 @@ async function main(): Promise<void> {
     const pool = createPool(databaseUrl);
     const db = createDb(pool);
     runPool = createPool(databaseUrl);
+    attachmentCatalog = new PgAttachmentCatalog(db, runPool);
     sessionRuns = new PgSessionRuns(runPool);
     if (env.SCHEDULING_ENABLED && env.REDIS_URL) schedules = new PgScheduleStore(db);
     if (env.FIRECRACKER_NODES.length) {
@@ -529,6 +544,7 @@ async function main(): Promise<void> {
       turns: turnCancel ? { cancel: (sid) => turnCancel!.cancel(sid) } : undefined,
       defaultPolicy,
       blobs: blobStore,
+      attachmentCatalog,
       workspaceSandbox: guestRouter
         ? (sessionId, root) => assemblyFor(root, sessionId).sandbox
         : undefined,

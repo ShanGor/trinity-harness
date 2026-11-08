@@ -26,6 +26,8 @@ export interface PutOptions {
 export interface BlobStore {
   /** Stores `data` under a generated (or supplied) key. */
   put(key: string | undefined, data: Uint8Array, opts: PutOptions): Promise<BlobMeta>;
+  /** Atomically publishes immutable bytes; returns only after existing bytes are verified. */
+  putImmutable?(key: string, data: Uint8Array): Promise<void>;
   /** Resolves a `blob://` URI (or bare key); null when missing. */
   get(uri: string): Promise<Uint8Array | null>;
   getMeta(uri: string): Promise<BlobMeta | null>;
