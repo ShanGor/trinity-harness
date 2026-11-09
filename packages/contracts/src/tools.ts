@@ -26,11 +26,16 @@ export interface ToolResult<V = unknown> {
 export interface ToolContext {
   /** Current committed user message's text, supplied by the Loop, never tool arguments. */
   userRequest?: string | undefined;
+  /** Current committed prompt event; set by the owning Loop, not model arguments. */
+  userPromptId?: string | undefined;
   taskBudget?: TaskBudgetScope | undefined;
   /** Authenticated parent policy snapshot for delegation; never supplied by model arguments. */
   permissionPolicy?: PermissionPolicy | undefined;
   /** Inherited recall-policy fence; not supplied by model arguments. */
   contextGuard?: (() => Promise<void>) | undefined;
+  /** Main-loop-only acknowledgement of an authenticated, committed Persona write. Not inherited by children. */
+  personalMemoryChanged?:
+    ((beforePolicyRevision: number, policyRevision: number) => void) | undefined;
   tenantId?: string | undefined;
   recordUsage?: ((usage: ModelUsage) => Promise<void>) | undefined;
   /** Runtime-generated execution status; persisted as progress, never as evidence. */

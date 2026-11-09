@@ -398,3 +398,35 @@ export const attachmentIngestions = pgTable(
   },
   (t) => [uniqueIndex('attachment_ingestion_operation').on(t.sessionId, t.operationId)],
 );
+
+/** Current user-editable Markdown and append-only revisions, committed together. */
+export const userPersonas = pgTable(
+  'user_personas',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    content: text('content').notNull(),
+    autoSaveEnabled: boolean('auto_save_enabled').notNull().default(true),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    suppressionRevision: bigint('suppression_revision', { mode: 'number' }).notNull().default(0),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.userId] })],
+);
+export const personaEvents = pgTable(
+  'persona_events',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    operationId: uuid('operation_id').notNull(),
+    content: text('content').notNull(),
+    autoSaveEnabled: boolean('auto_save_enabled').notNull().default(true),
+    source: jsonb('source'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.userId, t.revision] }),
+    uniqueIndex('persona_operation_key').on(t.tenantId, t.userId, t.operationId),
+  ],
+);

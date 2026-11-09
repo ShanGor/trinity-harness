@@ -1,4 +1,11 @@
 import {
+  personaSchema,
+  personaHistorySchema,
+  type PersonaHistory,
+  type Persona,
+  type PersonaChange,
+} from '@trinity-harness/shared';
+import {
   attachmentUploadResponseSchema,
   attachmentUploadErrorSchema,
   type AttachmentUploadResponse,
@@ -331,6 +338,16 @@ export class AcpClient {
         AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(15_000)]),
       ),
     );
+  }
+  async getPersonaHistory(before?: number): Promise<PersonaHistory> {
+    return personaHistorySchema.parse(
+      await this.assistantRequest(
+        `/api/persona/history${before === undefined ? '' : `?before=${before}`}`,
+      ),
+    );
+  }
+  async savePersona(change: PersonaChange): Promise<Persona> {
+    return personaSchema.parse(await this.assistantRequest('/api/persona', 'PUT', change));
   }
   async getMemory(): Promise<MemorySnapshot> {
     return memorySnapshotSchema.parse(await this.assistantRequest('/api/memory'));

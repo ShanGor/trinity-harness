@@ -55,7 +55,8 @@ export function createRecallTool(deps: {
         request: string;
       }): boolean =>
         !episode.excluded &&
-        (!snapshot.hasSuppression || episode.policyRevision >= snapshot.revision);
+        (!snapshot.hasSuppression ||
+          episode.policyRevision >= (snapshot.suppressionRevision ?? snapshot.revision));
       if (args.eventId) {
         const events = await deps.store.load(ctx.sessionId);
         const sourceIndex = events.findIndex((event) => event.eventId === args.eventId);
@@ -141,6 +142,10 @@ export function createRecallTool(deps: {
         const result = await deps.index.history(identity, {
           limit: 10,
           timezone: 'UTC',
+          recallOnly: true,
+          ...(snapshot.hasSuppression
+            ? { minPolicyRevision: snapshot.suppressionRevision ?? snapshot.revision }
+            : {}),
           query: args.query,
           before: args.before,
         });

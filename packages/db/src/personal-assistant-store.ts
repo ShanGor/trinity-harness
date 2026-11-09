@@ -2,6 +2,15 @@ import { and, desc, eq, lt, or, sql } from 'drizzle-orm';
 import {
   episodeChangeSchema as changeSchema,
   memoryCommandSchema,
+  personaChangeSchema,
+  personaHistorySchema,
+  memorySearchTerms,
+  memorySourceSchema,
+  sessionEventSchema,
+  removedPromptIds,
+  type PersonaHistory,
+  type Persona,
+  type PersonaChange,
   validateMemoryCommand,
   memoryPredicateKey,
   savedMemorySchema,
@@ -18,6 +27,8 @@ import {
 import type { Db } from './client.js';
 import {
   memoryEvents,
+  userPersonas,
+  personaEvents,
   conversationEpisodes,
   episodeChanges,
   sessions,
@@ -63,11 +74,223 @@ export class PgMemoryStore implements MemoryStorePort {
       .limit(501);
     if (rows.length > 500) throw new Error('Memory scope requires pagination before recall');
     const items = rows.map((row) => savedMemorySchema.parse(row.payload));
+    const [persona] = await this.db
+      .select()
+      .from(userPersonas)
+      .where(
+        and(eq(userPersonas.tenantId, identity.tenantId), eq(userPersonas.userId, identity.userId)),
+      )
+      .limit(1);
     return {
+      ...(persona
+        ? {
+            persona: {
+              content: persona.content,
+              autoSaveEnabled: persona.autoSaveEnabled,
+              revision: persona.revision,
+              updatedAt: new Date(persona.updatedAt).toISOString(),
+            },
+          }
+        : {}),
       items,
-      revision: Math.max(0, ...rows.map((row) => row.revision)),
-      hasSuppression: items.some((item) => item.status === 'forgotten' || item.revision > 1),
+      revision: Math.max(0, ...rows.map((row) => row.revision)) + (persona?.revision ?? 0),
+      hasSuppression: persona
+        ? persona.suppressionRevision > 0
+        : items.some((item) => item.status === 'forgotten' || item.revision > 1),
+      ...(persona ? { suppressionRevision: persona.suppressionRevision } : {}),
     };
+  }
+  async personaHistory(identity: Identity, before?: number): Promise<PersonaHistory> {
+    const rows = await this.db
+      .select()
+      .from(personaEvents)
+      .where(
+        and(
+          eq(personaEvents.tenantId, identity.tenantId),
+          eq(personaEvents.userId, identity.userId),
+          before === undefined ? undefined : lt(personaEvents.revision, before),
+        ),
+      )
+      .orderBy(desc(personaEvents.revision))
+      .limit(21);
+    return personaHistorySchema.parse({
+      revisions: rows.slice(0, 20).map((row) => ({
+        content: row.content,
+        autoSaveEnabled: row.autoSaveEnabled,
+        revision: row.revision,
+        updatedAt: new Date(row.createdAt).toISOString(),
+        ...(row.source ? { source: row.source } : {}),
+      })),
+      nextBefore: rows.length > 20 ? rows[19]!.revision : null,
+    });
+  }
+  async savePersona(
+    identity: Identity,
+    raw: PersonaChange,
+    signal?: AbortSignal,
+  ): Promise<Persona> {
+    signal?.throwIfAborted();
+    if (identity.role === 'viewer')
+      throw Object.assign(new Error('Memory is read-only'), { code: 'MEMORY_READ_ONLY' });
+    const change = personaChangeSchema.parse(raw);
+    // Apply the same credential guard without imposing legacy fact-length limits.
+    validateMemoryCommand({
+      operation: 'save',
+      subject: 'Me',
+      predicate: 'Persona',
+      value: change.content,
+      operationId: change.operationId,
+      memoryId: change.operationId,
+      expectedRevision: change.expectedRevision,
+    });
+    return this.db
+      .transaction(async (tx) => {
+        if (change.source)
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${change.source.sessionId}))`);
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtext(${`memory:${identity.tenantId}:${identity.userId}`}))`,
+        );
+        const scope = and(
+          eq(userPersonas.tenantId, identity.tenantId),
+          eq(userPersonas.userId, identity.userId),
+        );
+        const [retry] = await tx
+          .select()
+          .from(personaEvents)
+          .where(
+            and(
+              eq(personaEvents.tenantId, identity.tenantId),
+              eq(personaEvents.userId, identity.userId),
+              eq(personaEvents.operationId, change.operationId),
+            ),
+          )
+          .limit(1);
+        if (retry) {
+          if (
+            retry.content !== change.content ||
+            retry.revision !== change.expectedRevision + 1 ||
+            (change.autoSaveEnabled !== undefined &&
+              retry.autoSaveEnabled !== change.autoSaveEnabled) ||
+            JSON.stringify(retry.source ? memorySourceSchema.parse(retry.source) : undefined) !==
+              JSON.stringify(change.source)
+          )
+            conflict();
+          return {
+            content: retry.content,
+            autoSaveEnabled: retry.autoSaveEnabled,
+            revision: retry.revision,
+            updatedAt: new Date(retry.createdAt).toISOString(),
+          };
+        }
+        const [prior] = await tx.select().from(userPersonas).where(scope).limit(1);
+        if ((prior?.revision ?? 0) !== change.expectedRevision) conflict();
+        const [lastMemory] = await tx
+          .select({ revision: memoryEvents.revision })
+          .from(memoryEvents)
+          .where(
+            and(
+              eq(memoryEvents.tenantId, identity.tenantId),
+              eq(memoryEvents.userId, identity.userId),
+            ),
+          )
+          .orderBy(desc(memoryEvents.revision))
+          .limit(1);
+        const legacyRevision = lastMemory?.revision ?? 0;
+        if (
+          change.expectedPolicyRevision !== undefined &&
+          legacyRevision + (prior?.revision ?? 0) !== change.expectedPolicyRevision
+        )
+          conflict();
+        if (change.source) {
+          const [session] = await tx
+            .select()
+            .from(sessions)
+            .where(
+              and(
+                eq(sessions.id, change.source.sessionId),
+                eq(sessions.tenantId, identity.tenantId),
+                eq(sessions.userId, identity.userId),
+                eq(sessions.scope, 'personal'),
+              ),
+            )
+            .limit(1);
+          if (!session || session.closedAt)
+            throw Object.assign(new Error('Personal memory source is unavailable.'), {
+              code: 'MEMORY_SOURCE_UNAVAILABLE',
+            });
+          const rows = await tx
+            .select({ payload: sessionEvents.payload })
+            .from(sessionEvents)
+            .where(
+              and(
+                eq(sessionEvents.sessionId, session.id),
+                or(
+                  and(
+                    eq(sessionEvents.type, 'message/removed'),
+                    sql`${sessionEvents.payload}->>'promptId' = ${change.source.eventId}`,
+                  ),
+                  sql`${sessionEvents.payload}->>'eventId' = ${change.source.eventId}`,
+                ),
+              ),
+            )
+            .limit(3);
+          const sourceEvents = rows.map((row) => sessionEventSchema.parse(row.payload));
+          const event = sourceEvents.find((item) => item.eventId === change.source!.eventId);
+          if (
+            event?.type !== 'message/user' ||
+            removedPromptIds(sourceEvents).has(event.eventId) ||
+            (change.source.at && event.at !== change.source.at) ||
+            !event.content
+              .filter((block) => block.kind === 'text')
+              .map((block) => block.text)
+              .join('\n')
+              .includes(change.source.excerpt)
+          )
+            throw Object.assign(new Error('Personal memory source is unavailable.'), {
+              code: 'MEMORY_SOURCE_UNAVAILABLE',
+            });
+        }
+        signal?.throwIfAborted();
+        const updatedAt = this.now().toISOString();
+        const value = {
+          tenantId: identity.tenantId,
+          userId: identity.userId,
+          content: change.content,
+          autoSaveEnabled: change.autoSaveEnabled ?? prior?.autoSaveEnabled ?? true,
+          suppressionRevision:
+            (prior && !change.content.startsWith(prior.content)) || (!prior && legacyRevision > 0)
+              ? legacyRevision + change.expectedRevision + 1
+              : (prior?.suppressionRevision ?? 0),
+          revision: change.expectedRevision + 1,
+          updatedAt,
+        };
+        await tx.insert(personaEvents).values({
+          ...value,
+          createdAt: updatedAt,
+          operationId: change.operationId,
+          source: change.source,
+        });
+        await tx
+          .insert(userPersonas)
+          .values(value)
+          .onConflictDoUpdate({
+            target: [userPersonas.tenantId, userPersonas.userId],
+            set: {
+              content: value.content,
+              autoSaveEnabled: value.autoSaveEnabled,
+              suppressionRevision: value.suppressionRevision,
+              revision: value.revision,
+              updatedAt,
+            },
+          });
+        return {
+          content: value.content,
+          autoSaveEnabled: value.autoSaveEnabled,
+          revision: value.revision,
+          updatedAt,
+        };
+      })
+      .catch(memoryFailure);
   }
   async change(identity: Identity, raw: MemoryCommand): Promise<SavedMemory> {
     const command = memoryCommandSchema.parse(raw);
@@ -108,6 +331,14 @@ export class PgMemoryStore implements MemoryStorePort {
       .where(and(scope, eq(memoryEvents.operationId, command.operationId)))
       .limit(1);
     if (retry) return savedMemorySchema.parse(retry.payload);
+    const [persona] = await tx
+      .select({ revision: userPersonas.revision })
+      .from(userPersonas)
+      .where(
+        and(eq(userPersonas.tenantId, identity.tenantId), eq(userPersonas.userId, identity.userId)),
+      )
+      .limit(1);
+    if (persona) conflict();
     const [previous] = await tx
       .select()
       .from(memoryEvents)
@@ -219,29 +450,7 @@ export class PgConversationIndex implements ConversationIndexPort {
       month: '2-digit',
       day: '2-digit',
     });
-    const stop = new Set([
-      'the',
-      'and',
-      'what',
-      'was',
-      'were',
-      'did',
-      'this',
-      'that',
-      'you',
-      'can',
-      'for',
-      'from',
-      'with',
-      'about',
-      'have',
-      'our',
-      'back',
-      'continue',
-    ]);
-    const terms = (query.query?.toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [])
-      .filter((term) => !stop.has(term))
-      .slice(0, 10);
+    const terms = memorySearchTerms(query.query ?? '');
     const searchable = sql`((${conversationEpisodes.payload}->>'request') || ' ' || (${conversationEpisodes.payload}->>'outcome') || ' ' || coalesce((select payload->>'topic' from episode_changes c where c.tenant_id = ${identity.tenantId} and c.user_id = ${identity.userId} and c.episode_id = ${conversationEpisodes.payload}->>'episodeId' order by c.id desc limit 1), ${conversationEpisodes.payload}->>'topic'))`;
     const rows = await this.db
       .select({ id: conversationEpisodes.id, payload: conversationEpisodes.payload })
@@ -254,6 +463,12 @@ export class PgConversationIndex implements ConversationIndexPort {
           eq(sessions.scope, 'personal'),
           sql`${sessions.closedAt} is null`,
           sql`not exists (select 1 from ${sessionEvents} removed where removed.session_id = ${conversationEpisodes.sessionId} and removed.type = 'message/removed' and removed.payload->>'promptId' = ${conversationEpisodes.payload}->>'promptId')`,
+          query.minPolicyRevision === undefined
+            ? undefined
+            : sql`(${conversationEpisodes.payload}->>'policyRevision')::bigint >= ${query.minPolicyRevision}`,
+          query.recallOnly
+            ? sql`not coalesce((select (c.payload->>'excluded')::boolean from episode_changes c where c.tenant_id = ${identity.tenantId} and c.user_id = ${identity.userId} and c.episode_id = ${conversationEpisodes.payload}->>'episodeId' order by c.id desc limit 1), false)`
+            : undefined,
           query.before ? lt(conversationEpisodes.id, query.before) : undefined,
           terms.length
             ? or(...terms.map((term) => sql`${searchable} ilike ${`%${term}%`}`))

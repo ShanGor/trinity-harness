@@ -669,3 +669,48 @@ it('retains the original interrupted objective after more than four continuation
   });
   expect(receipt.interruptedTurns?.at(-1)?.request).toBe('Continue attempt 5');
 });
+
+it('loads Markdown Persona across personal sessions, excludes team scope and fences edits', async () => {
+  let persona = { content: '## 关于我\n我叫小张。', revision: 1, updatedAt: at };
+  const memory: MemoryStorePort = {
+    snapshot: async () => ({
+      revision: persona.revision,
+      persona,
+      items: [],
+      hasSuppression: true,
+    }),
+    change: vi.fn(),
+  };
+  const context = new PersonalContext(memory, {
+    history: async () => ({ episodes: [], nextBefore: null }),
+    revise: vi.fn(),
+  });
+  const owner = meta();
+  const first = await context.select(owner, randomUUID(), '你好');
+  const next = await context.select(
+    { ...owner, id: randomUUID(), sessionRole: 'side' },
+    randomUUID(),
+    '我是谁？',
+  );
+  expect(next.persona).toEqual(first.persona);
+  const prompt: SessionEvent = {
+    type: 'message/user',
+    eventId: next.promptId,
+    surfaceOp: 'append',
+    at,
+    content: [{ kind: 'text', text: '我是谁？' }],
+  };
+  const rendered = personalModelMessages([prompt], next)
+    .map((message) => message.content)
+    .join('\n');
+  expect(rendered).toContain(persona.content);
+  expect(rendered).not.toContain('我叫小张。\\n'); // Markdown is delivered directly, not JSON escaped.
+  expect(
+    (await context.select({ ...owner, scope: 'team' }, randomUUID(), '我是谁？')).persona,
+  ).toBeUndefined();
+  persona = { content: '', revision: 2, updatedAt: at };
+  await expect(context.validate(owner, first)).rejects.toMatchObject({
+    code: 'MEMORY_CONTEXT_CHANGED',
+  });
+  expect((await context.select(owner, randomUUID(), '你好')).persona?.content).toBe('');
+});

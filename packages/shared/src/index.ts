@@ -42,6 +42,9 @@ export type {
 } from '@trinity-harness/contracts';
 
 export {
+  personaSchema,
+  personaHistorySchema,
+  personaChangeSchema,
   memoryCommandSchema,
   memorySnapshotSchema,
   topicEpisodeSchema,
@@ -49,6 +52,9 @@ export {
   recallReceiptSchema,
 } from '@trinity-harness/contracts';
 export type {
+  Persona,
+  PersonaHistory,
+  PersonaChange,
   MemoryCommand,
   SavedMemory,
   MemorySnapshot,

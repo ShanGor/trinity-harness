@@ -1,3 +1,4 @@
+import { createPersonaTool } from '@trinity-harness/core';
 import { PgAttachmentCatalog } from '@trinity-harness/db';
 import {
   AttachmentService,
@@ -201,6 +202,10 @@ async function main(): Promise<void> {
         registry.register(tool);
       }
       registry.register(createReadBlobTool(blobStore, attachmentReader, store));
+      if (memory && auth)
+        registry.register(
+          createPersonaTool({ memory, metas: auth.metas, store, users: auth.users }),
+        );
       if (memory && conversationIndex && auth)
         registry.register(
           createRecallTool({ memory, index: conversationIndex, metas: auth.metas, store }),

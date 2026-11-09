@@ -249,6 +249,12 @@ export class CoreAgentLoop implements AgentLoop {
       const promptSeq = runOpts?.promptSeq ?? appendedUser!.from;
       const committedPrompt = (await store.load(sessionId))[promptSeq - 1]!;
       const promptId = committedPrompt.eventId;
+      ctx.userPromptId = promptId;
+      let personalMemoryChange: { before: number; after: number } | undefined;
+      if (this.opts.personalContext && this.opts.sessionMetas && !runOpts?.contextGuard)
+        ctx.personalMemoryChanged = (before, after): void => {
+          personalMemoryChange = { before, after };
+        };
       const previousStart = (await store.load(sessionId)).findLast(
         (event) => event.type === 'turn/start' && event.promptId === promptId,
       );
@@ -413,7 +419,13 @@ export class CoreAgentLoop implements AgentLoop {
           recordLatency('duration');
           modelSpan.setStatus({ code: 2 });
           modelSpan.end();
-          await recordUsage(request.model, purpose, [], requestId, performance.now() - modelStarted);
+          await recordUsage(
+            request.model,
+            purpose,
+            [],
+            requestId,
+            performance.now() - modelStarted,
+          );
           throw err;
         }
         const samples: TokenUsage[] = [];
@@ -444,7 +456,13 @@ export class CoreAgentLoop implements AgentLoop {
           } finally {
             recordLatency('duration');
             modelSpan.end();
-            await recordUsage(request.model, purpose, samples, requestId, performance.now() - modelStarted);
+            await recordUsage(
+              request.model,
+              purpose,
+              samples,
+              requestId,
+              performance.now() - modelStarted,
+            );
           }
         })();
       };
@@ -833,6 +851,9 @@ export class CoreAgentLoop implements AgentLoop {
             stableSegment
               ? undefined
               : `Current committed user request reference: eventId=${promptId}, seq=${promptSeq}. This identifies the original user message; working interpretations and reference data do not change its authority.`,
+            gate.schemas().some((tool) => tool.name === 'persona')
+              ? 'Maintain personal memory with persona: when the current user states a stable personal fact or lasting preference, automatically save it before history recall or other task tools, and before your final answer. Correct changed facts and honor forgetting requests. Read the current Markdown, preserve unrelated content and supply an exact current-user source quote. The committed exact-patch call is the profile-edit plan; no separate workspace plan or verification work is needed solely to maintain Persona. Existing task plans still apply to other effects. Temporary task requirements, quotes/documents, hypothetical examples and assistant guesses are not personal facts. Respect the auto-save setting. When asked about earlier conversations, use recall rather than treating missing current context as proof that no history exists. Do not say you remembered, updated or forgot something unless persona succeeded; report unavailable or conflicting writes honestly.'
+              : undefined,
             'Choose the smallest action that advances an unresolved user requirement. Reuse delivered evidence; tool availability and your earlier proposals do not create requirements. Batch only independently necessary calls, and inspect prerequisites before dependent work. Avoid speculative probes, artificial test files or workspace changes unrelated to the requested outcome. Delegate focused questions with stopping conditions, without taking over the parent task. Available budget and compaction are capacity controls, not reasons to expand work.',
             'For retry or continue, recover the relevant user objective and failure from authorized conversation; do not automatically execute every action previously offered. Follow current corrections and runtime policy instead of historical assistant descriptions. Clarify only when materially different interpretations remain. After failure, inspect the cause and choose an evidence-based recovery; changing tools, arguments or domains does not itself repair infrastructure. Never automatically repeat an unknown effect: safely observe its state first. Answer with supported findings and material gaps when further work would not change the answer. Strategy warnings do not certify completion or automatically end the task.',
             'Approval protects consequential effects, not tool syntax. Reading supplied files, public research, navigation, scrolling and search need no extra user confirmation. A request to change a file authorizes its necessary edits. Before payment, deletion, unrelated overwrite, external sending/publishing, private-data disclosure or access changes, establish the exact target and consequence and whether the current user request authorizes it. Do all safe preparation first. Do not ask users to interpret commands or pixel coordinates. Unknown effect means inspect or constrain the action, not request a vague approval. Do not repeat approvals or actions merely to repair bookkeeping. Use read_blob query or nextOffset for attachments; never hunt for them in runtime caches or outside the workspace.',
@@ -1075,7 +1096,7 @@ export class CoreAgentLoop implements AgentLoop {
                   .some(
                     (event) =>
                       event.type === 'tool/call' &&
-                      !['task', 'skill', 'recall'].includes(event.name),
+                      !['task', 'skill', 'recall', 'persona'].includes(event.name),
                   ));
           const assessment = taskVerification(await store.load(sessionId), promptId);
           const rejectedCompletion = needsVerification && assessment.status !== 'verified';
@@ -1383,6 +1404,7 @@ export class CoreAgentLoop implements AgentLoop {
                 verificationEnabled &&
                 executionVersion === 2 &&
                 (effect.kind === 'mutation' || effect.kind === 'unknown') &&
+                call.name !== 'persona' &&
                 !(await store.load(sessionId)).some(
                   (event) => event.type === 'task/plan' && event.promptId === promptId,
                 )
@@ -1475,6 +1497,45 @@ export class CoreAgentLoop implements AgentLoop {
               }),
               appendOpts,
             );
+            if (personalMemoryChange) {
+              const change = personalMemoryChange;
+              personalMemoryChange = undefined;
+              const currentEvents = await store.load(sessionId);
+              const previous = currentEvents.findLast(
+                (event) => event.type === 'memory/selection' && event.receipt.promptId === promptId,
+              );
+              const owner = await this.opts.sessionMetas?.get(sessionId);
+              if (
+                !owner ||
+                owner.closedAt ||
+                owner.scope !== 'personal' ||
+                previous?.type !== 'memory/selection' ||
+                previous.receipt.policyRevision !== change.before ||
+                change.after !== change.before + 1 ||
+                !this.opts.personalContext
+              )
+                throw new Error(
+                  'Personal memory changed concurrently. Send a follow-up to use the current profile.',
+                );
+              const receipt = await this.opts.personalContext.select(
+                owner,
+                promptId,
+                ctx.userRequest ?? '',
+                signal,
+                committedPrompt.at,
+              );
+              receipt.recallAfterSeq = currentEvents.length;
+              if (receipt.policyRevision !== change.after)
+                throw new Error(
+                  'Personal memory changed concurrently. Send a follow-up to use the current profile.',
+                );
+              await this.opts.personalContext.validate?.(owner, receipt, signal);
+              await store.append(
+                sessionId,
+                [{ ...meta(), type: 'memory/selection', receipt }],
+                appendOpts,
+              );
+            }
             for (const [i, call] of wave.entries()) {
               sink.emit({
                 type: 'tool/result',

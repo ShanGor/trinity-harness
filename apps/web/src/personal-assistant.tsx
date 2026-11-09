@@ -5,18 +5,18 @@ import {
   Button,
   Collapse,
   Flex,
-  Form,
   Input,
   List,
   Modal,
   Select,
+  Switch,
   Tag,
   Typography,
   App,
 } from 'antd';
 import type { AcpClient, SessionSummary } from '@trinity-harness/client-acp';
 import { newId } from '@trinity-harness/shared';
-import type { SavedMemory, TopicEpisode, RecallReceipt } from '@trinity-harness/shared';
+import type { Persona, PersonaHistory, TopicEpisode, RecallReceipt } from '@trinity-harness/shared';
 
 export function AssistantMemory({
   client,
@@ -26,15 +26,30 @@ export function AssistantMemory({
   sessionId: string | null;
 }): ReactElement {
   const { message } = App.useApp();
-  const [items, setItems] = useState<SavedMemory[]>([]);
-  const [editing, setEditing] = useState<SavedMemory | 'new' | null>(null);
+  const [persona, setPersona] = useState<Persona>({ content: '', revision: 0, updatedAt: null });
+  const [draft, setDraft] = useState('');
+  const [autoSave, setAutoSave] = useState(true);
+  const [history, setHistory] = useState<PersonaHistory>({ revisions: [], nextBefore: null });
+  const [historyError, setHistoryError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState('');
   const [receipts, setReceipts] = useState<{ at: string; receipt: RecallReceipt }[]>([]);
-  const [form] = Form.useForm<{ subject: string; predicate: string; value: string }>();
   const refresh = useCallback(async () => {
     try {
-      setItems((await client.getMemory()).items);
+      const snapshot = await client.getMemory();
+      const current = snapshot.persona ?? {
+        content: snapshot.items
+          .filter((item) => item.status === 'active')
+          .map((item) => `- ${item.subject} · ${item.predicate}: ${item.value}`)
+          .join('\n'),
+        revision: 0,
+        updatedAt: null,
+      };
+      setPersona(current);
+      setDraft(current.content);
+      setAutoSave(current.autoSaveEnabled ?? true);
+      setLoaded(true);
       setError('');
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
@@ -58,94 +73,125 @@ export function AssistantMemory({
       active = false;
     };
   }, [client, sessionId]);
-  const change = async (item: SavedMemory, forget: boolean): Promise<void> => {
+  const save = async (): Promise<void> => {
     setSaving(true);
     try {
-      await client.changeMemory({
+      const saved = await client.savePersona({
+        content: draft,
+        autoSaveEnabled: autoSave,
+        expectedRevision: persona.revision,
         operationId: newId(),
-        memoryId: item.memoryId,
-        expectedRevision: item.revision,
-        operation: forget ? 'forget' : 'save',
-        subject: item.subject,
-        predicate: item.predicate,
-        value: item.value,
       });
-      await refresh();
-      setEditing(null);
-      message.success(
-        forget
-          ? 'Forgotten for future recall. Original conversation history is retained.'
-          : 'Memory saved.',
-      );
+      setPersona(saved);
+      setDraft(saved.content);
+      setError('');
+      message.success('Persona saved.');
     } catch (error) {
-      message.error(error instanceof Error ? error.message : String(error));
+      setError(error instanceof Error ? error.message : String(error));
     } finally {
       setSaving(false);
+    }
+  };
+  const loadHistory = async (before?: number): Promise<void> => {
+    try {
+      const page = await client.getPersonaHistory(before);
+      setHistory((current) => ({
+        revisions: before ? [...current.revisions, ...page.revisions] : page.revisions,
+        nextBefore: page.nextBefore,
+      }));
+      setHistoryError('');
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : String(error));
     }
   };
   return (
     <section className="assistant-page">
       <Typography.Title level={2}>Memory</Typography.Title>
       <Typography.Paragraph type="secondary">
-        Personal facts and preferences you explicitly save. These are available in your personal
-        chats. Team tasks receive no personal memory.
+        Edit your personal facts and preferences as Markdown. This Persona is included in your
+        personal chats; team tasks receive no personal memory.
       </Typography.Paragraph>
       {error && (
-        <Alert
-          type="error"
-          message="Memory unavailable"
-          description={error}
-          action={<Button onClick={() => void refresh()}>Retry</Button>}
-        />
+        <Alert type="error" message="Persona unavailable or not saved" description={error} />
       )}
-      <Button
-        type="primary"
-        disabled={!!error}
-        onClick={() => {
-          form.resetFields();
-          setEditing('new');
-        }}
-      >
-        Remember something
-      </Button>
-      <List
-        dataSource={items.filter((item) => item.status === 'active')}
-        locale={{ emptyText: 'No saved memories' }}
-        renderItem={(item) => (
-          <List.Item
-            actions={[
-              <Button
-                key="edit"
-                onClick={() => {
-                  form.setFieldsValue(item);
-                  setEditing(item);
-                }}
-              >
-                Edit
-              </Button>,
-              <Button key="forget" danger loading={saving} onClick={() => void change(item, true)}>
-                Forget
-              </Button>,
-            ]}
-          >
-            <List.Item.Meta
-              title={`${item.subject} · ${item.predicate}`}
-              description={
-                <>
-                  <Typography.Paragraph>{item.value}</Typography.Paragraph>
-                  <Typography.Text type="secondary">
-                    Personal · revision {item.revision} ·{' '}
-                    {new Date(item.recordedAt).toLocaleString()}
-                    {item.source ? ` · source ${item.source.eventId}` : ' · saved by you'}
-                  </Typography.Text>
-                </>
-              }
-            />
-          </List.Item>
-        )}
+      <Flex gap="small" align="center" style={{ marginBottom: 16 }}>
+        <Switch
+          aria-label="Automatic personal memory"
+          checked={autoSave}
+          disabled={!loaded || saving}
+          onChange={setAutoSave}
+        />
+        <Typography.Text>
+          Automatically remember stable facts and preferences from my messages
+        </Typography.Text>
+      </Flex>
+      <Input.TextArea
+        aria-label="Persona Markdown"
+        value={draft}
+        disabled={!loaded || saving}
+        maxLength={16000}
+        showCount
+        autoSize={{ minRows: 12, maxRows: 28 }}
+        placeholder={'## About me\nMy name is…\n\n## Preferences\n'}
+        onChange={(event) => setDraft(event.target.value)}
       />
+      <Flex gap="small" style={{ marginBlock: 16 }}>
+        <Button
+          type="primary"
+          loading={saving}
+          disabled={
+            !loaded ||
+            (draft === persona.content && autoSave === (persona.autoSaveEnabled ?? true)) ||
+            draft.length > 16000
+          }
+          onClick={() => void save()}
+        >
+          Save Persona
+        </Button>
+        <Button disabled={saving} onClick={() => void refresh()}>
+          Reload saved Persona
+        </Button>
+        <Typography.Text type="secondary">Revision {persona.revision}</Typography.Text>
+      </Flex>
       <Collapse
+        onChange={(keys) => {
+          if (keys.includes('versions')) void loadHistory();
+        }}
         items={[
+          {
+            key: 'versions',
+            label: 'Persona versions and sources',
+            children: (
+              <>
+                {historyError && <Alert type="error" message={historyError} />}
+                {history.revisions.map((revision) => (
+                  <details key={revision.revision}>
+                    <summary>
+                      Revision {revision.revision} ·{' '}
+                      {revision.updatedAt ? new Date(revision.updatedAt).toLocaleString() : ''} ·{' '}
+                      {revision.source
+                        ? 'Assistant update from your message'
+                        : 'Manual edit or migration'}
+                    </summary>
+                    <pre style={{ whiteSpace: 'pre-wrap' }}>
+                      {revision.content || '(Empty Persona)'}
+                    </pre>
+                    {revision.source && (
+                      <Typography.Paragraph>
+                        Source: {revision.source.excerpt} · conversation {revision.source.sessionId}{' '}
+                        · event {revision.source.eventId}
+                      </Typography.Paragraph>
+                    )}
+                  </details>
+                ))}
+                {history.nextBefore !== null && (
+                  <Button onClick={() => void loadHistory(history.nextBefore ?? undefined)}>
+                    Load older versions
+                  </Button>
+                )}
+              </>
+            ),
+          },
           {
             key: 'used',
             label: 'Memory used for answers in this conversation',
@@ -163,52 +209,9 @@ export function AssistantMemory({
         ]}
       />
       <Typography.Paragraph type="secondary">
-        Forget prevents future automatic recall. It retains original conversations and audit
-        records. Previously dispatched model requests may already contain the value.
+        Clearing Persona removes it from future context. Original conversations and revision history
+        remain retained; exclude source conversations in History to prevent historical recall.
       </Typography.Paragraph>
-      <Modal
-        open={editing !== null}
-        title={editing === 'new' ? 'Save a memory' : 'Edit memory'}
-        confirmLoading={saving}
-        onCancel={() => setEditing(null)}
-        onOk={() => form.submit()}
-      >
-        <Form
-          form={form}
-          layout="vertical"
-          onFinish={(values) =>
-            void change(
-              {
-                ...values,
-                memoryId: editing && editing !== 'new' ? editing.memoryId : newId(),
-                revision: editing && editing !== 'new' ? editing.revision : 0,
-                status: 'active',
-                recordedAt: new Date().toISOString(),
-              },
-              false,
-            )
-          }
-        >
-          <Form.Item
-            name="subject"
-            label="Subject"
-            initialValue="Me"
-            rules={[{ required: true, max: 200 }]}
-          >
-            <Input disabled={editing !== 'new'} />
-          </Form.Item>
-          <Form.Item
-            name="predicate"
-            label="Preference or fact"
-            rules={[{ required: true, max: 200 }]}
-          >
-            <Input disabled={editing !== 'new'} placeholder="Response language" />
-          </Form.Item>
-          <Form.Item name="value" label="Value" rules={[{ required: true, max: 2000 }]}>
-            <Input.TextArea placeholder="English" />
-          </Form.Item>
-        </Form>
-      </Modal>
     </section>
   );
 }
@@ -432,6 +435,13 @@ export function MemoryContextDisclosure({ receipt }: { receipt: RecallReceipt })
           label: `Memory context · ${receipt.memories.length} saved · ${receipt.episodes.length} episodes`,
           children: (
             <>
+              {receipt.persona && (
+                <pre style={{ whiteSpace: 'pre-wrap' }}>
+                  Persona · revision {receipt.persona.revision}
+                  {'\n'}
+                  {receipt.persona.content}
+                </pre>
+              )}
               {receipt.commandResult && (
                 <Typography.Paragraph>{receipt.commandResult}</Typography.Paragraph>
               )}

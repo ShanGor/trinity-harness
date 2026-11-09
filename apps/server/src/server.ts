@@ -24,6 +24,8 @@ import {
 import { chatWorkspaceDir, runOrderedPrompts, sessionWorkspaceRoot } from '@trinity-harness/core';
 import type { SessionRunPort, TurnTask } from '@trinity-harness/contracts';
 import {
+  personaChangeSchema,
+  personaHistorySchema,
   memoryCommandSchema,
   historyQuerySchema,
   type MemoryStorePort,
@@ -1616,6 +1618,39 @@ export async function buildServer(
     }
   }
 
+  app.get('/api/persona/history', async (req, reply) => {
+    if (!req.identity || !deps.memory?.personaHistory)
+      return reply.code(503).send({ error: 'Persona history unavailable' });
+    const query = z
+      .object({ before: z.coerce.number().int().positive().optional() })
+      .strict()
+      .safeParse(req.query);
+    if (!query.success) return reply.code(400).send({ error: 'invalid history cursor' });
+    return personaHistorySchema.parse(
+      await deps.memory.personaHistory(req.identity, query.data.before),
+    );
+  });
+  app.put('/api/persona', async (req, reply) => {
+    if (!req.identity || !deps.memory?.savePersona)
+      return reply.code(503).send({ error: 'Durable persona unavailable' });
+    if (req.identity.role === 'viewer') return reply.code(403).send({ error: 'read-only' });
+    const body = personaChangeSchema
+      .omit({ source: true, expectedPolicyRevision: true })
+      .safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'invalid persona' });
+    try {
+      return await deps.memory.savePersona(req.identity, body.data);
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code === 'MEMORY_CONFLICT')
+        return reply
+          .code(409)
+          .send({ error: 'Persona changed; reload before saving. Your draft has not been saved.' });
+      if (code === 'MEMORY_SECRET')
+        return reply.code(400).send({ error: 'Use secret storage for credentials.' });
+      throw error;
+    }
+  });
   app.get('/api/memory', async (req, reply) => {
     if (!req.identity || !deps.memory)
       return reply.code(503).send({ error: 'Durable memory unavailable' });
@@ -1649,6 +1684,8 @@ export async function buildServer(
         )
           return reply.code(400).send({ error: 'source excerpt not found' });
       }
+      if ((await deps.memory.snapshot(req.identity)).persona)
+        return reply.code(409).send({ error: 'Edit your Markdown Persona in Memory settings.' });
       const item = await deps.memory.change(req.identity, parsed.data);
       return { item };
     } catch (error) {

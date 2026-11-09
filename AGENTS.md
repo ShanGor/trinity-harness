@@ -123,3 +123,7 @@ stack with Bifrost Bridge and the browser runtime, reusing host datastores and
 ensuring the installed host Node Agent is running without restarting it. Read
 `docs/deployment-guide.md` before changing this packaging; preserve configured
 runtime drivers, same-path workspace mounts and private credential handling.
+
+### Markdown Persona
+
+Personal Persona is owner-scoped Markdown in `user_personas.content` with append-only `persona_events` revisions (design §21.7). Keep saves transactional, bounded, idempotent and revision-checked. Deliver exact Markdown as reference data through memory-selection events; never treat it as execution authority. Preserve team isolation, draft conflict recovery, legacy migration fallback and context-generation fencing. Model-directed `persona` updates may save stable current-user facts when automatic memory is enabled; explicit remember/correct/forget remains available when disabled. Require current-user source provenance, exact patches, current owner/profile/policy fences and an originating call journal; reject team/child writes. The committed profile patch call is its minimal pre-effect plan and does not require or replace a workspace task plan. Refresh only the exact acknowledged own-write generation after committing the tool result, retire earlier active recall pairs using `recallAfterSeq`, and preserve independent destructive-edit suppression floors. See design §21.8.

@@ -134,6 +134,27 @@
       "when": 1794062871764,
       "tag": "0018_sudden_ultimates",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794227080529,
+      "tag": "0019_perpetual_hardball",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1794227556442,
+      "tag": "0020_brown_terrax",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1794227912587,
+      "tag": "0021_majestic_lizard",
+      "breakpoints": true
     }
   ]
 }

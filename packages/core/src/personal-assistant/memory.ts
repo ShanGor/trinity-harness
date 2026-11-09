@@ -82,7 +82,11 @@ export class PersonalContext implements PersonalContextPort {
         { code: 'MEMORY_CONTEXT_CHANGED' },
       );
     };
-    if (snapshot.revision !== receipt.policyRevision) fail();
+    if (
+      snapshot.revision !== receipt.policyRevision ||
+      (snapshot.persona?.revision ?? 0) !== (receipt.persona?.revision ?? 0)
+    )
+      fail();
     for (const episode of receipt.episodes) {
       const current = await this.index.evidence?.(identity, episode.episodeId);
       if (!current || current.excluded) fail();
@@ -95,7 +99,9 @@ export class PersonalContext implements PersonalContextPort {
       const current = await this.index.evidence?.(identity, exchange.promptId);
       if (
         current?.excluded ||
-        (snapshot.hasSuppression && (!current || current.policyRevision < snapshot.revision))
+        (snapshot.hasSuppression &&
+          (!current ||
+            current.policyRevision < (snapshot.suppressionRevision ?? snapshot.revision)))
       )
         fail();
     }
@@ -113,8 +119,12 @@ export class PersonalContext implements PersonalContextPort {
       const end = events.findIndex((event, i) => i > start && event.type === 'message/user');
       const turn = events.slice(start + 1, end < 0 ? undefined : end);
       const recallCalls = new Set(
-        turn.flatMap((event) =>
-          event.type === 'tool/call' && event.name === 'recall' ? [event.callId] : [],
+        turn.flatMap((event, index) =>
+          event.type === 'tool/call' &&
+          event.name === 'recall' &&
+          start + index + 2 > (receipt.recallAfterSeq ?? 0)
+            ? [event.callId]
+            : [],
         ),
       );
       for (const event of turn) {
@@ -128,7 +138,8 @@ export class PersonalContext implements PersonalContextPort {
           if (
             !current ||
             current.excluded ||
-            (snapshot.hasSuppression && current.policyRevision < snapshot.revision)
+            (snapshot.hasSuppression &&
+              current.policyRevision < (snapshot.suppressionRevision ?? snapshot.revision))
           )
             fail();
         }
@@ -137,7 +148,8 @@ export class PersonalContext implements PersonalContextPort {
           if (
             !current ||
             current.excluded ||
-            (snapshot.hasSuppression && current.policyRevision < snapshot.revision)
+            (snapshot.hasSuppression &&
+              current.policyRevision < (snapshot.suppressionRevision ?? snapshot.revision))
           )
             fail();
         }
@@ -148,7 +160,9 @@ export class PersonalContext implements PersonalContextPort {
           const current = user ? await this.index.evidence?.(identity, user.eventId) : null;
           if (
             current?.excluded ||
-            (snapshot.hasSuppression && (!current || current.policyRevision < snapshot.revision))
+            (snapshot.hasSuppression &&
+              (!current ||
+                current.policyRevision < (snapshot.suppressionRevision ?? snapshot.revision)))
           )
             fail();
         }
@@ -171,7 +185,7 @@ export class PersonalContext implements PersonalContextPort {
       return { promptId, policyRevision: 0, memories: [], episodes: [], omitted: false };
     const identity: Identity = { tenantId: meta.tenantId, userId: meta.userId, role: 'developer' };
     let snapshot = await this.memory.snapshot(identity);
-    const explicit = explicitMemoryChanges(query);
+    const explicit = snapshot.persona ? [] : explicitMemoryChanges(query);
     let commandResult: string | undefined =
       !explicit.length && /^(remember:|forget my |change my )/iu.test(query.trim())
         ? 'No memory change was made. Ask the user to save or select the item in Memory settings.'
@@ -289,7 +303,9 @@ export class PersonalContext implements PersonalContextPort {
         const indexed = await this.index.evidence?.(identity, user.eventId);
         if (
           indexed?.excluded ||
-          (snapshot.hasSuppression && (!indexed || indexed.policyRevision < snapshot.revision))
+          (snapshot.hasSuppression &&
+            (!indexed ||
+              indexed.policyRevision < (snapshot.suppressionRevision ?? snapshot.revision)))
         )
           continue;
         const answerIndex = events.findLastIndex(
@@ -400,7 +416,7 @@ export class PersonalContext implements PersonalContextPort {
         if (
           snapshot.hasSuppression &&
           (selection?.type !== 'memory/selection' ||
-            selection.receipt.policyRevision < snapshot.revision)
+            selection.receipt.policyRevision < (snapshot.suppressionRevision ?? snapshot.revision))
         )
           continue;
         const indexed = await this.index.evidence?.(identity, user.eventId);
@@ -432,7 +448,8 @@ export class PersonalContext implements PersonalContextPort {
       dialogue,
       policyRevision: snapshot.revision,
       ...(commandResult ? { commandResult } : {}),
-      memories,
+      ...(snapshot.persona ? { persona: snapshot.persona } : {}),
+      memories: snapshot.persona ? [] : memories,
       episodes,
       ...(interruptedTurns.length ? { interruptedTurns } : {}),
       omitted: dialogueOmitted || snapshot.items.length > memories.length,

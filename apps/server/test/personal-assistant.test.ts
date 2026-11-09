@@ -170,3 +170,92 @@ describe.skipIf(!reachable)('personal assistant creation API', () => {
     }
   });
 });
+
+describe.skipIf(!reachable)('Markdown Persona API', () => {
+  it('saves authenticated Markdown and rejects conflicts, invalid input and viewers', async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'trinity-persona-'));
+    const identity = { ...owner, userId: randomUUID() };
+    const memory = new PgMemoryStore(db);
+    let viewer = false;
+    const app = await buildServer({
+      workspaceRoot,
+      store: new PgSessionStore(db),
+      memory,
+      auth: {
+        metas: new PgSessionMetaStore(db),
+        tokens: {
+          verify: async () => ({ ...identity, role: viewer ? 'viewer' : 'developer' }),
+          issue: async () => 'token',
+        },
+        hasher: { hash: async () => '', verify: async () => false },
+        users: {} as UserStore,
+      },
+    });
+    const payload = {
+      content: '# 关于我\n我叫小张。',
+      expectedRevision: 0,
+      operationId: randomUUID(),
+    };
+    const headers = { authorization: 'Bearer token' };
+    try {
+      expect((await app.inject({ method: 'PUT', url: '/api/persona', payload })).statusCode).toBe(
+        401,
+      );
+      const saved = await app.inject({ method: 'PUT', url: '/api/persona', payload, headers });
+      expect(saved.statusCode).toBe(200);
+      expect(saved.json()).toMatchObject({ content: payload.content, revision: 1 });
+      const loaded = await app.inject({ method: 'GET', url: '/api/memory', headers });
+      expect(loaded.json().persona).toEqual(saved.json());
+      const history = await app.inject({ method: 'GET', url: '/api/persona/history', headers });
+      expect(history.statusCode).toBe(200);
+      expect(history.json().revisions[0]).toEqual(saved.json());
+      expect(
+        (await app.inject({ method: 'GET', url: '/api/persona/history?before=-1', headers }))
+          .statusCode,
+      ).toBe(400);
+      expect((await app.inject({ method: 'GET', url: '/api/persona/history' })).statusCode).toBe(
+        401,
+      );
+      expect(
+        (
+          await app.inject({
+            method: 'PUT',
+            url: '/api/persona',
+            headers,
+            payload: {
+              ...payload,
+              source: { sessionId: randomUUID(), eventId: randomUUID(), excerpt: 'forged' },
+            },
+          })
+        ).statusCode,
+      ).toBe(400);
+      expect(
+        (
+          await app.inject({
+            method: 'PUT',
+            url: '/api/persona',
+            payload: { ...payload, operationId: randomUUID() },
+            headers,
+          })
+        ).statusCode,
+      ).toBe(409);
+      expect(
+        (
+          await app.inject({
+            method: 'PUT',
+            url: '/api/persona',
+            payload: { ...payload, content: 'x'.repeat(16001) },
+            headers,
+          })
+        ).statusCode,
+      ).toBe(400);
+      viewer = true;
+      expect(
+        (await app.inject({ method: 'PUT', url: '/api/persona', payload, headers })).statusCode,
+      ).toBe(403);
+    } finally {
+      await app.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});

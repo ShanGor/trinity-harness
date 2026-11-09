@@ -1,3 +1,4 @@
+import { createPersonaTool } from '@trinity-harness/core';
 import { PgAttachmentCatalog } from '@trinity-harness/db';
 import { AttachmentService, readAttachmentBlob } from '@trinity-harness/core';
 import type { AttachmentCatalog, AttachmentReader } from '@trinity-harness/contracts';
@@ -256,6 +257,7 @@ async function main(): Promise<void> {
     }
     registry.register(createReadBlobTool(blobStore, attachmentReader, store));
     registry.register(createRecallTool({ memory, index: conversationIndex, metas, store }));
+    registry.register(createPersonaTool({ memory, metas, store, users: browserUsers }));
     if (sessionLsp) {
       for (const tool of createLspTools(sessionLsp)) {
         registry.register(tool);

@@ -461,3 +461,15 @@ Verification for this change: 1,012 relevant tests passed (13 skipped); the pinn
 ### 电话播放同步字幕（2026-11-09）
 
 - [x] 电话字幕改为由 PCM 播放开始驱动的最近三句窗口，突出当前句；保留普通聊天完整原文、查看详情和打断语义。新增播放时钟、字幕顺序/取消隔离和面板测试；物理设备同步与听感验收仍待完成。设计与需求见 [voice-conversation-design.md](voice-conversation-design.md#31-播放同步字幕2026-11-09)。
+
+### 2026-11-09 — Markdown Persona
+
+Implemented owner-scoped PostgreSQL TEXT Persona with atomic current/revision writes, bounded authenticated save API, idempotency and conflict checks, Markdown editor with draft preservation, direct-text personal context delivery and replay receipts. Migration 0019 preserves legacy records and migrates bounded active profiles. Team isolation and current context fences remain enforced. Automatic dialogue extraction/model-driven profile editing is not delivered.
+
+Validation: migration 0019 generated, SQL reviewed and applied locally; 72 relevant core/database/API/jsdom tests passed. Repository lint and typecheck and the production web build passed. Browser visual inspection and service deployment/restart were not performed.
+
+### 2026-11-09 — Personal memory automation and history
+
+Implemented model-directed Persona read/exact-patch maintenance in both stock roots, current-user provenance, automatic-memory opt-out, idempotent source-checked transactional writes, own-write context refresh with concurrent-edit fencing and complete durable tool pairs, and private version/source history in Memory settings. Separate suppression floors preserve eligible history across additive saves while retaining correction/forget fences. Recall now segments Chinese and filters exclusions/suppression before pagination. This supersedes the manual-only limitation above. Shared team/project memory, expiry, candidate queues and real-provider semantic quality evaluation remain outside this increment.
+
+Validation: generated/reviewed migrations 0020–0021 and applied them locally. All 135 relevant core, task-execution, PostgreSQL, authenticated API and jsdom UI tests passed; repository lint/typecheck and the production web build passed. Real-provider extraction-quality trials, browser visual inspection and service deployment/restart were not performed.

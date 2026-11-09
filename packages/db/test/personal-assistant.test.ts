@@ -301,3 +301,176 @@ describe.skipIf(!reachable)('session execution lock', () => {
     }
   });
 });
+
+// Separate owners keep these tests independent of the legacy fact tests.
+describe.skipIf(!reachable)('Markdown Persona', () => {
+  it('persists exact Markdown, isolates owners, retries and fences concurrent edits', async () => {
+    const memory = new PgMemoryStore(db, clock);
+    const identity = { ...owner, userId: randomUUID() };
+    const change = {
+      content: '## 基本信息\n我叫小张。\n\n## 偏好\n使用中文。',
+      expectedRevision: 0,
+      operationId: randomUUID(),
+    };
+    const saved = await memory.savePersona(identity, change);
+    expect(saved.content).toBe(change.content);
+    expect((await new PgMemoryStore(db).snapshot(identity)).persona).toEqual(saved);
+    expect((await memory.snapshot(other)).persona).toBeUndefined();
+    expect(await memory.savePersona(identity, change)).toEqual(saved);
+    const edits = await Promise.allSettled(
+      ['甲', '乙'].map((content) =>
+        memory.savePersona(identity, { content, expectedRevision: 1, operationId: randomUUID() }),
+      ),
+    );
+    expect(edits.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(edits.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    const snapshot = await memory.snapshot(identity);
+    const cleared = await memory.savePersona(identity, {
+      content: '',
+      expectedRevision: 2,
+      operationId: randomUUID(),
+    });
+    expect(cleared.revision).toBe(3);
+    expect((await memory.snapshot(identity)).revision).toBeGreaterThan(snapshot.revision);
+    const revisions = await pool.query(
+      'select content from persona_events where tenant_id=$1 and user_id=$2 order by revision',
+      [identity.tenantId, identity.userId],
+    );
+    expect(revisions.rows.map((row: { content: string }) => row.content)).toEqual([
+      change.content,
+      expect.any(String),
+      '',
+    ]);
+    await expect(
+      memory.savePersona({ ...identity, role: 'viewer' }, { ...change, operationId: randomUUID() }),
+    ).rejects.toMatchObject({ code: 'MEMORY_READ_ONLY' });
+    await expect(
+      memory.savePersona(identity, {
+        content: 'password: secret',
+        expectedRevision: 3,
+        operationId: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'MEMORY_SECRET' });
+  });
+});
+
+describe.skipIf(!reachable)('personal memory automation persistence', () => {
+  it('keeps additive history eligible, advances the forgetting floor only for destructive edits and paginates versions', async () => {
+    const identity = { ...owner, userId: randomUUID() };
+    const memory = new PgMemoryStore(db, clock);
+    let saved = await memory.savePersona(identity, {
+      content: '# Profile\nName: Sam',
+      operationId: randomUUID(),
+      expectedRevision: 0,
+    });
+    expect((await memory.snapshot(identity)).suppressionRevision).toBe(0);
+    saved = await memory.savePersona(identity, {
+      content: saved.content + '\nLikes tea',
+      operationId: randomUUID(),
+      expectedRevision: saved.revision,
+    });
+    expect((await memory.snapshot(identity)).suppressionRevision).toBe(0);
+    saved = await memory.savePersona(identity, {
+      content: '# Profile\nName: Alex\nLikes tea',
+      operationId: randomUUID(),
+      expectedRevision: saved.revision,
+    });
+    const floor = (await memory.snapshot(identity)).suppressionRevision;
+    expect(floor).toBe(3);
+    saved = await memory.savePersona(identity, {
+      content: saved.content,
+      autoSaveEnabled: false,
+      operationId: randomUUID(),
+      expectedRevision: saved.revision,
+    });
+    expect((await memory.snapshot(identity)).suppressionRevision).toBe(floor);
+    expect((await memory.snapshot(identity)).persona?.autoSaveEnabled).toBe(false);
+    for (let i = 0; i < 18; i++)
+      saved = await memory.savePersona(identity, {
+        content: saved.content + `\nFact ${i}`,
+        operationId: randomUUID(),
+        expectedRevision: saved.revision,
+      });
+    expect((await memory.snapshot(identity)).suppressionRevision).toBe(floor);
+    const history = await memory.personaHistory(identity);
+    expect(history.revisions).toHaveLength(20);
+    expect(history.nextBefore).toBe(3);
+    expect(
+      (await memory.personaHistory(identity, history.nextBefore!)).revisions.map(
+        (item) => item.revision,
+      ),
+    ).toEqual([2, 1]);
+    expect(
+      (await memory.personaHistory({ ...identity, tenantId: randomUUID() })).revisions,
+    ).toEqual([]);
+    await expect(
+      memory.savePersona(identity, {
+        content: 'stale',
+        operationId: randomUUID(),
+        expectedRevision: saved.revision,
+        expectedPolicyRevision: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'MEMORY_CONFLICT' });
+  });
+
+  it('validates and retains exact owned user sources, and rejects removed or foreign sources', async () => {
+    const identity = { ...owner, userId: randomUUID() };
+    const memory = new PgMemoryStore(db, clock);
+    const metas = new PgSessionMetaStore(db);
+    const store = new PgSessionStore(db);
+    const sessionId = randomUUID();
+    const eventId = randomUUID();
+    await metas.create({
+      id: sessionId,
+      tenantId: identity.tenantId,
+      userId: identity.userId,
+      title: 'source',
+      kind: 'chat',
+      sessionRole: 'side',
+      workspaceUri: '/workspace',
+      creationOperationId: randomUUID(),
+    });
+    await store.append(sessionId, [
+      {
+        type: 'message/user',
+        eventId,
+        at: clock().toISOString(),
+        surfaceOp: 'append',
+        content: [{ kind: 'text', text: '我叫小张。' }],
+      },
+    ]);
+    const source = { sessionId, eventId, excerpt: '我叫小张', at: clock().toISOString() };
+    const change = {
+      content: '我叫小张。',
+      operationId: randomUUID(),
+      expectedRevision: 0,
+      expectedPolicyRevision: 0,
+      source,
+    };
+    const saved = await memory.savePersona(identity, change);
+    expect(await memory.savePersona(identity, change)).toEqual(saved);
+    expect((await memory.personaHistory(identity)).revisions[0]?.source).toEqual(source);
+    await expect(
+      memory.savePersona(other, { ...change, operationId: randomUUID() }),
+    ).rejects.toMatchObject({ code: 'MEMORY_SOURCE_UNAVAILABLE' });
+    await store.append(sessionId, [
+      {
+        type: 'message/removed',
+        eventId: randomUUID(),
+        at: clock().toISOString(),
+        promptId: eventId,
+        role: 'user',
+      },
+    ]);
+    await expect(
+      memory.savePersona(identity, {
+        ...change,
+        content: '小李',
+        expectedRevision: 1,
+        expectedPolicyRevision: 1,
+        operationId: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: 'MEMORY_SOURCE_UNAVAILABLE' });
+    expect((await memory.snapshot(identity)).persona?.content).toBe('我叫小张。');
+  });
+});

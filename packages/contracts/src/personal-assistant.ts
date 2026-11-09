@@ -9,6 +9,33 @@ export const memorySourceSchema = z.object({
   excerpt: z.string().max(4000),
   at: z.iso.datetime().optional(),
 });
+export const personaSchema = z.object({
+  content: z.string().max(16000),
+  autoSaveEnabled: z.boolean().optional(),
+  revision: z.number().int().nonnegative(),
+  updatedAt: z.iso.datetime().nullable(),
+});
+export type Persona = z.infer<typeof personaSchema>;
+export const personaChangeSchema = z
+  .object({
+    content: z.string().max(16000),
+    expectedRevision: z.number().int().nonnegative(),
+    expectedPolicyRevision: z.number().int().nonnegative().optional(),
+    operationId: z.uuid(),
+    autoSaveEnabled: z.boolean().optional(),
+    source: memorySourceSchema.optional(),
+  })
+  .strict();
+export type PersonaChange = z.infer<typeof personaChangeSchema>;
+
+export const personaRevisionSchema = personaSchema.extend({
+  source: memorySourceSchema.optional(),
+});
+export const personaHistorySchema = z.object({
+  revisions: z.array(personaRevisionSchema).max(20),
+  nextBefore: z.number().int().positive().nullable(),
+});
+export type PersonaHistory = z.infer<typeof personaHistorySchema>;
 export const savedMemorySchema = z.object({
   memoryId: z.uuid(),
   revision: z.number().int().positive(),
@@ -36,10 +63,15 @@ export type MemoryCommand = z.infer<typeof memoryCommandSchema>;
 export const memorySnapshotSchema = z.object({
   revision: z.number().int().nonnegative(),
   items: z.array(savedMemorySchema).max(500),
+  persona: personaSchema.optional(),
   hasSuppression: z.boolean(),
+  /** Earliest eligible history generation; absent retains legacy conservative semantics. */
+  suppressionRevision: z.number().int().nonnegative().optional(),
 });
 export type MemorySnapshot = z.infer<typeof memorySnapshotSchema>;
 export interface MemoryStorePort {
+  personaHistory?(identity: Identity, before?: number): Promise<PersonaHistory>;
+  savePersona?(identity: Identity, change: PersonaChange, signal?: AbortSignal): Promise<Persona>;
   snapshot(identity: Identity): Promise<MemorySnapshot>;
   change(identity: Identity, command: MemoryCommand): Promise<SavedMemory>;
   changeMany?(identity: Identity, commands: readonly MemoryCommand[]): Promise<SavedMemory[]>;
@@ -63,6 +95,8 @@ export const historyQuerySchema = z.object({
   before: z.coerce.number().int().positive().optional(),
   limit: z.coerce.number().int().positive().max(50).default(20),
   query: z.string().max(200).optional(),
+  minPolicyRevision: z.number().int().nonnegative().optional(),
+  recallOnly: z.boolean().optional(),
   date: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -106,6 +140,9 @@ export const recallReceiptSchema = z.object({
     .optional(),
   promptId: z.uuid(),
   policyRevision: z.number().int().nonnegative(),
+  persona: personaSchema.optional(),
+  /** Own Persona writes retire earlier active recall pairs without rewriting their audit log. */
+  recallAfterSeq: z.number().int().nonnegative().optional(),
   memories: z.array(savedMemorySchema).max(100),
   episodes: z.array(topicEpisodeSchema).max(10),
   omitted: z.boolean(),
@@ -219,3 +256,43 @@ export const memorySelectionsResponseSchema = z.object({
   selections: z.array(personalContextEventSchema).max(20),
 });
 export type MemorySelectionsResponse = z.infer<typeof memorySelectionsResponseSchema>;
+
+/** Word segmentation helps Chinese requests match earlier differently phrased dialogue. */
+export function memorySearchTerms(query: string): string[] {
+  const stop = new Set([
+    'the',
+    'and',
+    'what',
+    'was',
+    'were',
+    'did',
+    'this',
+    'that',
+    'you',
+    'can',
+    'for',
+    'from',
+    'with',
+    'about',
+    'have',
+    'our',
+    'back',
+    'continue',
+    '的',
+    '了',
+    '我',
+    '你',
+    '是',
+    '什么',
+    '吗',
+    '呢',
+    '之前',
+    '我的',
+  ]);
+  const words = [
+    ...new Intl.Segmenter('zh', { granularity: 'word' }).segment(query.toLocaleLowerCase()),
+  ]
+    .filter((part) => part.isWordLike && !stop.has(part.segment))
+    .map((part) => part.segment);
+  return [...new Set(words)].slice(0, 20);
+}
