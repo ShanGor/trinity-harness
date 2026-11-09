@@ -23,6 +23,7 @@ class FakeAudioBufferSource {
   connect(): void {}
   start(): void {}
   stop(): void {}
+  disconnect(): void {}
 }
 
 class FakeAudioContext {
@@ -30,9 +31,10 @@ class FakeAudioContext {
   static resumeLeavesSuspended = false;
 
   readonly sampleRate: number;
-  readonly currentTime = 0;
+  currentTime = 0;
   readonly destination = {};
   readonly buffers: FakeAudioBuffer[] = [];
+  readonly sources: FakeAudioBufferSource[] = [];
   state: AudioContextState = 'suspended';
 
   constructor(options: { sampleRate: number }) {
@@ -47,7 +49,9 @@ class FakeAudioContext {
   }
 
   createBufferSource(): FakeAudioBufferSource {
-    return new FakeAudioBufferSource();
+    const source = new FakeAudioBufferSource();
+    this.sources.push(source);
+    return source;
   }
 
   async resume(): Promise<void> {
@@ -92,6 +96,65 @@ describe('PcmPlayer', () => {
       Array.from(new Float32Array(samples.map((sample) => sample / 0x8000))),
     );
     player.stop();
+  });
+
+  it('announces start once at the audio clock and cancels pending observation on stop', async () => {
+    let frame: (() => void) | undefined;
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: () => void) => {
+        frame = callback;
+        return 1;
+      }),
+    );
+    const cancel = vi.fn();
+    vi.stubGlobal('cancelAnimationFrame', cancel);
+    const started = vi.fn();
+    const player = new PcmPlayer(24_000, undefined, undefined, started);
+    const context = FakeAudioContext.instances[0]!;
+    await player.resume();
+    player.append(new Uint8Array([1])); // Incomplete sample cannot start speech.
+    expect(frame).toBeUndefined();
+    player.append(new Uint8Array([0]));
+    frame?.();
+    expect(started).not.toHaveBeenCalled();
+    context.currentTime = 0.03;
+    frame?.();
+    expect(started).toHaveBeenCalledOnce();
+    player.append(pcm16Le([1, 2]));
+    expect(started).toHaveBeenCalledOnce();
+    player.stop();
+
+    const cancelledStart = vi.fn();
+    const cancelled = new PcmPlayer(24_000, undefined, undefined, cancelledStart);
+    cancelled.append(pcm16Le([1, 2]));
+    cancelled.stop();
+    frame?.();
+    expect(cancel).toHaveBeenCalled();
+    expect(cancelledStart).not.toHaveBeenCalled();
+  });
+
+  it('does not announce empty audio and handles clips shorter than an animation frame', () => {
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn(() => 1),
+    );
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    const emptyStarted = vi.fn();
+    const empty = new PcmPlayer(24_000, undefined, undefined, emptyStarted);
+    empty.finish();
+    expect(emptyStarted).not.toHaveBeenCalled();
+
+    const started = vi.fn();
+    const ended = vi.fn();
+    const short = new PcmPlayer(24_000, ended, undefined, started);
+    short.append(pcm16Le([1]));
+    short.finish();
+    expect(started).not.toHaveBeenCalled();
+    FakeAudioContext.instances[1]!.sources[0]!.onended?.();
+    expect(started).toHaveBeenCalledOnce();
+    expect(ended).toHaveBeenCalledOnce();
+    expect(started.mock.invocationCallOrder[0]).toBeLessThan(ended.mock.invocationCallOrder[0]!);
   });
 
   it('resumes a suspended context before playback', async () => {

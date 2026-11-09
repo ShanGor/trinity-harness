@@ -8,7 +8,7 @@ import {
   SendOutlined,
 } from '@ant-design/icons';
 import { Button, Radio, Typography } from 'antd';
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
 
 import type { VoiceCallSnapshot, VoiceCallStatus } from './voice-call-controller';
 import { XDuCompanion, type CompanionState } from './x-du-companion';
@@ -64,6 +64,22 @@ export function VoiceCallPanel({
   onRetry(): Promise<void>;
   onEnd(): void;
 }): ReactElement | null {
+  const captionsRef = useRef<HTMLDivElement>(null);
+  const [following, setFollowing] = useState(true);
+  useLayoutEffect(() => {
+    const node = captionsRef.current;
+    if (!following || !node) return;
+    const follow = (): void => {
+      node.scrollTop = node.scrollHeight;
+    };
+    follow();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(follow);
+    observer.observe(node);
+    if (node.lastElementChild) observer.observe(node.lastElementChild);
+    return () => observer.disconnect();
+  }, [call.captions, call.userText, following, minimized]);
+  useEffect(() => setFollowing(true), [call.startedAt]);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!call.active) return;
@@ -140,24 +156,49 @@ export function VoiceCallPanel({
           下次提问生效，也可以直接说「详细讲」或「继续」。
         </Typography.Text>
 
-        <div className="voice-call-captions" aria-live="polite">
+        <div
+          className="voice-call-captions"
+          ref={captionsRef}
+          tabIndex={0}
+          role="region"
+          aria-label="Call captions"
+          onScroll={(event) => {
+            const node = event.currentTarget;
+            setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 24);
+          }}
+        >
           {call.error ? (
-            <Typography.Text type="danger">{call.error}</Typography.Text>
+            <Typography.Text type="danger" role="alert">
+              {call.error}
+            </Typography.Text>
           ) : (
             <>
               {call.userText && (
-                <p>
+                <p className="voice-call-user-caption" aria-live="polite">
                   <strong>You</strong>
                   <span>{call.userText}</span>
                 </p>
               )}
-              {call.assistantText && (
-                <p>
-                  <strong>Trinity</strong>
-                  <span>{call.assistantText}</span>
-                </p>
-              )}
-              {!call.userText && !call.assistantText && (
+              <div
+                className="voice-call-speech"
+                aria-label="Trinity speech"
+                aria-live="polite"
+                aria-relevant="additions"
+              >
+                {call.captions.map((caption, index) => (
+                  <p
+                    key={caption.id}
+                    className={
+                      index === call.captions.length - 1
+                        ? 'voice-call-sentence voice-call-sentence--current'
+                        : 'voice-call-sentence'
+                    }
+                  >
+                    {caption.text}
+                  </p>
+                ))}
+              </div>
+              {!call.userText && call.captions.length === 0 && (
                 <Typography.Text type="secondary">
                   Speak naturally. Your conversation will also appear in the chat.
                 </Typography.Text>
@@ -165,6 +206,12 @@ export function VoiceCallPanel({
             </>
           )}
         </div>
+
+        {!following && (
+          <Button type="text" onClick={() => setFollowing(true)}>
+            回到正在说的内容
+          </Button>
+        )}
 
         {call.status === 'error' && (
           <Button type="primary" onClick={() => void onRetry()}>

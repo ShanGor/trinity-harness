@@ -457,3 +457,7 @@ Verification for this change: 1,012 relevant tests passed (13 skipped); the pinn
 
 - [x] Close button, outside click and Escape use the existing fenced release request before dismissing a controlling view. Pending takeover/input finishes first; queued input and gestures are discarded. Closing after this view paused control also returns it; viewing alone does not change control, and unknown input outcomes retain quarantine. Failed handoffs keep the dialog open with a reason and are not retried automatically. Hiding the browser tab continues to pause control.
 - [x] Validation: 45 browser interaction/activity UI tests passed, including close paths, pending takeover/input, failed releases and quarantine. Repository lint, typecheck and formatting checks passed. This frontend change uses the existing API and requires no runtime or guest update.
+
+### 电话播放同步字幕（2026-11-09）
+
+- [x] 电话字幕改为由 PCM 播放开始驱动的最近三句窗口，突出当前句；保留普通聊天完整原文、查看详情和打断语义。新增播放时钟、字幕顺序/取消隔离和面板测试；物理设备同步与听感验收仍待完成。设计与需求见 [voice-conversation-design.md](voice-conversation-design.md#31-播放同步字幕2026-11-09)。

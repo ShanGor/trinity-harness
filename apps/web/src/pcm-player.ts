@@ -11,6 +11,8 @@ export class PcmPlayer {
   private nextStartTime = 0;
   /** Odd trailing byte carried over until the next chunk completes the sample. */
   private carry: Uint8Array | null = null;
+  private startFrame: number | null = null;
+  private started = false;
   private finished = false;
   private stopped = false;
   private readonly sources = new Set<AudioBufferSourceNode>();
@@ -19,6 +21,7 @@ export class PcmPlayer {
     sampleRate: number,
     private readonly onEnded?: () => void,
     context?: AudioContext,
+    private readonly onStarted?: () => void,
   ) {
     this.context = context ?? new AudioContext({ sampleRate });
     this.ownsContext = !context;
@@ -59,9 +62,27 @@ export class PcmPlayer {
     source.connect(this.context.destination);
     this.nextStartTime = Math.max(this.context.currentTime + 0.02, this.nextStartTime);
     source.start(this.nextStartTime);
+    if (!this.started && this.startFrame === null && this.onStarted) {
+      const startTime = this.nextStartTime;
+      // Follow the audio clock, including a suspended context. A network chunk
+      // or successful synthesis alone does not mean playback has begun.
+      const observeStart = (): void => {
+        this.startFrame = null;
+        if (this.stopped) return;
+        if (this.context.state === 'running' && this.context.currentTime >= startTime) {
+          this.notifyStarted();
+        } else {
+          this.startFrame = requestAnimationFrame(observeStart);
+        }
+      };
+      this.startFrame = requestAnimationFrame(observeStart);
+    }
     this.nextStartTime += buffer.duration;
     this.sources.add(source);
     source.onended = () => {
+      // Very short clips can end between animation frames.
+      if (!this.stopped) this.notifyStarted();
+      source.disconnect();
       this.sources.delete(source);
       this.drainIfDone();
     };
@@ -77,10 +98,13 @@ export class PcmPlayer {
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
+    if (this.startFrame !== null) cancelAnimationFrame(this.startFrame);
+    this.startFrame = null;
     for (const source of this.sources) {
       source.onended = null;
       try {
         source.stop();
+        source.disconnect();
       } catch {
         // Already ended sources reject stop(); nothing to clean up.
       }
@@ -89,9 +113,19 @@ export class PcmPlayer {
     if (this.ownsContext) void this.context.close();
   }
 
+  private notifyStarted(): void {
+    if (this.started) return;
+    this.started = true;
+    if (this.startFrame !== null) cancelAnimationFrame(this.startFrame);
+    this.startFrame = null;
+    this.onStarted?.();
+  }
+
   private drainIfDone(): void {
     if (this.stopped || !this.finished || this.sources.size > 0) return;
     this.stopped = true;
+    if (this.startFrame !== null) cancelAnimationFrame(this.startFrame);
+    this.startFrame = null;
     if (this.ownsContext) void this.context.close();
     this.onEnded?.();
   }

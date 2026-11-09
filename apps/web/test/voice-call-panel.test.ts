@@ -18,7 +18,8 @@ const CALL: VoiceCallSnapshot = {
   depth: 'brief',
   startedAt: Date.now(),
   userText: 'Hello',
-  assistantText: 'Hello. How can I help?',
+  assistantText: 'Hello. How can I help? Unspoken text.',
+  captions: [{ id: 'sentence-1', text: 'Hello.' }],
   error: null,
 };
 
@@ -69,6 +70,51 @@ describe('VoiceCallPanel', () => {
     expect(props.onInterrupt).not.toHaveBeenCalled();
     expect(props.onFinishUtterance).not.toHaveBeenCalled();
     expect(container.textContent).toContain('查看详情');
+    expect(container.querySelector('.voice-call-sentence--current')?.textContent).toBe('Hello.');
+    expect(container.textContent).not.toContain('Unspoken text.');
+    await click('View text conversation');
+    expect(props.onShowText).toHaveBeenCalledOnce();
+    // Playback updates preserve stable nodes for already displayed sentences.
+    const first = container.querySelector('.voice-call-sentence');
+    await act(async () =>
+      root.render(
+        createElement(VoiceCallPanel, {
+          ...props,
+          call: {
+            ...CALL,
+            captions: [...CALL.captions, { id: 'sentence-2', text: 'How can I help?' }],
+          },
+        }),
+      ),
+    );
+    expect(container.querySelector('.voice-call-sentence')).toBe(first);
+    expect(first?.classList.contains('voice-call-sentence--current')).toBe(false);
+    const captions = container.querySelector('.voice-call-captions') as HTMLDivElement;
+    Object.defineProperties(captions, {
+      scrollHeight: { configurable: true, value: 600 },
+      clientHeight: { configurable: true, value: 200 },
+    });
+    captions.scrollTop = 10;
+    await act(async () => captions.dispatchEvent(new Event('scroll', { bubbles: true })));
+    const updated = {
+      ...props,
+      call: {
+        ...CALL,
+        captions: [...CALL.captions, { id: 'sentence-2', text: 'How can I help?' }],
+      },
+    };
+    await act(async () => root.render(createElement(VoiceCallPanel, updated)));
+    expect(captions.scrollTop).toBe(10);
+    const follow = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === '回到正在说的内容',
+    );
+    expect(follow).toBeDefined();
+    await act(async () => follow!.click());
+    expect(captions.scrollTop).toBe(600);
+
+    expect(container.querySelector('.voice-call-sentence--current')?.textContent).toBe(
+      'How can I help?',
+    );
     expect(
       container
         .querySelector('[role="dialog"] [data-testid="companion"]')

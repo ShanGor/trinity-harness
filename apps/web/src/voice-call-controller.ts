@@ -43,6 +43,8 @@ export interface VoiceCallSnapshot {
   startedAt: number | null;
   userText: string;
   assistantText: string;
+  /** Ephemeral speech projection: only sentences whose audio has started. */
+  captions: { id: string; text: string }[];
   error: string | null;
 }
 
@@ -54,6 +56,7 @@ const IDLE_SNAPSHOT: VoiceCallSnapshot = {
   startedAt: null,
   userText: '',
   assistantText: '',
+  captions: [],
   error: null,
 };
 
@@ -86,7 +89,12 @@ export interface VoiceCallDependencies {
     preferences?: SpeechPreferences,
     languageHint?: 'Chinese',
   ): Promise<SpeechSynthesisStream>;
-  createPlayer(sampleRate: number, onEnded: () => void, context: AudioContext): VoiceCallPlayer;
+  createPlayer(
+    sampleRate: number,
+    onEnded: () => void,
+    context: AudioContext,
+    onStarted: () => void,
+  ): VoiceCallPlayer;
   /**
    * Opens the streaming-ASR session (docs/voice-call-design.md §8.1). Resolves
    * null when the proxy/upstream cannot stream so the call falls back to the
@@ -887,6 +895,7 @@ export class VoiceCallController {
       cancelRequested: false,
     };
     this.response = response;
+    this.setSnapshot({ ...this.snapshot, captions: [] });
     this.setStatus('thinking');
     try {
       const accepted = await this.deps.submit(
@@ -931,7 +940,7 @@ export class VoiceCallController {
       this.speechQueue = [];
       this.speechBacklog = '';
       this.stopPlayback();
-      this.setSnapshot({ ...this.snapshot, assistantText: '' });
+      this.setSnapshot({ ...this.snapshot, assistantText: '', captions: [] });
       this.maybeFinishResponse(response);
       return;
     }
@@ -942,8 +951,7 @@ export class VoiceCallController {
       this.clearQueuedStatus();
     }
     const plain = markdownToSpeechText(stableMarkdownPrefix(item.content, final));
-    // Captions and the ordinary transcript retain the original response. Only
-    // the independent TTS projection drops markup, code and link targets.
+    // Preserve the original response for details; playback owns visible captions.
     this.setSnapshot({ ...this.snapshot, assistantText: item.content });
 
     // A non-append-only streaming revision pauses speech until final rather
@@ -1134,7 +1142,22 @@ export class VoiceCallController {
     // Keep WebRTC for microphone uplink only. Its RTP downlink can complete
     // media.speak/tts_ended without audible browser output, so phone replies
     // always use the same proven SSE TTS + PCM playback path as manual Play.
-    const player = this.deps.createPlayer(SAMPLE_RATE, resolvePlayback, context);
+    let captionStarted = false;
+    const player = this.deps.createPlayer(SAMPLE_RATE, resolvePlayback, context, () => {
+      if (
+        captionStarted ||
+        this.playback?.player !== player ||
+        abort.signal.aborted ||
+        !this.isCurrent(call) ||
+        epoch !== call.responseEpoch
+      )
+        return;
+      captionStarted = true;
+      this.setSnapshot({
+        ...this.snapshot,
+        captions: [...this.snapshot.captions, { id: newId(), text }].slice(-3),
+      });
+    });
     const playback: PlaybackState = {
       call,
       epoch,
@@ -1232,8 +1255,12 @@ export const defaultVoiceCallDependencies = {
   transcribe: transcribeSpeechAudio,
   synthesize: openSpeechSynthesisStream,
   getSpeechPreferences,
-  createPlayer: (sampleRate: number, onEnded: () => void, context: AudioContext): VoiceCallPlayer =>
-    new PcmPlayer(sampleRate, onEnded, context),
+  createPlayer: (
+    sampleRate: number,
+    onEnded: () => void,
+    context: AudioContext,
+    onStarted: () => void,
+  ): VoiceCallPlayer => new PcmPlayer(sampleRate, onEnded, context, onStarted),
   startStreamingAsr: (handlers: StreamingAsrHandlers): Promise<StreamingAsrSession | null> =>
     startStreamingAsr(handlers),
   startWebRtcAsr: (

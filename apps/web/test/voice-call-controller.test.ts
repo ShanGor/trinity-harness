@@ -660,7 +660,46 @@ describe('VoiceCallController', () => {
     controller.stop();
   });
 
-  it('keeps raw captions and ordinary punctuation while excluding structured citations from TTS', async () => {
+  it('reveals only started audio, bounds captions, and fences callbacks after interruption', async () => {
+    const starts: (() => void)[] = [];
+    const ends: (() => void)[] = [];
+    const { controller, deps } = setup({
+      createPlayer: (_rate, ended, _context, started) => {
+        starts.push(started);
+        ends.push(ended);
+        const player = new FakePlayer(ended);
+        player.finish = () => undefined;
+        return player;
+      },
+    });
+    await controller.start();
+    FakeMediaRecorder.instances[0]!.stop();
+    await vi.waitFor(() => expect(deps.submit).toHaveBeenCalledOnce());
+    const content = 'First. Second. Third. Fourth. Fifth.';
+    controller.update(responseItems(content, true), false, false);
+    await vi.waitFor(() => expect(deps.synthesize).toHaveBeenCalledTimes(1));
+    expect(controller.getSnapshot().assistantText).toBe(content);
+    expect(controller.getSnapshot().captions).toEqual([]);
+    for (let index = 0; index < 4; index += 1) {
+      await vi.waitFor(() => expect(starts).toHaveLength(index + 1));
+      starts[index]!();
+      starts[index]!(); // A duplicated callback cannot duplicate a caption.
+      expect(controller.getSnapshot().captions.map(({ text }) => text)).toEqual(
+        ['First.', 'Second.', 'Third.', 'Fourth.'].slice(Math.max(0, index - 2), index + 1),
+      );
+      ends[index]!();
+    }
+    await vi.waitFor(() => expect(starts).toHaveLength(5));
+    const captions = controller.getSnapshot().captions;
+    await controller.interrupt();
+    starts[4]!();
+    expect(controller.getSnapshot().captions).toEqual(captions);
+    controller.stop();
+    starts[4]!();
+    expect(controller.getSnapshot().captions).toEqual([]);
+  });
+
+  it('keeps raw details and ordinary punctuation while excluding structured citations from TTS', async () => {
     const { controller, deps } = setup();
     await controller.start();
     FakeMediaRecorder.instances[0]!.stop();
