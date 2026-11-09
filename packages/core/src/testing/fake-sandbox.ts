@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { readTextFilePage } from '../sandbox/text-file-page.js';
 import type {
   ArgvExecOptions,
   BoundedExecResult,
@@ -6,6 +8,7 @@ import type {
   LongRunningProcess,
   OpenProcessOptions,
   ReadFileResult,
+  ReadFileOptions,
   SandboxPort,
 } from '@trinity-harness/contracts';
 
@@ -52,16 +55,22 @@ export class FakeSandbox implements SandboxPort {
     return this.argvHandler(command, args, opts);
   }
 
-  async readFile(path: string, opts?: { maxBytes?: number }): Promise<ReadFileResult> {
+  async readFile(path: string, opts?: ReadFileOptions): Promise<ReadFileResult> {
     const content = this.files.get(path);
-    if (content === undefined) {
-      throw new Error(`ENOENT: ${path}`);
-    }
-    const maxBytes = opts?.maxBytes ?? 100_000;
-    return {
-      content: content.slice(0, maxBytes),
-      truncated: content.length > maxBytes,
-    };
+    if (content === undefined) throw new Error(`ENOENT: ${path}`);
+    const bytes = Buffer.from(content);
+    return readTextFilePage(
+      {
+        size: bytes.length,
+        version: createHash('sha256').update(path).update(bytes).digest('hex'),
+        read: async (position, length): Promise<Uint8Array> =>
+          bytes.subarray(position, position + length),
+        assertUnchanged: async (): Promise<void> => {
+          if (this.files.get(path) !== content) throw new Error('STALE_FILE_CURSOR');
+        },
+      },
+      opts,
+    );
   }
 
   async writeFile(path: string, content: string): Promise<void> {
@@ -69,7 +78,8 @@ export class FakeSandbox implements SandboxPort {
   }
 
   async editFile(path: string, oldText: string, newText: string): Promise<EditFileResult> {
-    const { content } = await this.readFile(path);
+    const content = this.files.get(path);
+    if (content === undefined) throw new Error(`ENOENT: ${path}`);
     const occurrences = content.split(oldText).length - 1;
     if (occurrences === 0) {
       throw new Error(`edit_file: old_text not found in ${path}`);

@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 /**
  * Sandbox port (docs/design.md §12.3): the ONLY allowed path for process
  * spawning and filesystem effects from tools. Worker/business code must not
@@ -26,10 +28,44 @@ export interface BoundedExecResult extends ExecResult {
   outputOverflow: boolean;
 }
 
-export interface ReadFileResult {
-  content: string;
-  truncated: boolean;
-}
+export const readFileCursorSchema = z
+  .object({
+    byteOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    line: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    lineByteOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    version: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+export const readFileOptionsSchema = z
+  .object({
+    maxBytes: z
+      .number()
+      .int()
+      .min(4)
+      .max(1024 * 1024)
+      .optional(),
+    offset: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    limit: z.number().int().positive().max(2000).optional(),
+    cursor: readFileCursorSchema.optional(),
+  })
+  .strict()
+  .refine((value) => value.cursor === undefined || value.offset === undefined, {
+    message: 'Use cursor or offset, not both',
+  });
+export type ReadFileOptions = z.infer<typeof readFileOptionsSchema> & { signal?: AbortSignal };
+export const readFileResultSchema = z
+  .object({
+    content: z.string(),
+    truncated: z.boolean(),
+    offset: z.number().int().positive(),
+    nextOffset: z.number().int().positive().optional(),
+    totalLines: z.number().int().nonnegative().optional(),
+    continuation: readFileCursorSchema.optional(),
+    startsMidLine: z.boolean().optional(),
+    endsMidLine: z.boolean().optional(),
+  })
+  .strict();
+export type ReadFileResult = z.infer<typeof readFileResultSchema>;
 
 export interface EditFileResult {
   content: string;
@@ -67,7 +103,7 @@ export interface SandboxPort {
   exec(command: string, opts?: ExecOptions): Promise<ExecResult>;
   /** No shell. Missing support must fail closed for bounded browser capture. */
   execArgv?(command: string, args: string[], opts: ArgvExecOptions): Promise<BoundedExecResult>;
-  readFile(path: string, opts?: { maxBytes?: number }): Promise<ReadFileResult>;
+  readFile(path: string, opts?: ReadFileOptions): Promise<ReadFileResult>;
   /** Bounded binary capture transfer; implementations reject symlinks and oversize files. */
   readBytes?(path: string, maxBytes: number): Promise<Uint8Array>;
   writeBytes?(path: string, content: Uint8Array): Promise<void>;

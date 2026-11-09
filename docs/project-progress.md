@@ -5,6 +5,13 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Streamed workspace text reads (2026-11-09)
+
+- [x] Removed the text-read file-size rejection and whole-file buffering. Reads default to 64 KiB/2,000 lines with an explicit 1 MiB page ceiling; sequential continuation seeks directly and supports UTF-8 fragments of long lines. Exact total line counts are provided only at EOF.
+- [x] Added version-bound byte cursors, before/after file identity/change checks, cancellation/deadlines, and matching Sandbox/guest RPC schemas. Full-file editing and binary transfer keep their independent limits.
+- [x] Validation: full repository suite passed (1,508 tests; 25 skipped), including large-file/UTF-8/seek/cancellation/version and guest RPC regressions.
+- [ ] Matching guest runtime deployment and real-model evaluation of page sizes, round trips, latency and task completeness. The 64 KiB default is not a measured optimum; stat-based version checks do not provide immutable snapshots.
+
 ### Consequence-based approvals and attachment reads (2026-11-08)
 
 - [x] Added adapter-owned bounded Tool Runtime preflight, named consequence summaries, no-effect unknown-target responses, routine browser control recognition and existing-file protection. Explicit restrictions, sensitive-file checks, durable approvals and execution freshness remain in force.

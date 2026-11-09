@@ -1,3 +1,4 @@
+import { readFileOptionsSchema } from '@trinity-harness/contracts';
 import { z } from 'zod';
 import { isAbsolute, relative } from 'node:path';
 import { prefixCommandArgv, literalCommandArgv, matchesCommandPrefix } from './command-prefix.js';
@@ -11,13 +12,22 @@ export const readFileTool = defineTool({
   name: 'read_file',
   effect: { kind: 'read', scope: 'workspace', evidence: 'observation' },
   description:
-    'Inspect a UTF-8 text file in the workspace. Prefer this over Bash commands such as cat, head, tail, sed, or grep when reading file contents. Reads of sensitive paths are checked by the agent and may require approval. Returns bounded content (maxBytes) with a truncated flag.',
-  parameters: z.object({
-    path: z.string().min(1).describe('Workspace-relative file path'),
-    maxBytes: z.number().int().positive().optional().describe('Max bytes to return'),
-  }),
+    'Inspect workspace UTF-8 text with bounded streaming reads. Prefer this over Bash for file inspection. Defaults: 64 KiB and 2000 lines; maxBytes may be raised to 1 MiB. offset selects a 1-based starting line. Continue by passing the returned continuation as cursor (omit offset); this seeks directly, supports long lines and rejects changed files. startsMidLine/endsMidLine mark partial lines. totalLines is available only at EOF. Sensitive paths may require approval.',
+  parameters: readFileOptionsSchema
+    .safeExtend({
+      path: z.string().min(1).describe('Workspace-relative file path'),
+    })
+    .refine((value) => value.cursor === undefined || value.offset === undefined, {
+      message: 'Use cursor or offset, not both',
+    }),
   execute: async (args, ctx) => {
-    const result = await ctx.sandbox.readFile(args.path, { maxBytes: args.maxBytes });
+    const result = await ctx.sandbox.readFile(args.path, {
+      maxBytes: args.maxBytes,
+      offset: args.offset,
+      cursor: args.cursor,
+      signal: ctx.signal,
+      limit: args.limit,
+    });
     return { value: { path: args.path, ...result }, isError: false };
   },
 });

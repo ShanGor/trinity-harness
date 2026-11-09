@@ -3,6 +3,7 @@ import { expect, it, vi } from 'vitest';
 import { FirecrackerGuestRouter, RemoteSandbox, validateGuestDeployment } from '../src/index.js';
 import type {
   EnvironmentRecord,
+  GuestRequestPort,
   SessionMeta,
   User,
   EnvironmentPort,
@@ -47,7 +48,7 @@ function fixture(startup: ConstructorParameters<typeof FirecrackerGuestRouter>[8
       JSON.stringify({
         requestId: body.request.requestId,
         generation: body.request.generation,
-        value: { kind: 'read', content: 'guest', truncated: false },
+        value: { kind: 'read', content: 'guest', truncated: false, offset: 1, totalLines: 1 },
       }),
     );
   });
@@ -69,11 +70,16 @@ function fixture(startup: ConstructorParameters<typeof FirecrackerGuestRouter>[8
 it('uses authenticated metadata and caps routed replies without exposing credentials to the guest', async () => {
   const f = fixture();
   const sandbox = new RemoteSandbox(f.router, f.meta.id);
-  expect(await sandbox.readFile('file.txt')).toEqual({ content: 'guest', truncated: false });
+  expect(await sandbox.readFile('file.txt')).toEqual({
+    content: 'guest',
+    truncated: false,
+    offset: 1,
+    totalLines: 1,
+  });
   const init = f.fetcher.mock.calls[0]![1]!;
   const body = JSON.parse(init.body as string);
   expect(body.request.workspace).toBe(f.user.id);
-  expect(body.request.operation).toEqual({ kind: 'read', path: 'file.txt', maxBytes: 100000 });
+  expect(body.request.operation).toEqual({ kind: 'read', path: 'file.txt', maxBytes: 64 * 1024 });
   expect(init.body).not.toContain('t'.repeat(32));
   expect(f.fetcher.mock.calls[0]![0]).toEqual(new URL('https://node.example/guest'));
 });
@@ -432,4 +438,22 @@ it('does not show a preparation hint for an already running environment', async 
   await f.router.call(f.meta.id, { kind: 'skillsList' });
   expect(onWaiting).not.toHaveBeenCalled();
   expect(f.wake).not.toHaveBeenCalled();
+});
+
+it('forwards and preserves byte continuation through RemoteSandbox', async () => {
+  const cursor = { byteOffset: 4, line: 1, lineByteOffset: 4, version: 'a'.repeat(64) };
+  const call = vi.fn<GuestRequestPort['call']>(async () => ({
+    kind: 'read',
+    content: 'next',
+    offset: 1,
+    truncated: true,
+    continuation: { ...cursor, byteOffset: 8, lineByteOffset: 8 },
+    startsMidLine: true,
+    endsMidLine: true,
+  }));
+  const sandbox = new RemoteSandbox({ call }, randomUUID());
+  const result = await sandbox.readFile('file.txt', { cursor, maxBytes: 4 });
+  expect(call.mock.calls[0]?.[1]).toEqual({ kind: 'read', path: 'file.txt', cursor, maxBytes: 4 });
+  expect(result).toMatchObject({ startsMidLine: true, continuation: { byteOffset: 8 } });
+  expect(result.totalLines).toBeUndefined();
 });

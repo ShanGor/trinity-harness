@@ -162,7 +162,13 @@ export class GuestRuntime {
       case 'read':
         return this.read('read', async () => ({
           kind: 'read',
-          ...(await sandbox.readFile(op.path, { maxBytes: op.maxBytes })),
+          ...(await sandbox.readFile(op.path, {
+            maxBytes: op.maxBytes,
+            offset: op.offset,
+            cursor: op.cursor,
+            signal: active,
+            limit: op.limit,
+          })),
         }));
       case 'readBytes': {
         if (!sandbox.readBytes) throw new Error('Binary reading unavailable');

@@ -47,7 +47,11 @@ it('dispatches typed sandbox operations and refuses stale generations before eff
     expect(await f.call({ kind: 'read', path: 'hello.txt', maxBytes: 100 })).toEqual({
       kind: 'read',
       content: 'hello',
+      startsMidLine: false,
+      endsMidLine: false,
       truncated: false,
+      offset: 1,
+      totalLines: 1,
     });
     expect(await f.call({ kind: 'skillsList' })).toEqual({
       kind: 'skills',
@@ -237,6 +241,30 @@ it('validates the guest boundary and never returns raw exception contents', asyn
     expect(denied.body).not.toContain(f.generation);
   } finally {
     await app.close();
+    await f.runtime.dispose();
+  }
+});
+
+it('carries Unicode continuation through guest schemas and rejects stale file versions', async () => {
+  const f = fixture();
+  try {
+    await f.call({ kind: 'write', path: 'paged.txt', content: '汉🙂abc\nnext' });
+    const first = await f.call({ kind: 'read', path: 'paged.txt', maxBytes: 4 });
+    expect(first.kind).toBe('read');
+    if (first.kind !== 'read') throw new Error('Expected read result');
+    expect(first.content).toBe('汉');
+    const second = await f.call({
+      kind: 'read',
+      path: 'paged.txt',
+      maxBytes: 4,
+      cursor: first.continuation,
+    });
+    expect(second).toMatchObject({ kind: 'read', content: '🙂', startsMidLine: true });
+    await f.call({ kind: 'write', path: 'paged.txt', content: 'new version' });
+    await expect(
+      f.call({ kind: 'read', path: 'paged.txt', maxBytes: 4, cursor: first.continuation }),
+    ).rejects.toThrow('STALE_FILE_CURSOR');
+  } finally {
     await f.runtime.dispose();
   }
 });

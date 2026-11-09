@@ -15,7 +15,7 @@ import { FirecrackerGuestRelay } from '../src/guest-relay.js';
 import { buildNodeAgent } from '../src/server.js';
 
 it.each([
-  { kind: 'read', content: 'guest', truncated: false },
+  { kind: 'read', content: 'guest', truncated: false, offset: 1, totalLines: 1 },
   { kind: 'operationError', operation: 'read', code: 'FILE_NOT_FOUND', effect: 'none' },
 ] as const)(
   'performs Firecracker CONNECT and validates a generation-bound $kind response',
@@ -139,6 +139,8 @@ it('revalidates PG owner/workspace/generation around guest dispatch and fails cl
       kind: 'read',
       content: 'private',
       truncated: false,
+      offset: 1,
+      totalLines: 1,
     })),
     callBrowser: vi.fn<BrowserGuestRelayPort['callBrowser']>(async () => ({ kind: 'ok' })),
   };

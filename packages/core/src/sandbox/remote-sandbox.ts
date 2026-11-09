@@ -8,6 +8,7 @@ import type {
   ExecResult,
   BoundedExecResult,
   ReadFileResult,
+  ReadFileOptions,
   EditFileResult,
   LongRunningProcess,
   OpenProcessOptions,
@@ -89,13 +90,34 @@ export class RemoteSandbox implements SandboxPort {
       outputOverflow: response.outputOverflow,
     };
   }
-  async readFile(path: string, opts?: { maxBytes?: number }): Promise<ReadFileResult> {
+  async readFile(path: string, opts?: ReadFileOptions): Promise<ReadFileResult> {
+    const maxBytes = opts?.maxBytes ?? 64 * 1024;
     const response = result(
-      await this.call({ kind: 'read', path, maxBytes: opts?.maxBytes ?? 100000 }),
+      await this.call(
+        {
+          kind: 'read',
+          path,
+          ...(opts?.cursor ? { cursor: opts.cursor } : {}),
+          maxBytes,
+          ...(opts?.offset !== undefined ? { offset: opts.offset } : {}),
+          ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
+        },
+        opts?.signal,
+      ),
       'read',
     );
-    return { content: response.content, truncated: response.truncated };
+    return {
+      content: response.content,
+      truncated: response.truncated,
+      offset: response.offset,
+      ...(response.nextOffset !== undefined ? { nextOffset: response.nextOffset } : {}),
+      ...(response.totalLines !== undefined ? { totalLines: response.totalLines } : {}),
+      ...(response.continuation ? { continuation: response.continuation } : {}),
+      ...(response.startsMidLine !== undefined ? { startsMidLine: response.startsMidLine } : {}),
+      ...(response.endsMidLine !== undefined ? { endsMidLine: response.endsMidLine } : {}),
+    };
   }
+
   async readBytes(path: string, maxBytes: number): Promise<Uint8Array> {
     return Buffer.from(
       result(await this.call({ kind: 'readBytes', path, maxBytes }), 'bytes').data,

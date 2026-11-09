@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
+import { readTextFilePage } from './text-file-page.js';
 import { spawn } from 'node:child_process';
 import { glob as fsGlob } from 'node:fs/promises';
-import { mkdir, lstat, readFile, writeFile, open, unlink } from 'node:fs/promises';
+import { mkdir, lstat, readFile, writeFile, open, unlink, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 
@@ -13,11 +15,11 @@ import type {
   LongRunningProcess,
   OpenProcessOptions,
   ReadFileResult,
+  ReadFileOptions,
   SandboxPort,
 } from '@trinity-harness/contracts';
 
-const DEFAULT_MAX_BYTES = 100_000;
-/** Hard ceiling so a huge file cannot exhaust memory before truncation. */
+/** Independent ceiling for binary transfers and full-file editing; text reads stream pages. */
 const STAT_MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 const MAX_BUFFER = 10 * 1024 * 1024;
@@ -207,18 +209,47 @@ export class LocalSandbox implements SandboxPort {
     });
   }
 
-  async readFile(relativePath: string, opts?: { maxBytes?: number }): Promise<ReadFileResult> {
+  async readFile(relativePath: string, opts?: ReadFileOptions): Promise<ReadFileResult> {
+    opts?.signal?.throwIfAborted();
     const abs = this.resolve(relativePath);
-    const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
-    const buf = await readFile(abs);
-    if (buf.byteLength > STAT_MAX_BYTES) {
-      throw new Error(`file too large to read (${buf.byteLength} bytes): ${relativePath}`);
+    const handle = await open(
+      abs,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    try {
+      const initial = await handle.stat({ bigint: true });
+      if (!initial.isFile()) throw new Error('Text reading requires a regular file');
+      if (initial.size > BigInt(Number.MAX_SAFE_INTEGER))
+        throw new Error('File exceeds supported byte addressing');
+      const versionOf = (info: typeof initial): string =>
+        createHash('sha256')
+          .update(`${abs}:${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`)
+          .digest('hex');
+      const version = versionOf(initial);
+      return await readTextFilePage(
+        {
+          size: Number(initial.size),
+          version,
+          read: async (position, length): Promise<Uint8Array> => {
+            const buffer = Buffer.alloc(length);
+            const { bytesRead } = await handle.read(buffer, 0, length, position);
+            return buffer.subarray(0, bytesRead);
+          },
+          assertUnchanged: async (): Promise<void> => {
+            if (
+              versionOf(await handle.stat({ bigint: true })) !== version ||
+              versionOf(await stat(abs, { bigint: true })) !== version
+            )
+              throw new Error(
+                'STALE_FILE_CURSOR: file changed during read; read again without cursor',
+              );
+          },
+        },
+        opts,
+      );
+    } finally {
+      await handle.close();
     }
-    const slice = buf.subarray(0, maxBytes);
-    return {
-      content: slice.toString('utf8'),
-      truncated: buf.byteLength > maxBytes,
-    };
   }
 
   async readBytes(relativePath: string, maxBytes: number): Promise<Uint8Array> {
@@ -279,7 +310,10 @@ export class LocalSandbox implements SandboxPort {
   }
 
   async editFile(relativePath: string, oldText: string, newText: string): Promise<EditFileResult> {
-    const { content } = await this.readFile(relativePath, { maxBytes: STAT_MAX_BYTES });
+    const bytes = await readFile(this.resolve(relativePath));
+    if (bytes.byteLength > STAT_MAX_BYTES)
+      throw new Error(`file too large to edit (${bytes.byteLength} bytes): ${relativePath}`);
+    const content = bytes.toString('utf8');
     const occurrences = content.split(oldText).length - 1;
     if (occurrences === 0) {
       throw new Error(`edit_file: old_text not found in ${relativePath}`);

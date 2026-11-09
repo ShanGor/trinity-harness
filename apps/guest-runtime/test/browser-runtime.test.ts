@@ -119,7 +119,7 @@ it('binds private desktop operations to the browser session, workspace and guest
       f.browser.execute(f.request({ kind: 'desktopFrame' }, { generation: randomUUID() })),
     ).rejects.toThrow('generation');
     await expect(
-      f.browser.execute(f.request({ kind: 'read', path: 'file', maxBytes: 1 })),
+      f.browser.execute(f.request({ kind: 'read', path: 'file', maxBytes: 4 })),
     ).rejects.toThrow('browser endpoint');
     await expect(f.browser.execute(f.request({ kind: 'browserOpen' }))).rejects.toThrow(
       'already allocated',

@@ -1,3 +1,4 @@
+import { readFileCursorSchema, readFileResultSchema } from './sandbox.js';
 import { z } from 'zod';
 import type { EnvironmentRecord } from './environments.js';
 import { skillCatalogResultSchema, skillDefinitionSchema, skillNameSchema } from './skills.js';
@@ -64,7 +65,14 @@ export const guestOperationSchema = z.discriminatedUnion('kind', [
     .object({
       kind: z.literal('read'),
       path: file,
-      maxBytes: z.number().int().min(1).max(GUEST_MAX_BYTES),
+      maxBytes: z
+        .number()
+        .int()
+        .min(4)
+        .max(1024 * 1024),
+      cursor: readFileCursorSchema.optional(),
+      offset: z.number().int().positive().optional(),
+      limit: z.number().int().positive().max(2000).optional(),
     })
     .strict(),
   z
@@ -146,7 +154,7 @@ export const guestValueSchema = z.discriminatedUnion('kind', [
       outputOverflow: z.boolean(),
     })
     .strict(),
-  z.object({ kind: z.literal('read'), content: text, truncated: z.boolean() }).strict(),
+  readFileResultSchema.extend({ kind: z.literal('read') }).strict(),
   z.object({ kind: z.literal('bytes'), data: base64 }).strict(),
   z.object({ kind: z.literal('ok') }).strict(),
   z.object({ kind: z.literal('edit'), content: text, replacements: z.number().int() }).strict(),
