@@ -177,3 +177,7 @@ rebuild thresholds from the configured model window and measured results; this
 design does not invent a fixed turn count, idle timeout or target cache-hit ratio.
 Runtime rollout requires relevant unit/integration tests, repository lint and
 typecheck; UI rollout additionally requires the listed browser verification.
+
+## Nightly review extension (2026-11-09)
+
+The earlier browser-only timezone and no-digest implementation notes are superseded by design §21.9. An optional scheduled Work review produces a source-linked previous-local-day digest and memory proposals in Updates. It uses the ordinary loop and date-scoped recall; it is never automatically injected into Main context. Persona mutation is rejected for review turns, and their derived outputs are excluded from recall indexing. History timezone can now persist per authenticated account, with browser fallback. Stable context segmentation rollout and real-provider evaluation requirements above remain unchanged.

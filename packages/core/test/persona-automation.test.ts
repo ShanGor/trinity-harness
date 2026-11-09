@@ -397,3 +397,47 @@ it('does not accept a concurrent external edit as its own context refresh', asyn
     ),
   ).toBe(true);
 });
+
+it('rejects Persona writes originating from a nightly review even with a call journal', async () => {
+  const f = await fixture();
+  const meta = await f.session();
+  const promptId = randomUUID();
+  await f.store.append(meta.id, [
+    {
+      type: 'message/user',
+      surfaceOp: 'append',
+      eventId: promptId,
+      at,
+      content: [{ kind: 'text', text: 'My name is Alex' }],
+      trigger: {
+        kind: 'schedule',
+        consolidation: 'review',
+        scheduleId: randomUUID(),
+        revision: 1,
+        occurrenceId: randomUUID(),
+        scheduledAt: at,
+      },
+    },
+  ]);
+  const result = await f.tools.execute(
+    {
+      name: 'persona',
+      id: 'review-write',
+      args: {
+        operation: 'update',
+        expectedRevision: 0,
+        sourceQuote: 'My name is Alex',
+        edits: [{ oldText: '', newText: 'Alex' }],
+      },
+    },
+    {
+      sessionId: meta.id,
+      workspaceRoot: '/workspace',
+      userPromptId: promptId,
+      callId: 'review-write',
+      personalMemoryChanged: async () => undefined,
+    },
+  );
+  expect(result.isError).toBe(true);
+  expect(f.writes).toHaveLength(0);
+});

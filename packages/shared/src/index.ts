@@ -87,3 +87,5 @@ export {
 } from '@trinity-harness/contracts';
 
 export { attachmentUploadErrorSchema } from '@trinity-harness/contracts';
+
+export { historyPreferencesSchema, type HistoryPreferences } from '@trinity-harness/contracts';

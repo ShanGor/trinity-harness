@@ -1,3 +1,4 @@
+import { historyPreferencesSchema } from '@trinity-harness/contracts';
 import {
   AttachmentService,
   matchesCommandPrefix,
@@ -2785,6 +2786,38 @@ export async function buildServer(
     return speechPreferencesSchema.parse(saved ?? DEFAULT_SPEECH_PREFERENCES);
   };
 
+  app.get('/api/me/history-preferences', async (req, reply) => {
+    if (!req.identity) return reply.code(401).send({ error: 'authentication required' });
+    if (!deps.auth?.users.getHistoryPreferences)
+      return reply.code(501).send({ error: 'history preferences unavailable' });
+    try {
+      return {
+        preferences: await deps.auth.users.getHistoryPreferences(
+          req.identity.tenantId,
+          req.identity.userId,
+        ),
+      };
+    } catch {
+      return reply.code(503).send({ error: 'history preferences unavailable' });
+    }
+  });
+  app.put('/api/me/history-preferences', async (req, reply) => {
+    if (!req.identity) return reply.code(401).send({ error: 'authentication required' });
+    const parsed = historyPreferencesSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid history preferences' });
+    if (!deps.auth?.users.setHistoryPreferences)
+      return reply.code(501).send({ error: 'history preferences unavailable' });
+    try {
+      const saved = await deps.auth.users.setHistoryPreferences(
+        req.identity.tenantId,
+        req.identity.userId,
+        parsed.data,
+      );
+      return saved ? parsed.data : reply.code(404).send({ error: 'user not found' });
+    } catch {
+      return reply.code(503).send({ error: 'history preferences unavailable' });
+    }
+  });
   app.get('/api/me/speech-preferences', async (req, reply) => {
     if (!req.identity) return reply.code(401).send({ error: 'authentication required' });
     try {

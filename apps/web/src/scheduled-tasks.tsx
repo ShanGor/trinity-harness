@@ -1,3 +1,4 @@
+import { readHistoryTimezone } from './history-timezone';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { Alert, Button, Form, Input, InputNumber, List, Modal, Select, Typography } from 'antd';
 import type { AcpClient, SessionSummary } from '@trinity-harness/client-acp';
@@ -22,6 +23,7 @@ export function ScheduledTasks({
   const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
+  const [consolidation, setConsolidation] = useState(false);
   const [saving, setSaving] = useState(false);
   const operation = useRef(newId());
   const [form] = Form.useForm<{
@@ -88,17 +90,35 @@ export function ScheduledTasks({
         <>
           <Typography.Paragraph>
             Daily delegations run in the selected personal workspace, even when you close this page.
-            Missed and overlapping runs are skipped. Actions still require the task’s normal
-            permissions and approvals.
+            Ordinary missed and overlapping runs are skipped. Nightly reviews catch up the previous
+            seven local days, one at a time. Actions still require the task’s normal permissions and
+            approvals.
           </Typography.Paragraph>
           <Button
             type="primary"
             onClick={() => {
               operation.current = newId();
+              setConsolidation(false);
               setCreating(true);
             }}
           >
             New schedule
+          </Button>
+          <Button
+            onClick={() => {
+              operation.current = newId();
+              setConsolidation(true);
+              form.setFieldsValue({
+                title: 'Nightly digest and memory review',
+                request:
+                  'Review my previous day of personal conversations and prepare a source-linked digest and memory proposals.',
+                hour: 3,
+                minute: 0,
+              });
+              setCreating(true);
+            }}
+          >
+            Nightly memory review
           </Button>
           <Button onClick={() => void load()}>Refresh</Button>
           <List
@@ -165,7 +185,7 @@ export function ScheduledTasks({
               >
                 <List.Item.Meta
                   title={`${item.readAt ? '' : '● '}${item.title}`}
-                  description={`${item.status} · ${item.reason ?? ''} · ${new Date(item.at).toLocaleString()}`}
+                  description={`${item.status} · ${item.reason === 'expired' ? 'Older catch-up dates expired (seven-day limit)' : (item.reason ?? '')} · ${new Date(item.at).toLocaleString()}${item.attempts ? ` · Attempt ${item.attempts}` : ''}${item.retryAt ? ` · Retry after ${new Date(item.retryAt).toLocaleString()}` : ''}`}
                 />
               </List.Item>
             )}
@@ -173,7 +193,7 @@ export function ScheduledTasks({
         </>
       )}
       <Modal
-        title="Create daily schedule"
+        title={consolidation ? 'Enable nightly memory review' : 'Create daily schedule'}
         open={creating}
         confirmLoading={saving}
         onCancel={() => setCreating(false)}
@@ -186,12 +206,13 @@ export function ScheduledTasks({
           initialValues={{
             hour: 9,
             minute: 0,
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            timezone: readHistoryTimezone(),
           }}
           onFinish={async (values) => {
             setSaving(true);
             try {
               await client.createSchedule({
+                ...(consolidation ? { consolidation: 'review' as const } : {}),
                 title: values.title,
                 request: values.request,
                 sourceSessionId: values.sourceSessionId,
@@ -216,6 +237,12 @@ export function ScheduledTasks({
             }
           }}
         >
+          {consolidation && (
+            <Alert
+              type="info"
+              message="Reviews the previous local calendar day and delivers a digest with topic groups and source-linked memory proposals in Updates. Review proposals in Memory settings before saving. Missed reviews catch up the previous seven local days, oldest first. Failed recall-only reviews get up to three attempts with backoff; cancelled reviews are not retried. No automatic Persona changes."
+            />
+          )}
           <Form.Item name="title" label="Name" rules={[{ required: true, max: 200 }]}>
             <Input />
           </Form.Item>

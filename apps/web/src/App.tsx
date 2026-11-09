@@ -1,5 +1,5 @@
 import { chatDateHeadings } from './chat-dates';
-import { useHistoryTimezone } from './history-timezone';
+import { saveHistoryTimezone, useHistoryTimezone } from './history-timezone';
 import { publishResponseSpeech } from './response-speech-events';
 import { XDuCompanion, companionState } from './x-du-companion';
 import type { PromptDelivery } from '@trinity-harness/shared';
@@ -148,6 +148,21 @@ export default function App() {
   const { message, modal } = AntdApp.useApp();
   const [user, setUser] = useState<MeUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  useEffect(() => {
+    if (!user) return;
+    const controller = new AbortController();
+    void client
+      .getHistoryPreferences(controller.signal)
+      .then((preferences) => {
+        if (!controller.signal.aborted && preferences) saveHistoryTimezone(preferences.timezone);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted)
+          void message.warning('Account timezone unavailable; using this browser’s timezone.');
+      });
+    return () => controller.abort();
+  }, [user, message]);
+
   const [historyCollapsed, setHistoryCollapsed] = useState(
     () => window.matchMedia('(max-width: 600px)').matches,
   );
@@ -2166,7 +2181,8 @@ function AssistantContent({
         <details className="turn-activity">
           <summary>
             Execution details · {item.activity?.length ?? 0} updates · {item.tools.length} tools
-            {' · '}Time spent {formatExecutionTime([
+            {' · '}Time spent{' '}
+            {formatExecutionTime([
               ...item.tools.map((tool) => tool.durationMs),
               ...(item.usage ?? []).map((usage) => usage.durationMs),
             ])}
@@ -2197,7 +2213,9 @@ function AssistantContent({
           {!!item.usage?.length && (
             <ul className="execution-model-times">
               {item.usage.map((usage) => (
-                <li key={usage.requestId}>{usage.model} · {formatExecutionTime([usage.durationMs])}</li>
+                <li key={usage.requestId}>
+                  {usage.model} · {formatExecutionTime([usage.durationMs])}
+                </li>
               ))}
             </ul>
           )}

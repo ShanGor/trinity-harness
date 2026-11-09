@@ -70,6 +70,8 @@ vi.mock('@trinity-harness/client-acp', () => ({
         workspaceUri: '/workspace/user',
         scope: 'personal',
       }));
+    getHistoryPreferences = async () => null;
+    setHistoryPreferences = async (value: { timezone: string }) => value;
     listTeams = async () => [];
     getSchedules = async () => ({ available: false, schedules: [] });
     getInbox = async () => ({ available: false, items: [] });

@@ -12,6 +12,7 @@ import {
 } from '@trinity-harness/core/testing';
 import type {
   AuditRecord,
+  HistoryPreferences,
   Identity,
   PasswordHasher,
   Role,
@@ -75,6 +76,22 @@ class FakeUserStore implements UserStore {
     this.byId.set(user.id, user);
     this.passwords.set(user.id, input.passwordHash.replace(/^h:/, ''));
     return user;
+  }
+  private history = new Map<string, HistoryPreferences>();
+  async getHistoryPreferences(
+    tenantId: string,
+    userId: string,
+  ): Promise<HistoryPreferences | null> {
+    return this.byId.get(userId)?.tenantId === tenantId ? (this.history.get(userId) ?? null) : null;
+  }
+  async setHistoryPreferences(
+    tenantId: string,
+    userId: string,
+    preferences: HistoryPreferences,
+  ): Promise<boolean> {
+    if (this.byId.get(userId)?.tenantId !== tenantId) return false;
+    this.history.set(userId, preferences);
+    return true;
   }
   async getSpeechPreferences(tenantId: string, userId: string): Promise<SpeechPreferences | null> {
     return this.byId.get(userId)?.tenantId === tenantId ? (this.speech.get(userId) ?? null) : null;
@@ -285,6 +302,71 @@ describe('M2 auth / tenants / RBAC', () => {
           await authed(baseUrl, tokens[0], route, {
             method: 'PUT',
             body: JSON.stringify(DEFAULT_SPEECH_PREFERENCES),
+          })
+        ).status,
+      ).toBe(200);
+    } finally {
+      await bundle.app.close();
+    }
+  });
+
+  it('saves history timezone preferences for the authenticated account and fails visibly on storage errors', async () => {
+    const bundle = await makeApp();
+    const baseUrl = await bundle.app.listen({ port: 0, host: '127.0.0.1' });
+    try {
+      const tokens: string[] = [];
+      for (const [tenantId, email] of [
+        ['history-tenant-a', 'history-a@example.com'],
+        ['history-tenant-b', 'history-b@example.com'],
+      ]) {
+        await bundle.users.createUser({
+          tenantId: tenantId!,
+          email: email!,
+          passwordHash: 'h:password123',
+          role: 'developer',
+        });
+        tokens.push((await login(baseUrl, email!, 'password123')).token!);
+      }
+      const route = '/api/me/history-preferences';
+      expect((await authed(baseUrl, undefined, route)).status).toBe(401);
+      expect(await (await authed(baseUrl, tokens[0], route)).json()).toEqual({ preferences: null });
+      const custom = { timezone: 'Asia/Hong_Kong' };
+      expect(
+        (await authed(baseUrl, tokens[0], route, { method: 'PUT', body: JSON.stringify(custom) }))
+          .status,
+      ).toBe(200);
+      expect(await (await authed(baseUrl, tokens[0], route)).json()).toEqual({
+        preferences: custom,
+      });
+      expect(await (await authed(baseUrl, tokens[1], route)).json()).toEqual({ preferences: null });
+      for (const body of [
+        { timezone: '' },
+        { timezone: 'Unknown/Zone' },
+        { ...custom, userId: 'another-user' },
+      ]) {
+        expect(
+          (await authed(baseUrl, tokens[0], route, { method: 'PUT', body: JSON.stringify(body) }))
+            .status,
+        ).toBe(400);
+      }
+      const read = vi
+        .spyOn(bundle.users, 'getHistoryPreferences')
+        .mockRejectedValueOnce(new Error('storage'));
+      expect((await authed(baseUrl, tokens[0], route)).status).toBe(503);
+      read.mockRestore();
+      const write = vi
+        .spyOn(bundle.users, 'setHistoryPreferences')
+        .mockRejectedValueOnce(new Error('storage'));
+      expect(
+        (await authed(baseUrl, tokens[0], route, { method: 'PUT', body: JSON.stringify(custom) }))
+          .status,
+      ).toBe(503);
+      write.mockRestore();
+      expect(
+        (
+          await authed(baseUrl, tokens[0], route, {
+            method: 'PUT',
+            body: JSON.stringify({ timezone: 'UTC' }),
           })
         ).status,
       ).toBe(200);

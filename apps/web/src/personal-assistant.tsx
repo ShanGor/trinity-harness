@@ -1,4 +1,4 @@
-import { readHistoryTimezone, saveHistoryTimezone } from './history-timezone';
+import { readHistoryTimezone, saveHistoryTimezone, validTimezone } from './history-timezone';
 import { useCallback, useEffect, useState, type ReactElement } from 'react';
 import {
   Alert,
@@ -228,7 +228,32 @@ export function AssistantHistory({
   const [query, setQuery] = useState('');
   const [date, setDate] = useState('');
   const [timezone, setTimezone] = useState(readHistoryTimezone);
+  const [timezoneDraft, setTimezoneDraft] = useState(readHistoryTimezone);
+  const [preferenceError, setPreferenceError] = useState('');
+  useEffect(() => {
+    let active = true;
+    void client
+      .getHistoryPreferences()
+      .then((preferences) => {
+        if (active && preferences) {
+          setTimezone(preferences.timezone);
+          setTimezoneDraft(preferences.timezone);
+          saveHistoryTimezone(preferences.timezone);
+        }
+      })
+      .catch(() => {
+        if (active)
+          setPreferenceError(
+            'Account timezone could not be loaded. Showing the browser preference.',
+          );
+      });
+    return () => {
+      active = false;
+    };
+  }, [client]);
+
   const [error, setError] = useState('');
+  const [selectedTopic, setSelectedTopic] = useState<string | undefined>();
   const [editing, setEditing] = useState<TopicEpisode | null>(null);
   const [title, setTitle] = useState('');
   const load = useCallback(
@@ -275,16 +300,46 @@ export function AssistantHistory({
         />
         <Input
           aria-label="History timezone"
-          value={timezone}
-          onChange={(event) => {
-            setTimezone(event.target.value);
-            saveHistoryTimezone(event.target.value);
+          value={timezoneDraft}
+          onChange={(event) => setTimezoneDraft(event.target.value)}
+          onBlur={() => {
+            if (!validTimezone(timezoneDraft)) {
+              setPreferenceError('Enter a valid IANA timezone.');
+              return;
+            }
+            setTimezone(timezoneDraft);
+            saveHistoryTimezone(timezoneDraft);
+            void client
+              .setHistoryPreferences({ timezone: timezoneDraft })
+              .then(() => setPreferenceError(''))
+              .catch(() =>
+                setPreferenceError('Timezone saved in this browser only; account save failed.'),
+              );
           }}
         />
       </Flex>
+      {preferenceError && <Alert type="warning" message={preferenceError} />}
       {error && <Alert type="error" message="History unavailable" description={error} />}
+      <Select
+        aria-label="Group history by topic"
+        placeholder="All topics in loaded history"
+        allowClear
+        style={{ minWidth: 260, marginTop: 12 }}
+        value={selectedTopic}
+        onChange={setSelectedTopic}
+        options={[...new Set(episodes.map((episode) => episode.topic))].map((topic) => ({
+          value: topic,
+          label: `${topic} (${episodes.filter((episode) => episode.topic === topic).length})`,
+        }))}
+      />
+      <Typography.Paragraph type="secondary">
+        Topic counts cover loaded episodes. Load older episodes to include earlier returns to a
+        topic.
+      </Typography.Paragraph>
       <List
-        dataSource={episodes}
+        dataSource={
+          selectedTopic ? episodes.filter((episode) => episode.topic === selectedTopic) : episodes
+        }
         locale={{ emptyText: 'No indexed episodes in this page' }}
         renderItem={(episode) => (
           <List.Item

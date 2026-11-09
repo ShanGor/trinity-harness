@@ -207,7 +207,7 @@ export function suggestTopic(
   const explicit = /^(?:unrelated|new topic|switching topics)\s*[:：-]\s*(.+)/is.exec(request);
   if (explicit) return explicit[1]!.trim().slice(0, 120) || 'Untitled topic';
   const words = (text: string): Set<string> =>
-    new Set(text.toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
+    new Set(memorySearchTerms(text).filter((word) => word.length >= 2));
   const wanted = words(request);
   const matches = prior
     .map((item) => ({

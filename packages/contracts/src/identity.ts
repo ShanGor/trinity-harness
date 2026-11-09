@@ -91,8 +91,32 @@ export interface PasswordHasher {
   verify(password: string, encoded: string): Promise<boolean>;
 }
 
+export const historyPreferencesSchema = z
+  .object({
+    timezone: z
+      .string()
+      .min(1)
+      .max(100)
+      .refine((value) => {
+        try {
+          new Intl.DateTimeFormat('en', { timeZone: value });
+          return true;
+        } catch {
+          return false;
+        }
+      }, 'Unknown IANA timezone'),
+  })
+  .strict();
+export type HistoryPreferences = z.infer<typeof historyPreferencesSchema>;
+
 /** User directory (per-tenant). */
 export interface UserStore {
+  getHistoryPreferences?(tenantId: string, userId: string): Promise<HistoryPreferences | null>;
+  setHistoryPreferences?(
+    tenantId: string,
+    userId: string,
+    preferences: HistoryPreferences,
+  ): Promise<boolean>;
   findByEmail(email: string): Promise<User | null>;
   findById(userId: string): Promise<User | null>;
   /**

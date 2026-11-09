@@ -88,6 +88,7 @@ export const assistantSchedules = pgTable(
     definition: jsonb('definition').notNull(),
     enabled: boolean('enabled').notNull(),
     nextFireAt: timestamp('next_fire_at', { withTimezone: true, mode: 'string' }),
+    reviewCatchupInitialized: boolean('review_catchup_initialized').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull(),
   },
   (t) => [
@@ -110,6 +111,8 @@ export const scheduleOccurrences = pgTable(
     title: text('title').notNull(),
     status: text('status').notNull(),
     reason: text('reason').notNull(),
+    attempts: bigint('attempts', { mode: 'number' }).notNull().default(0),
+    retryAt: timestamp('retry_at', { withTimezone: true, mode: 'string' }),
     readAt: timestamp('read_at', { withTimezone: true, mode: 'string' }),
   },
   (t) => [
@@ -169,6 +172,7 @@ export const users = pgTable(
     email: text('email').notNull(),
     passwordHash: text('password_hash').notNull(),
     speechVoiceStyle: text('speech_voice_style'),
+    historyTimezone: text('history_timezone'),
     role: text('role').notNull().default('developer'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
       .notNull()

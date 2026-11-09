@@ -164,3 +164,9 @@ Guest subprocess 的输入按序号去重，输出按字节 cursor 重放与确�
 开发 guest CLI 已通过本地 socket fixture + 真实 Zendriver / Chrome 测试；实际 KVM acceptance 也完成了双 generation 启动，覆盖持久文件、非 root 命令、环境净化、skills、guest 拒绝旧 generation、PNG preview、jailer/systemd 和默认 guest egress denial。jailer runner 另有可选的真实 DNS/TCP egress 验收。后续环境镜像变更时需重跑相应验收；原独立 dummy vsock smoke 不能代替真实 guest 测试。
 
 2026-10-26 本机开发环境已有个人 PG assignment；真实 Firecracker Chrome 已通过 owner API 返回 PNG，前端输入 Ada 并点击按钮得到 Hello Ada。`example.com` HTTPS 单独验收成功。使用宿主 egress 并修复 anchor 包裹 heading 的提取后，Google typed web_search 已返回文本 receipts 和结果链接；发行版安装路径也已通过 maintenance release 与 fresh generation 的真实 HTTPS / web_search 验收；运行中的配置和 binary 路径均为持久安装位置，不依赖临时修复目录。迁移与身份检查不能替代生产隔离验收。
+
+## Nightly review catch-up (2026-11-09)
+
+Review schedules (`consolidation: review`) now use the existing startup and periodic PG reconciliation to catch up the previous seven local review dates, oldest-first, with one active review per schedule. This supersedes missed/overlap skipping for reviews only. Ordinary scheduled actions still skip missed/overlapping instants. Queued work stays on existing dispatcher recovery; it is never duplicated based on age. Recall-only terminal failures may get three total attempts, separated by durable 5/10-minute waits; cancellation, unknown effects and changed source permissions do not authorize retries. Original occurrence dates and source authority survive each attempt. Paused dates are not replayed. Older gaps are represented by an expired marker in Updates.
+
+Apply migration 0023; replace old control-worker writers rather than running mixed scheduler versions. Deploy matching contracts/server/worker/control-worker/Web. Tests use injected tick times and isolated PG schemas; no new timer service, provider integration or guest image is required. See design §21.9 for cursor, legacy recovery and authorization details.

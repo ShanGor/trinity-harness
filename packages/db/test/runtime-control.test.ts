@@ -96,6 +96,52 @@ function definition(): ScheduleCreate {
 }
 
 describe.skipIf(!reachable)('durable runtime control', () => {
+  it('commits a dated nightly review once and excludes derived digests from recall indexing', async () => {
+    const input = { ...definition(), consolidation: 'review' as const, timezone: 'Asia/Hong_Kong' };
+    const schedule = await schedules.create(owner, input, at);
+    await Promise.all([
+      schedules.tick(new Date('2026-10-24T00:01:00Z')),
+      schedules.tick(new Date('2026-10-24T00:01:00Z')),
+    ]);
+    const notices = (await schedules.inbox(owner)).filter(
+      (item) => item.scheduleId === schedule.id,
+    );
+    expect(notices).toHaveLength(1);
+    const sessionId = notices[0]!.sessionId!;
+    const queued = (await events.load(sessionId)).find((event) => event.type === 'prompt/queued');
+    if (queued?.type !== 'prompt/queued') throw new Error('missing prompt');
+    expect(queued.trigger?.consolidation).toBe('review');
+    expect(JSON.stringify(queued.content)).toContain('Review date: 2026-10-23');
+    await events.append(sessionId, [
+      {
+        type: 'message/user',
+        surfaceOp: 'append',
+        eventId: queued.promptId,
+        at: queued.at,
+        content: queued.content,
+        trigger: queued.trigger,
+      },
+      {
+        type: 'message/assistant',
+        eventId: randomUUID(),
+        at: queued.at,
+        phase: 'final',
+        surfaceOp: 'append',
+        content: [{ kind: 'text', text: 'Derived digest' }],
+      },
+      {
+        type: 'turn/end',
+        eventId: randomUUID(),
+        at: queued.at,
+        promptId: queued.promptId,
+        reason: 'completed',
+      },
+    ]);
+    expect(
+      (await pool.query('select * from conversation_episodes where session_id=$1', [sessionId]))
+        .rows,
+    ).toHaveLength(0);
+  });
   it('atomically creates one queued run, preserves trigger provenance and recovers its outcome after restart', async () => {
     const input = definition();
     const schedule = await schedules.create(owner, input, at);
@@ -168,6 +214,194 @@ describe.skipIf(!reachable)('durable runtime control', () => {
       ['skipped', 'overlap'],
       ['queued', 'due'],
     ]);
+  });
+
+  function nightly(): ScheduleCreate {
+    return {
+      ...definition(),
+      consolidation: 'review',
+      timing: { kind: 'daily', hour: 0, minute: 1, weekdays: [0, 1, 2, 3, 4, 5, 6] },
+    };
+  }
+  async function finishReview(
+    scheduleId: string,
+    reason: 'completed' | 'error' | 'aborted',
+    at: string,
+  ): Promise<string> {
+    const [row] = (
+      await pool.query('select * from schedule_occurrences where schedule_id=$1 and status=$2', [
+        scheduleId,
+        'queued',
+      ])
+    ).rows;
+    if (!row) throw new Error('missing queued review');
+    await events.append(row.session_id, [
+      { type: 'turn/end', eventId: randomUUID(), at, promptId: row.prompt_id, reason },
+    ]);
+    return row.session_id;
+  }
+  it('catches up oldest-first after downtime without duplicating queued or completed days', async () => {
+    const schedule = await schedules.create(owner, nightly(), at);
+    const now = new Date('2026-10-26T04:00:00Z');
+    await Promise.all([schedules.tick(now), new PgScheduleStore(db).tick(now)]);
+    let items = (await schedules.inbox(owner)).filter((item) => item.scheduleId === schedule.id);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      status: 'queued',
+      at: '2026-10-24T00:01:00.000Z',
+      attempts: 1,
+    });
+    await new PgScheduleStore(db).tick(now);
+    expect(
+      (await schedules.inbox(owner)).filter((item) => item.scheduleId === schedule.id),
+    ).toHaveLength(1);
+    await finishReview(schedule.id, 'completed', now.toISOString());
+    await schedules.tick(now); // advance past the completed day
+    await schedules.tick(now);
+    items = (await schedules.inbox(owner)).filter((item) => item.scheduleId === schedule.id);
+    expect(items.map((item) => [item.status, item.at])).toEqual([
+      ['queued', '2026-10-25T00:01:00.000Z'],
+      ['completed', '2026-10-24T00:01:00.000Z'],
+    ]);
+    const queued = (await events.load(items[0]!.sessionId!)).find(
+      (event) => event.type === 'prompt/queued',
+    );
+    expect(JSON.stringify(queued)).toContain('Review date: 2026-10-24');
+  });
+  it('bounds long-outage catch-up to seven local review days and records an expired gap', async () => {
+    const schedule = await schedules.create(owner, nightly(), new Date('2026-10-01T00:00:00Z'));
+    const now = new Date('2026-10-24T04:00:00Z');
+    await schedules.tick(now);
+    await schedules.tick(now);
+    const items = (await schedules.inbox(owner)).filter((item) => item.scheduleId === schedule.id);
+    expect(items).toHaveLength(2);
+    expect(items.find((item) => item.status === 'queued')?.at).toBe('2026-10-18T00:01:00.000Z');
+    expect(items.find((item) => item.reason === 'expired')).toMatchObject({
+      status: 'skipped',
+      sessionId: null,
+    });
+  });
+  it('recovers legacy skipped/missing dates once without replaying completed reviews', async () => {
+    const schedule = await schedules.create(owner, nightly(), at);
+    // Simulate the old scheduler advancing over an outage before this upgrade.
+    await pool.query(
+      'update assistant_schedules set review_catchup_initialized=false,next_fire_at=$2 where id=$1',
+      [schedule.id, '2026-10-27T00:01:00Z'],
+    );
+    await pool.query(
+      `insert into schedule_occurrences(id,schedule_id,revision,tenant_id,user_id,scheduled_at,title,status,reason) values($1,$2,1,$3,$4,$5,'Report','skipped','missed')`,
+      [randomUUID(), schedule.id, owner.tenantId, owner.userId, '2026-10-24T00:01:00Z'],
+    );
+    const now = new Date('2026-10-26T04:00:00Z');
+    await schedules.tick(now);
+    const item = (await schedules.inbox(owner)).find((item) => item.scheduleId === schedule.id)!;
+    expect(item).toMatchObject({ status: 'queued', at: '2026-10-24T00:01:00.000Z' });
+    await finishReview(schedule.id, 'completed', now.toISOString());
+    await schedules.tick(now);
+    await schedules.tick(now);
+    expect(
+      (await schedules.inbox(owner)).filter((item) => item.scheduleId === schedule.id),
+    ).toHaveLength(2);
+  });
+  it('persists bounded retry backoff, original dates and authorization for every attempt', async () => {
+    const schedule = await schedules.create(owner, nightly(), at);
+    await schedules.tick(new Date('2026-10-24T00:01:00Z'));
+    const firstSession = await finishReview(schedule.id, 'error', '2026-10-24T00:02:00Z');
+    await schedules.tick(new Date('2026-10-24T00:03:00Z'));
+    let item = (await schedules.inbox(owner)).find((item) => item.scheduleId === schedule.id)!;
+    expect(item).toMatchObject({
+      status: 'failed',
+      attempts: 1,
+      retryAt: '2026-10-24T00:07:00.000Z',
+    });
+    await Promise.all([
+      schedules.tick(new Date('2026-10-24T00:07:00Z')),
+      new PgScheduleStore(db).tick(new Date('2026-10-24T00:07:00Z')),
+    ]);
+    item = (await schedules.inbox(owner)).find((item) => item.scheduleId === schedule.id)!;
+    expect(item).toMatchObject({ status: 'queued', attempts: 2, at: '2026-10-24T00:01:00.000Z' });
+    expect(item.sessionId).not.toBe(firstSession);
+    await schedules.assertRunAuthorized(firstSession, owner.userId);
+    await metas.setPolicy(source, 'workspace-write');
+    await expect(schedules.assertRunAuthorized(firstSession, owner.userId)).rejects.toThrow(
+      'authorization changed',
+    );
+    await metas.setPolicy(source, 'read-only');
+    await finishReview(schedule.id, 'error', '2026-10-24T00:08:00Z');
+    await schedules.tick(new Date('2026-10-24T00:17:00Z'));
+    expect(
+      (await schedules.inbox(owner)).find((item) => item.scheduleId === schedule.id)?.status,
+    ).toBe('failed');
+    await schedules.tick(new Date('2026-10-24T00:18:00Z'));
+    await finishReview(schedule.id, 'error', '2026-10-24T00:19:00Z');
+    await schedules.tick(new Date('2026-10-24T00:35:00Z'));
+    expect(
+      (await schedules.inbox(owner)).find((item) => item.scheduleId === schedule.id),
+    ).toMatchObject({ status: 'failed', attempts: 3, retryAt: null });
+  });
+  it('never retries cancelled reviews or failures with potentially effectful calls', async () => {
+    for (const unsafe of [false, true]) {
+      const schedule = await schedules.create(owner, nightly(), at);
+      const now = new Date('2026-10-24T00:01:00Z');
+      await schedules.tick(now);
+      const item = (await schedules.inbox(owner)).find((item) => item.scheduleId === schedule.id)!;
+      if (unsafe)
+        await events.append(item.sessionId!, [
+          {
+            type: 'tool/call',
+            eventId: randomUUID(),
+            at: now.toISOString(),
+            callId: 'unsafe',
+            name: 'write_file',
+            args: {},
+          },
+        ]);
+      await finishReview(schedule.id, unsafe ? 'error' : 'aborted', '2026-10-24T00:02:00Z');
+      await schedules.tick(new Date('2026-10-24T00:30:00Z'));
+      expect(
+        (await schedules.inbox(owner)).find((item) => item.scheduleId === schedule.id),
+      ).toMatchObject({ status: unsafe ? 'failed' : 'cancelled', attempts: 1, retryAt: null });
+    }
+  });
+  it('does not backfill paused days and refuses catch-up after access revocation', async () => {
+    const schedule = await schedules.create(owner, nightly(), at);
+    const paused = await schedules.setEnabled(owner, schedule.id, schedule.revision, false, at);
+    const resumed = await schedules.setEnabled(
+      owner,
+      schedule.id,
+      paused!.revision,
+      true,
+      new Date('2026-10-26T04:00:00Z'),
+    );
+    await schedules.tick(new Date('2026-10-26T04:00:00Z'));
+    expect(
+      (await schedules.inbox(owner)).filter((item) => item.scheduleId === schedule.id),
+    ).toHaveLength(0);
+    expect(resumed?.nextFireAt).toBe('2026-10-27T00:01:00.000Z');
+    const revoked = await schedules.create(owner, nightly(), at);
+    await pool.query('update users set role=$2 where id=$1', [owner.userId, 'viewer']);
+    await schedules.tick(new Date('2026-10-26T04:00:00Z'));
+    expect(
+      (await schedules.inbox({ ...owner, role: 'viewer' })).find(
+        (item) => item.scheduleId === revoked.id,
+      ),
+    ).toMatchObject({ status: 'skipped', reason: 'access_revoked' });
+    await pool.query('update users set role=$2 where id=$1', [owner.userId, 'developer']);
+  });
+
+  it('does not widen a retry after the source policy changes', async () => {
+    const schedule = await schedules.create(owner, nightly(), at);
+    await schedules.tick(new Date('2026-10-24T00:01:00Z'));
+    await finishReview(schedule.id, 'error', '2026-10-24T00:02:00Z');
+    await metas.setPolicy(source, 'workspace-write');
+    await schedules.tick(new Date('2026-10-24T00:08:00Z'));
+    expect(
+      (await schedules.inbox(owner)).find((item) => item.scheduleId === schedule.id),
+    ).toMatchObject({ status: 'failed', reason: 'access_revoked', attempts: 1, retryAt: null });
+    expect((await schedules.list(owner)).find((item) => item.id === schedule.id)?.enabled).toBe(
+      false,
+    );
+    await metas.setPolicy(source, 'read-only');
   });
   it('reserves capacity once per user, fences old generations and never moves an uncertain VM', async () => {
     const store = new PgEnvironmentStore(db, pool);

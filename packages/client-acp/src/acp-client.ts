@@ -1,3 +1,4 @@
+import { historyPreferencesSchema, type HistoryPreferences } from '@trinity-harness/shared';
 import {
   personaSchema,
   personaHistorySchema,
@@ -315,6 +316,26 @@ export class AcpClient {
     if (!res.ok) throw new Error(`Request failed (${res.status})`);
     if (res.status === 204) return undefined;
     return res.json();
+  }
+  async getHistoryPreferences(signal?: AbortSignal): Promise<HistoryPreferences | null> {
+    const result = (await this.assistantRequest(
+      '/api/me/history-preferences',
+      'GET',
+      undefined,
+      AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(15_000)]),
+    )) as {
+      preferences: unknown;
+    };
+    return result.preferences == null ? null : historyPreferencesSchema.parse(result.preferences);
+  }
+  async setHistoryPreferences(preferences: HistoryPreferences): Promise<HistoryPreferences> {
+    return historyPreferencesSchema.parse(
+      await this.assistantRequest(
+        '/api/me/history-preferences',
+        'PUT',
+        historyPreferencesSchema.parse(preferences),
+      ),
+    );
   }
   async getSpeechPreferences(signal?: AbortSignal): Promise<SpeechPreferences> {
     return speechPreferencesSchema.parse(

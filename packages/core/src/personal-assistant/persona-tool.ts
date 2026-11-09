@@ -106,6 +106,10 @@ export function createPersonaTool(deps: {
       const prompt = events.find((event) => event.eventId === ctx.userPromptId);
       if (prompt?.type !== 'message/user' || removedPromptIds(events).has(prompt.eventId))
         return unavailable('The current user source is unavailable.');
+      if (prompt.trigger?.consolidation === 'review')
+        return unavailable(
+          'Nightly reviews produce proposals; save reviewed changes in Memory settings.',
+        );
       const selection = events.findLast(
         (event) => event.type === 'memory/selection' && event.receipt.promptId === prompt.eventId,
       );

@@ -138,3 +138,13 @@ The default is false; no deployment was changed by the source implementation.
 - [ ] Main date separators pass midnight/DST, spanning-turn, timezone, pagination,
       streaming and draft/focus checks plus desktop/mobile agent-browser inspection.
       No midnight model reset or daily-digest dependency is introduced.
+
+### Nightly review rollout
+
+- [ ] Deploy migration 0022 and matching contracts, server, agent worker, control worker and Web.
+- [ ] Enable existing scheduling infrastructure and explicitly create a nightly review in Scheduled tasks; verify previous-local-day date, DST behavior, one Updates outcome and missed/overlap skips.
+- [ ] Confirm account timezone across browsers; test storage failure feedback and no Main/context reset.
+- [ ] Evaluate real-model digest coverage, topic grouping, contradiction proposals and poisoned/excluded/deleted source handling. Deterministic fixtures do not establish memory quality.
+- [ ] Confirm nightly Persona writes are rejected and review outputs are not indexed as source conversations. Review proposals manually in Memory settings.
+
+Nightly catch-up rollout additionally requires migration 0023 and replacing old control-worker writers (no mixed-version scheduler writers). Verify restart after a multi-day outage, original review dates, queued-work deduplication, seven-local-day expiry, safe retry backoff/caps, cancellation, changed permissions and pause/resume boundaries. Confirm Updates shows expired gaps, attempts and retry times; ordinary missed schedules must still skip.
