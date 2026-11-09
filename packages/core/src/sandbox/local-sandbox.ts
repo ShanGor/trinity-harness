@@ -2,7 +2,17 @@ import { createHash } from 'node:crypto';
 import { readTextFilePage } from './text-file-page.js';
 import { spawn } from 'node:child_process';
 import { glob as fsGlob } from 'node:fs/promises';
-import { mkdir, lstat, readFile, writeFile, open, unlink, stat } from 'node:fs/promises';
+import {
+  mkdir,
+  lstat,
+  readFile,
+  writeFile,
+  open,
+  unlink,
+  stat,
+  realpath,
+  opendir,
+} from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 
@@ -17,7 +27,10 @@ import type {
   ReadFileResult,
   ReadFileOptions,
   SandboxPort,
+  WorkspaceDirectory,
 } from '@trinity-harness/contracts';
+
+import { workspacePathSchema } from '@trinity-harness/contracts';
 
 /** Independent ceiling for binary transfers and full-file editing; text reads stream pages. */
 const STAT_MAX_BYTES = 5 * 1024 * 1024;
@@ -211,7 +224,7 @@ export class LocalSandbox implements SandboxPort {
 
   async readFile(relativePath: string, opts?: ReadFileOptions): Promise<ReadFileResult> {
     opts?.signal?.throwIfAborted();
-    const abs = this.resolve(relativePath);
+    const abs = await this.existingPath(relativePath);
     const handle = await open(
       abs,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -326,6 +339,50 @@ export class LocalSandbox implements SandboxPort {
     const updated = content.replace(oldText, newText);
     await this.writeFile(relativePath, updated);
     return { content: updated, replacements: 1 };
+  }
+
+  /** Resolve existing paths without following any symlink below the workspace root. */
+  private async existingPath(relativePath: string): Promise<string> {
+    const absolute = this.resolve(relativePath);
+    const root = await realpath(this.workspaceRoot);
+    let current = root;
+    for (const segment of path
+      .relative(this.workspaceRoot, absolute)
+      .split(path.sep)
+      .filter(Boolean)) {
+      current = path.join(current, segment);
+      if ((await lstat(current)).isSymbolicLink()) throw new Error('Workspace symlink unavailable');
+    }
+    const canonical = await realpath(current);
+    if (canonical !== root && !canonical.startsWith(root + path.sep))
+      throw new Error('Path outside workspace');
+    return canonical;
+  }
+
+  async listDirectory(relativePath: string, signal?: AbortSignal): Promise<WorkspaceDirectory> {
+    workspacePathSchema.parse(relativePath);
+    signal?.throwIfAborted();
+    const directory = await opendir(await this.existingPath(relativePath));
+    const entries: WorkspaceDirectory['entries'] = [];
+    let truncated = false;
+    for await (const entry of directory) {
+      signal?.throwIfAborted();
+      if (entry.name === 'model-context') continue;
+      if (entries.length === 500) {
+        truncated = true;
+        break;
+      }
+      entries.push({
+        name: entry.name,
+        kind: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other',
+      });
+    }
+    entries.sort(
+      (a, b) =>
+        Number(b.kind === 'directory') - Number(a.kind === 'directory') ||
+        a.name.localeCompare(b.name),
+    );
+    return { entries, truncated };
   }
 
   async glob(pattern: string): Promise<string[]> {

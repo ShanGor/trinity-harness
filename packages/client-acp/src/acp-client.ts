@@ -10,6 +10,11 @@ import {
   type SpeechPreferences,
   newId,
   personalFoldersResponseSchema,
+  workspacePathSchema,
+  workspaceDirectorySchema,
+  readFileResultSchema,
+  type WorkspaceDirectory,
+  type ReadFileResult,
   serverEventSchema,
   turnCancelResponseSchema,
   messageRevisionSchema,
@@ -136,6 +141,42 @@ export class AcpClient {
 
   getSeq(sessionId: string): number {
     return this.lastSeq.get(sessionId) ?? 0;
+  }
+
+  private async readWorkspace(
+    sessionId: string,
+    kind: 'directory' | 'file',
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    workspacePathSchema.parse(path);
+    const response = await fetch(
+      `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/workspace/${kind}?${new URLSearchParams({ path })}`,
+      {
+        headers: this.authHeaders(),
+        cache: 'no-store',
+        signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(120_000)]),
+      },
+    );
+    if (!response.ok)
+      throw new Error(`Workspace ${kind} unavailable (${response.status}). Refresh to try again.`);
+    return response.json();
+  }
+  async listWorkspaceDirectory(
+    sessionId: string,
+    path = '',
+    signal?: AbortSignal,
+  ): Promise<WorkspaceDirectory> {
+    return workspaceDirectorySchema.parse(
+      await this.readWorkspace(sessionId, 'directory', path, signal),
+    );
+  }
+  async readWorkspaceFile(
+    sessionId: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<ReadFileResult> {
+    return readFileResultSchema.parse(await this.readWorkspace(sessionId, 'file', path, signal));
   }
 
   /** One bounded user-view capture; never requests or grants browser input. */

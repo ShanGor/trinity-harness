@@ -20,3 +20,10 @@ export const pendingCreationSchema = z
     title: z.string().max(200).optional(),
   })
   .strict();
+
+export {
+  workspacePathSchema,
+  workspaceDirectorySchema,
+  readFileResultSchema,
+} from '@trinity-harness/contracts';
+export type { WorkspaceDirectory, ReadFileResult } from '@trinity-harness/contracts';

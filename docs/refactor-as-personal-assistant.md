@@ -2,7 +2,7 @@
 
 Status: **Assistant foundations and primary flows implemented. Current behavior and remaining rollout work are recorded in §13.**  
 Date: 2026-10-21
-Revision: Chat is a fully capable ad-hoc task with an automatic workspace; Task binds to a selected workspace. This supersedes the earlier conversation-only Chat boundary. Runtime workspace and tool alignment is implemented; see §13.
+Revision: Chat is a fully capable ad-hoc task with an automatic workspace; Task can bind to a selected workspace, otherwise it receives its own automatic session folder. This supersedes the earlier conversation-only Chat boundary. Runtime workspace and tool alignment is implemented; see §13.
 
 This document records the approved product direction and supporting architecture. The implementation now includes durable session kinds, Main chat, independent conversations/work, history and scoped memory. `docs/design.md` §11.5/§21 describes the runtime and persistence changes. Detailed research and future capabilities below remain design guidance where §13 identifies a narrower initial implementation.
 
@@ -485,6 +485,10 @@ The proposed defaults are concrete so review can focus on product behavior:
 - **Schedules:** designed as a later durable capability with visible availability until delivered.
 
 ## 13. Implemented behavior and current limits
+
+### Workspace default update (2026-11-09)
+
+An explicit personal folder/root or authorized team selection remains authoritative. Without a selection, new Work now gets the same durable session-specific UUIDv7 folder as Chat; it no longer requires choosing a shared root to start. Existing bindings and creation-operation retries remain unchanged. Automatically allocated folders survive reopening and restarts. This supersedes the earlier required Work workspace selection below. The human Workspace drawer lists the configured guest filesystem through existing bounded sandbox argv; it needs no new guest wire operation or host-runtime rollout.
 
 ### Workspace/capability correction (2026-10-21)
 

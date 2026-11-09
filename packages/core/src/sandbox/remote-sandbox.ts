@@ -1,8 +1,15 @@
+import {
+  workspacePathSchema,
+  workspaceDirectorySchema,
+  readFileResultSchema,
+} from '@trinity-harness/contracts';
+import { workspaceViewerScript } from './workspace-viewer-script.js';
 import type {
   GuestRequestPort,
   GuestOperation,
   GuestValue,
   SandboxPort,
+  WorkspaceDirectory,
   ExecOptions,
   ArgvExecOptions,
   ExecResult,
@@ -139,6 +146,33 @@ export class RemoteSandbox implements SandboxPort {
   async editFile(path: string, oldText: string, newText: string): Promise<EditFileResult> {
     const response = result(await this.call({ kind: 'edit', path, oldText, newText }), 'edit');
     return { content: response.content, replacements: response.replacements };
+  }
+  private async workspaceView(
+    kind: 'directory' | 'file',
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    workspacePathSchema.parse(path);
+    // Deployed guests already support bounded argv execution. Human-only reads
+    // must not depend on a new guest operation or text pagination protocol.
+    const response = await this.execArgv(
+      'node',
+      ['--input-type=module', '-e', workspaceViewerScript, path, kind],
+      {
+        maxOutputBytes: 512 * 1024,
+        timeoutMs: 10_000,
+        signal,
+      },
+    );
+    if (response.exitCode !== 0 || response.outputOverflow)
+      throw new Error('Workspace entry unavailable');
+    return JSON.parse(response.stdout);
+  }
+  async listDirectory(path: string, signal?: AbortSignal): Promise<WorkspaceDirectory> {
+    return workspaceDirectorySchema.parse(await this.workspaceView('directory', path, signal));
+  }
+  async previewFile(path: string, signal?: AbortSignal): Promise<ReadFileResult> {
+    return readFileResultSchema.parse(await this.workspaceView('file', path, signal));
   }
   async glob(pattern: string): Promise<string[]> {
     return result(await this.call({ kind: 'glob', pattern }), 'glob').paths;

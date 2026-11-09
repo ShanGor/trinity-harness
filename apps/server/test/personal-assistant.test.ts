@@ -70,7 +70,7 @@ describe.skipIf(!reachable)('explicit conversation memory commands', () => {
 });
 
 describe.skipIf(!reachable)('personal assistant creation API', () => {
-  it('reconciles concurrent creation, preserves the selected kind, and requires a Work workspace', async () => {
+  it('reconciles concurrent creation, preserves the selected kind, and allocates unselected Work workspaces', async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'trinity-personal-'));
     const metas = new PgSessionMetaStore(db);
     const store = new PgSessionStore(db);
@@ -143,7 +143,11 @@ describe.skipIf(!reachable)('personal assistant creation API', () => {
         headers,
         payload: { kind: 'work', creationOperationId: randomUUID() },
       });
-      expect(work.statusCode).toBe(400);
+      expect(work.statusCode).toBe(201);
+      const workId = work.json<{ sessionId: string }>().sessionId;
+      expect((await metas.get(workId))?.workspaceUri).toBe(
+        path.join(workspaceRoot, 'sessions', owner.userId, workId),
+      );
       const wrong = await app.inject({
         method: 'POST',
         url: '/api/sessions',

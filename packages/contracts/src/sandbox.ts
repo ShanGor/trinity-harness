@@ -97,7 +97,42 @@ export interface OpenProcessOptions {
   signal?: AbortSignal | undefined;
 }
 
+/** Bounded immediate directory listing for the human workspace viewer. */
+export const workspacePathSchema = z
+  .string()
+  .max(1000)
+  .refine(
+    (value) =>
+      value === '' ||
+      (!value.includes('\\') &&
+        !value.includes('\0') &&
+        value
+          .split('/')
+          .every(
+            (part) => part !== '' && part !== '.' && part !== '..' && part !== 'model-context',
+          )),
+  );
+export const workspaceDirectorySchema = z
+  .object({
+    entries: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1).max(255),
+            kind: z.enum(['file', 'directory', 'other']),
+          })
+          .strict(),
+      )
+      .max(500),
+    truncated: z.boolean(),
+  })
+  .strict();
+export type WorkspaceDirectory = z.infer<typeof workspaceDirectorySchema>;
+
 export interface SandboxPort {
+  /** Human-only bounded preview; adapters may use the existing guest argv protocol. */
+  previewFile?(path: string, signal?: AbortSignal): Promise<ReadFileResult>;
+  listDirectory?(path: string, signal?: AbortSignal): Promise<WorkspaceDirectory>;
   /** Bind one tool invocation cancellation to every remote I/O operation. */
   withSignal?(signal?: AbortSignal): SandboxPort;
   exec(command: string, opts?: ExecOptions): Promise<ExecResult>;

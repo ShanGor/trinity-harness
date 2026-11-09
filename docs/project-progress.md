@@ -5,6 +5,14 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Current-session workspace viewer and automatic folders (2026-11-09)
+
+- [x] Added a Workspace drawer to Main/Chat/Work headers and side conversations, with per-folder browsing, dotfiles/empty directories, breadcrumbs, refresh, escaped bounded text previews and the bound folder path. The transcript/composer remain mounted.
+- [x] Added authenticated, no-store Sandbox reads with pre/post access checks, traversal/private-context exclusion and symlink checks. Remote listing and text previews use static Node argv through the existing guest exec protocol; the running Node Agent rejected the earlier additive directory RPC and newer text pagination fields, so human browsing now uses the existing bounded exec protocol for both operations. No guest image or Node Agent restart is required.
+- [x] New sessions without an explicit folder selection, including Work, allocate a durable directory named with the session UUIDv7. Explicit personal root/folder and authorized team selections are retained; existing bindings and creation retries are unchanged. Work's picker defaults to automatic.
+- [x] A read-only live check against the affected session's assigned running guest successfully listed its workspace through the existing authenticated Node Agent route. No host filesystem fallback, guest replacement or data migration was used.
+- [x] Validation: full suite passed (1,516 tests; 25 skipped), with focused argv preview checks for UTF-8 byte limits, 2,000-line truncation, shell-like names and symlink containment; lint, typecheck, formatting and production Web build passed. Rolled out the local Podman application stack and verified HTTP 200 through the gateway for both affected session directories, uploads and the bounded text preview. The deployed bundle includes the automatic workspace choice; all five services are running. Host Node Agent and guest generation were preserved.
+
 ### Streamed workspace text reads (2026-11-09)
 
 - [x] Removed the text-read file-size rejection and whole-file buffering. Reads default to 64 KiB/2,000 lines with an explicit 1 MiB page ceiling; sequential continuation seeks directly and supports UTF-8 fragments of long lines. Exact total line counts are provided only at EOF.

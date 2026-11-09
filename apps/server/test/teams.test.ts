@@ -256,7 +256,7 @@ describe('teams & per-session workspaces', () => {
     expect(await bundle.teams.isMember(team.id, bob)).toBe(true);
   });
 
-  it('personal sessions default to $WORKSPACE_ROOT/<user_id>', async () => {
+  it('unselected personal sessions default to a UUIDv7 session folder', async () => {
     const aliceToken = await login(baseUrl, 'alice@x.com');
     const res = await authed(baseUrl, aliceToken, '/api/sessions', {
       method: 'POST',
@@ -266,7 +266,8 @@ describe('teams & per-session workspaces', () => {
     const { sessionId } = (await res.json()) as { sessionId: string };
     const meta = await bundle.metas.get(sessionId);
     expect(meta?.scope).toBe('personal');
-    expect(meta?.workspaceUri).toBe(path.join(bundle.workspaceRoot, alice));
+    expect(meta?.workspaceUri).toBe(path.join(bundle.workspaceRoot, 'sessions', alice, sessionId));
+    expect(sessionId[14]).toBe('7');
   });
 
   it('lets a user browse and select their root or an existing nested folder', async () => {

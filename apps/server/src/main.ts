@@ -545,9 +545,7 @@ async function main(): Promise<void> {
       defaultPolicy,
       blobs: blobStore,
       attachmentCatalog,
-      workspaceSandbox: guestRouter
-        ? (sessionId, root) => assemblyFor(root, sessionId).sandbox
-        : undefined,
+      workspaceSandbox: (sessionId, root) => assemblyFor(root, sessionId).sandbox,
       browserInteraction: browserRuntime ?? undefined,
       browserPreview:
         browserRuntime ??

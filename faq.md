@@ -20,9 +20,27 @@ Keep credentials out of guest images, tool environments, browser payloads and lo
 
 See [architecture](docs/design.md), [production checklist](docs/production-checklist.md) and [latency diagnostics](docs/deployment-guide.md#runtime-latency-diagnostics).
 
+## How are workspaces assigned and protected?
+
+Each session has a workspace path recorded in authenticated session metadata. If you select a personal folder or an authorized team workspace, Trinity binds the session to that location. If you make no selection, it creates a separate persistent folder named with the session’s UUIDv7:
+
+```text
+$WORKSPACE_ROOT/sessions/<user_id>/<session_uuid_v7>
+```
+
+This applies to Chat and Work. The automatic folder survives turns and restarts; it is not a shared personal workspace. Existing sessions keep their recorded workspace.
+
+Session ownership and tenant checks protect personal sessions; team sessions also require current team membership. The model cannot choose an arbitrary filesystem root: tools use the workspace derived from authenticated session metadata and pass through the configured Sandbox and session policy. Read-only policies, explicit denials, approvals and sensitive-file checks still apply.
+
+The human Workspace viewer uses the same session-bound Sandbox route. It checks access before and after a read, restricts paths to the workspace, rejects symlinks, excludes private `model-context` files, and bounds listings and text previews. Viewing a file does not add it to model context or evidence.
+
+In Firecracker mode, the control plane routes filesystem operations to the assigned guest. The Node Agent checks session ownership, workspace containment and VM generation around guest calls. Guests receive no PostgreSQL, Redis, provider or host credentials; routing failures do not fall back to local filesystem access.
+
+These boundaries have limits. Local Sandbox path checks are application-level controls, not proof of operating-system isolation. Development Firecracker configuration is not proof of production tenant isolation. See [architecture](docs/design.md), [runtime implementation](docs/runtime-implementation.md) and the [production checklist](docs/production-checklist.md).
+
 ## Does Chat have fewer tool permissions than Work?
 
-Chat and Work use the same configured tools under their effective session policy. Chat gets an automatic workspace; Work selects one. New Main and side Chat use `workspace-write` with normal approvals, matching the default Work policy. Account admin status does not override a session policy or grant access to the physical VM host.
+Chat and Work use the same configured tools under their effective session policy. Chat and Work get separate automatic workspaces unless the user explicitly selects a folder. New Main and side Chat use `workspace-write` with normal approvals, matching the default Work policy. Account admin status does not override a session policy or grant access to the physical VM host.
 
 An earlier stock-client bug explicitly created Chat with `read-only`, which denies Bash and asks before file writes. The correction applies to new creation operations. Existing sessions and pending retries retain their stored policy; change an affected session through authenticated `POST /api/sessions/:sessionId/policy` with `{"policy":"workspace-write"}` before the next prompt. Explicit restrictions are never automatically upgraded. See [deployment guidance](docs/deployment-guide.md#chat-session-storage).
 

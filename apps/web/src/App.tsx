@@ -67,6 +67,7 @@ import { BrowserActivity } from './browser-activity';
 import { ScheduledTasks } from './scheduled-tasks';
 import { InboxIndicator } from './inbox-indicator';
 import { PersonalComputer } from './personal-computer';
+import { WorkspaceBrowser } from './workspace-browser';
 import { SessionSettingsModal } from './session-settings';
 import { SpeechSettingsModal } from './speech-settings';
 import { loadTimelineWithPrompt } from './conversation-history';
@@ -133,7 +134,8 @@ function workspaceValue(ws: WorkspaceSelection): string {
 }
 
 function workspaceLabel(s: SessionSummary, teams: TeamView[]): string {
-  if (s.kind === 'chat') return 'Session workspace';
+  if (s.kind === 'chat' || s.workspaceUri?.endsWith(`/sessions/${s.userId}/${s.sessionId}`))
+    return 'Session workspace';
   if (s.scope !== 'team') {
     const marker = `/${s.userId}/`;
     const index = s.workspaceUri?.lastIndexOf(marker) ?? -1;
@@ -585,14 +587,14 @@ export default function App() {
             operationId: creationOperation.current,
             kind: mode,
             policy: mode === 'chat' ? 'workspace-write' : policy,
-            ...(mode === 'work' ? { workspace } : {}),
+            ...(mode === 'work' && workspaceChosen ? { workspace } : {}),
             ...(title ? { title } : {}),
           }),
         );
       const pending = client.createSession(
         title,
         mode === 'chat' ? 'workspace-write' : policy,
-        mode === 'work' ? workspace : undefined,
+        mode === 'work' && workspaceChosen ? workspace : undefined,
         {
           kind: mode,
           creationOperationId: creationOperation.current,
@@ -621,7 +623,17 @@ export default function App() {
         creationPromise.current = null;
       }
     },
-    [activateSession, mainSessionId, mode, policy, refreshSessions, workspace, user, draftOrigin],
+    [
+      activateSession,
+      mainSessionId,
+      mode,
+      policy,
+      refreshSessions,
+      workspace,
+      workspaceChosen,
+      user,
+      draftOrigin,
+    ],
   );
 
   const switchSession = useCallback(
@@ -1134,7 +1146,8 @@ export default function App() {
 
       {!sessionId && draftOrigin && (
         <Typography.Paragraph className="related-work-source">
-          Related conversation linked. Review the brief and select a workspace before Start.
+          Related conversation linked. Review the brief before Start. A session workspace is created
+          unless you choose a folder.
         </Typography.Paragraph>
       )}
       {!sessionId && mode === 'work' && (
@@ -1142,20 +1155,26 @@ export default function App() {
           <Typography.Text strong>Workspace</Typography.Text>
           <Select
             aria-label="Work workspace"
-            placeholder="Choose personal or team space"
+            placeholder="Session workspace (automatic)"
             disabled={creationPending}
-            value={workspaceChosen ? workspaceValue(workspace) : undefined}
+            value={workspaceChosen ? workspaceValue(workspace) : 'automatic'}
             options={[
-              { value: 'personal', label: 'Personal workspace' },
+              { value: 'automatic', label: 'Session workspace (automatic)' },
+              { value: 'personal', label: 'Choose personal folder' },
               ...teams.map((team) => ({
                 value: `team:${team.teamId}`,
                 label: `${team.name} · shared with team`,
               })),
             ]}
             onChange={(value) => {
-              setWorkspaceChosen(true);
+              if (value === 'personal') {
+                setBrowsePath(workspace.scope === 'personal' ? (workspace.path ?? '') : '');
+                setFolderPickerOpen(true);
+                return;
+              }
+              setWorkspaceChosen(value !== 'automatic');
               setWorkspace(
-                value === 'personal'
+                value === 'automatic'
                   ? { scope: 'personal' }
                   : { scope: 'team', teamId: value.slice(5) },
               );
@@ -1581,6 +1600,14 @@ export default function App() {
                     Share answer link
                   </Button>
                 )}
+              {sessionId && page === 'conversation' && (
+                <WorkspaceBrowser
+                  key={sessionId}
+                  client={client}
+                  sessionId={sessionId}
+                  workspaceUri={activeSession?.workspaceUri}
+                />
+              )}
               {activeSession?.workspaceUri && (
                 <Tag title={activeSession.workspaceUri}>{workspaceLabel(activeSession, teams)}</Tag>
               )}
@@ -1635,6 +1662,7 @@ export default function App() {
               setWorkspace(
                 browsePath ? { scope: 'personal', path: browsePath } : { scope: 'personal' },
               );
+              setWorkspaceChosen(true);
               setFolderPickerOpen(false);
             }}
             okText="Use this folder"

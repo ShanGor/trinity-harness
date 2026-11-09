@@ -3,6 +3,7 @@ import { App, Button, Flex, Typography } from 'antd';
 import type { AcpClient, SessionSummary } from '@trinity-harness/client-acp';
 import type { ServerEvent } from '@trinity-harness/shared';
 import { applyTimelineEvent, type ChatItem } from './chat-items';
+import { WorkspaceBrowser } from './workspace-browser';
 import { ChatComposer } from './chat-composer';
 
 export function SideConversation({
@@ -91,6 +92,12 @@ export function SideConversation({
         <Typography.Text strong>
           {session.kind === 'work' ? 'Work' : 'Chat'} · {session.title || 'Untitled'}
         </Typography.Text>
+        <WorkspaceBrowser
+          key={session.sessionId}
+          client={client}
+          sessionId={session.sessionId}
+          workspaceUri={session.workspaceUri}
+        />
         <Button onClick={onExpand}>Expand</Button>
         <Button onClick={onClose} aria-label="Close side conversation">
           ×

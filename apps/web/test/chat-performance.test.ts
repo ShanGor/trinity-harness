@@ -540,6 +540,29 @@ describe('chat typing and streaming performance', () => {
     expect(container.querySelector('[aria-label="Work permissions"]')).not.toBeNull();
   });
 
+  it('creates Work without a folder choice using an automatic session workspace', async () => {
+    await click(container.querySelector('.new-chat-button'));
+    await click(container.querySelector('.mode-tabs button:nth-child(2)'));
+    expect(container.textContent).toContain('Session workspace (automatic)');
+    const textarea = container.querySelector('textarea')!;
+    await act(async () => {
+      const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+      set.call(textarea, 'Start automatic Work');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () =>
+      textarea.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }),
+      ),
+    );
+    expect(fake.createSession).toHaveBeenCalledWith(
+      expect.anything(),
+      'workspace-write',
+      undefined,
+      expect.objectContaining({ kind: 'work' }),
+    );
+  });
+
   it('keeps the latest update visible through tool execution without disturbing the draft', async () => {
     await click(container.querySelector('.history-item'));
     await emit({ type: 'message/committed', message: { role: 'user', content: 'Fix sign-in' } });

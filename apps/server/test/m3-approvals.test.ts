@@ -122,7 +122,7 @@ class SseReader {
 describe.skipIf(!hasInfra)('M3 approvals over the distributed topology', () => {
   const QUEUE = `agent-turns-m3-${crypto.randomUUID().slice(0, 8)}`;
   const IDENTITY: Identity = {
-    userId: '00000000-0000-0000-0000-00000000e2e1',
+    userId: '00000000-0000-4000-8000-00000000e2e1',
     tenantId: '00000000-0000-0000-0000-000000000000',
     role: 'developer',
   };

@@ -71,6 +71,9 @@ import {
   personalFoldersQuerySchema,
   serverEventSchema,
   workspaceSelectionSchema,
+  workspacePathSchema,
+  workspaceDirectorySchema,
+  readFileResultSchema,
   sessionSettingsSchema,
   sessionPolicyUpdateSchema,
   messageRevisionSchema,
@@ -1215,9 +1218,9 @@ export async function buildServer(
   ): Promise<string> => {
     if (meta) return sessionWorkspaceRoot(meta, deps.workspaceRoot, auth?.metas);
     const creation = (await deps.store.loadRange(sessionId, { afterSeq: 0, toSeq: 1 }))[0]?.event;
-    if (creation?.type === 'session/created' && creation.kind === 'chat') {
-      if (!creation.workspaceUri) throw new Error('Chat workspace unavailable');
-      return creation.workspaceUri;
+    if (creation?.type === 'session/created') {
+      if (creation.workspaceUri) return creation.workspaceUri;
+      if (creation.kind === 'chat') throw new Error('Chat workspace unavailable');
     }
     return deps.workspaceRoot;
   };
@@ -1741,7 +1744,7 @@ export async function buildServer(
       return reply.code(403).send({ error: 'viewer role is read-only' });
     if (
       (kind === 'chat' && (body.data.workspace || sessionRole === 'task')) ||
-      (kind === 'work' && (!body.data.workspace || sessionRole !== 'task')) ||
+      (kind === 'work' && sessionRole !== 'task') ||
       (!kind && sessionRole) ||
       (sessionRole === 'main' && kind !== 'chat')
     )
@@ -1784,8 +1787,6 @@ export async function buildServer(
     // Workspace scope: personal or team (fail-closed membership check, §12).
     const ws = body.data.workspace;
     const scope = ws?.scope ?? 'personal';
-    // Memory mode (no auth) has no user directory: everything lands in one
-    // shared fallback directory.
     const scopeOwnerId = identity?.userId ?? 'anonymous';
     let scopeId: string | undefined;
     if (scope === 'team') {
@@ -1814,7 +1815,7 @@ export async function buildServer(
       scopeId = team.id;
     }
     let workspaceDir: string | null;
-    if (kind === 'chat') {
+    if (!ws) {
       workspaceDir = await chatWorkspaceDir(deps.workspaceRoot, scopeOwnerId, sessionId);
     } else if (scope === 'personal' && identity) {
       try {
@@ -2415,6 +2416,67 @@ export async function buildServer(
       }
     },
   );
+
+  // Human-only workspace reads; no model context or filesystem routing from the client.
+  for (const kind of ['directory', 'file'] as const) {
+    app.get(`/api/sessions/:sessionId/workspace/${kind}`, async (req, reply) => {
+      const sessionId = await sessionIdOf(req, reply);
+      if (!sessionId) return;
+      const granted = await authorizeSession(sessionId, req.identity, reply);
+      if (!granted) return;
+      const query = z
+        .object({ path: workspacePathSchema.default('') })
+        .strict()
+        .safeParse(req.query);
+      if (!query.success || (kind === 'file' && !query.data.path))
+        return reply.code(400).send({ error: 'invalid workspace path' });
+      if (!deps.workspaceSandbox)
+        return reply.code(501).send({ error: 'Workspace browsing is not configured' });
+      const controller = new AbortController();
+      const abort = (): void => controller.abort();
+      req.raw.once('aborted', abort);
+      reply.raw.once('close', abort);
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]);
+      try {
+        const root = await workspaceRootFor(granted.meta, sessionId);
+        const raw = deps.workspaceSandbox(sessionId, root);
+        const sandbox = raw.withSignal?.(signal) ?? raw;
+        let result: unknown;
+        if (kind === 'directory') {
+          if (!sandbox.listDirectory)
+            return reply
+              .code(501)
+              .send({ error: 'Workspace browsing requires an updated runtime' });
+          result = workspaceDirectorySchema.parse(
+            await sandbox.listDirectory(query.data.path, signal),
+          );
+        } else {
+          result = readFileResultSchema.parse(
+            sandbox.previewFile
+              ? await sandbox.previewFile(query.data.path, signal)
+              : await sandbox.readFile(query.data.path, {
+                  maxBytes: 64 * 1024,
+                  limit: 2000,
+                  signal,
+                }),
+          );
+        }
+        if (!(await authorizeSession(sessionId, req.identity, reply))) return;
+        return reply
+          .header('cache-control', 'private, no-store')
+          .header('x-content-type-options', 'nosniff')
+          .send(result);
+      } catch {
+        return reply.code(503).send({
+          error:
+            'Workspace entry unavailable. The runtime may need updating, or the entry may have changed.',
+        });
+      } finally {
+        req.raw.removeListener('aborted', abort);
+        reply.raw.removeListener('close', abort);
+      }
+    });
+  }
 
   // ---- M4: attachments & blob storage (docs/design.md §10) ------------------
 

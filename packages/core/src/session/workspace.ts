@@ -4,7 +4,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { SessionMeta, SessionMetaStore, SandboxPort } from '@trinity-harness/contracts';
 
-/** Allocate only server-generated session paths beneath the shared deployment disk. */
+/** Allocate automatic session paths beneath the deployment disk (Chat or unselected Work). */
 export async function chatWorkspaceDir(
   root: string,
   userId: string,
