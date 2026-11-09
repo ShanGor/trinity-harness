@@ -328,6 +328,7 @@ export class CoreAgentLoop implements AgentLoop {
         purpose: ModelUsage['purpose'],
         samples: TokenUsage[],
         requestId = newId(),
+        durationMs?: number,
       ): Promise<void> => {
         const tokens = normalizeTokenUsage(sumTokenUsage(samples));
         const entry: ModelUsage = {
@@ -335,6 +336,7 @@ export class CoreAgentLoop implements AgentLoop {
           promptId,
           model,
           purpose: runOpts?.taskBudget ? 'subagent' : purpose,
+          ...(durationMs !== undefined ? { durationMs } : {}),
           tokens,
           ...priceUsage(model, tokens, this.opts.pricing ?? {}),
         };
@@ -411,7 +413,7 @@ export class CoreAgentLoop implements AgentLoop {
           recordLatency('duration');
           modelSpan.setStatus({ code: 2 });
           modelSpan.end();
-          await recordUsage(request.model, purpose, [], requestId);
+          await recordUsage(request.model, purpose, [], requestId, performance.now() - modelStarted);
           throw err;
         }
         const samples: TokenUsage[] = [];
@@ -442,7 +444,7 @@ export class CoreAgentLoop implements AgentLoop {
           } finally {
             recordLatency('duration');
             modelSpan.end();
-            await recordUsage(request.model, purpose, samples, requestId);
+            await recordUsage(request.model, purpose, samples, requestId, performance.now() - modelStarted);
           }
         })();
       };

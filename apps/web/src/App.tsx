@@ -2162,10 +2162,14 @@ function AssistantContent({
         </div>
       )}
       <AttachmentList attachments={item.attachments} />
-      {(item.tools.length > 0 || !!item.activity?.length) && (
+      {(item.tools.length > 0 || !!item.activity?.length || !!item.usage?.length) && (
         <details className="turn-activity">
           <summary>
             Execution details · {item.activity?.length ?? 0} updates · {item.tools.length} tools
+            {' · '}Time spent {formatExecutionTime([
+              ...item.tools.map((tool) => tool.durationMs),
+              ...(item.usage ?? []).map((usage) => usage.durationMs),
+            ])}
           </summary>
           {!!item.activity?.length && (
             <ol className="turn-progress">
@@ -2182,7 +2186,7 @@ function AssistantContent({
             size="small"
             items={item.tools.map((tool) => ({
               key: tool.toolCallId,
-              label: `${tool.status === 'in_progress' ? '⏳' : tool.status === 'failed' ? '❌' : '✅'} ${tool.title}`,
+              label: `${tool.status === 'in_progress' ? '⏳' : tool.status === 'failed' ? '❌' : '✅'} ${tool.title} · ${formatExecutionTime([tool.durationMs])}`,
               children: (
                 <Typography.Text code style={{ whiteSpace: 'pre-wrap' }}>
                   {tool.content ?? ''}
@@ -2190,6 +2194,13 @@ function AssistantContent({
               ),
             }))}
           />
+          {!!item.usage?.length && (
+            <ul className="execution-model-times">
+              {item.usage.map((usage) => (
+                <li key={usage.requestId}>{usage.model} · {formatExecutionTime([usage.durationMs])}</li>
+              ))}
+            </ul>
+          )}
         </details>
       )}
       {!item.streaming && (
@@ -2200,6 +2211,13 @@ function AssistantContent({
       <MessageControls client={client} {...controls} item={item} prompt={prompt} editable={false} />
     </article>
   );
+}
+
+function formatExecutionTime(values: Array<number | undefined>): string {
+  if (values.every((value) => value === undefined)) return '—';
+  const totalMs = values.reduce<number>((sum, value) => sum + (value ?? 0), 0);
+  if (totalMs < 1000) return `${Math.round(totalMs)} ms`;
+  return `${(totalMs / 1000).toFixed(1)} s`;
 }
 
 /** M4: renders message attachments — images inline, files as links. */

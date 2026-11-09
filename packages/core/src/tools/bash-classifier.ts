@@ -11,6 +11,12 @@ export function isReadOnlyBashCommand(command: string | undefined): boolean {
   const [binary, ...args] = argv;
   if (args.some((arg) => arg.includes('../') || arg === '..')) return false;
   if (
+    binary === 'date' &&
+    (args.length === 0 ||
+      (args.length === 1 && ['-u', '--utc', '--universal'].includes(args[0]!)))
+  )
+    return true;
+  if (
     [
       'pwd',
       'ls',

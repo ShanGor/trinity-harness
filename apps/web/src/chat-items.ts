@@ -19,6 +19,8 @@ export type ToolCallView = {
   title: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
   content?: string;
+  startedAt?: number;
+  durationMs?: number;
 };
 
 /** M4 multimodal: an attachment reference rendered from the blob store. */
@@ -241,6 +243,11 @@ export function mergeToolUpdate(
     title: existing?.title || update.title || update.toolCallId,
     status: update.status,
     content: update.content ?? existing?.content,
+    startedAt: existing?.startedAt ?? (update.status === 'in_progress' ? Date.parse(at) : undefined),
+    durationMs:
+      update.status === 'completed' || update.status === 'failed'
+        ? existing?.startedAt !== undefined ? Math.max(0, Date.parse(at) - existing.startedAt) : existing?.durationMs
+        : existing?.durationMs,
   };
   item = {
     ...item,

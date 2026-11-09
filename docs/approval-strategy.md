@@ -20,7 +20,7 @@ Explicit `denied` remains final. Explicit `ask` restrictions remain in force. A 
 
 When both attachment authorization and events are available, the tool returns the recorded session-relative `workspacePath`. This is a writable copy; original blob contents remain immutable and may differ after a user edit. Agents must not search `/tmp`, runtime caches or filesystem roots to find attachments.
 
-Literal bounded shell reads are classified as reads, so they do not require a task plan. Supported examples include `sed -n '833,1000p' uploads/book.txt`, `grep -n insight uploads/book.txt`, and `cat uploads/book.txt | head -20`. File redirects, execution options, arbitrary interpreters and compound shell programs are not assumed safe. Out-of-workspace literal absolute reads are rejected by preflight. Use file tools and separate independent reads instead of turning unsupported syntax into approval requests.
+Literal bounded shell reads are classified as reads, so they do not require a task plan. Supported examples include `sed -n '833,1000p' uploads/book.txt`, `grep -n insight uploads/book.txt`, and `cat uploads/book.txt | head -20`. The no-argument `date` query and its UTC forms (`date -u`, `date --utc`, `date --universal`) are also read-only; setting the clock, reading an input file, or supplying a format string is not in the automatic allowlist. File redirects, execution options, arbitrary interpreters and compound shell programs are not assumed safe. Out-of-workspace literal absolute reads are rejected by preflight. Use file tools and separate independent reads instead of turning unsupported syntax into approval requests.
 
 ### Browser
 

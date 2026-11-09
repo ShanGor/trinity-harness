@@ -9,6 +9,9 @@ import {
 describe('classifyBashCommand', () => {
   it('allows plain sandbox-binary commands', () => {
     expect(classifyBashCommand('ls -la')).toBe('workspace-internal');
+    expect(classifyBashCommand('date')).toBe('workspace-internal');
+    expect(classifyBashCommand('date -u')).toBe('workspace-internal');
+    expect(classifyBashCommand('date --utc')).toBe('workspace-internal');
     expect(classifyBashCommand('npm test')).toBe('workspace-internal');
     expect(classifyBashCommand('git status')).toBe('workspace-internal');
     expect(classifyBashCommand('make build')).toBe('workspace-internal');
@@ -67,7 +70,11 @@ it.each([
   'find . -delete',
   "find . -exec rm '{}' ';'",
   'rg --pre evil query',
-])('never automatically allows destructive or programmable invocation %s', (command) => {
+  'date -s 12:00',
+  'date --set=12:00',
+  'date --file=clock.txt',
+  'date +%Y-%m-%d',
+])('keeps effectful or unsupported invocation gated %s', (command) => {
   expect(classifyBashCommand(command)).toBe('needs-approval');
 });
 
