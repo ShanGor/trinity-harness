@@ -176,4 +176,43 @@ describe('bounded Zendriver MCP transport', () => {
     });
     await connection.dispose();
   });
+
+  it.each(['browser_goto', 'browser_wait_for_load'])(
+    'bounds %s on a guest connection without shortening startup or retrying',
+    async (name) => {
+      const timeout = new AbortController();
+      const deadline = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(timeout.signal);
+      const process = new Process((message, p) => {
+        if (message.method === 'initialize') p.respond(message.id, initialize);
+        if (
+          message.method === 'tools/call' &&
+          (message.params as { name: string }).name === 'browser_status'
+        )
+          p.respond(message.id, { content: [], structuredContent: {} });
+      });
+      const connection = new ZendriverMcpConnection(process, 100_000);
+      try {
+        await connection.initialize();
+        expect(deadline).toHaveBeenLastCalledWith(100_000);
+        await connection.call('browser_status', {});
+        expect(deadline).toHaveBeenLastCalledWith(100_000);
+        const result = connection.call(name, {});
+        const rejected = expect(result).rejects.toMatchObject({
+          code: 'DRIVER_FAILED',
+          recovery: 'conclude',
+          message: expect.stringContaining('within 30 seconds'),
+        });
+        expect(deadline).toHaveBeenLastCalledWith(30_000);
+        timeout.abort();
+        await rejected;
+        expect(process.kills).toBe(1);
+        expect(process.writes.filter((message) => message.method === 'tools/call')).toHaveLength(2);
+        await expect(connection.call(name, {})).rejects.toMatchObject({ code: 'DRIVER_FAILED' });
+        expect(process.writes.filter((message) => message.method === 'tools/call')).toHaveLength(2);
+      } finally {
+        deadline.mockRestore();
+        await connection.dispose();
+      }
+    },
+  );
 });

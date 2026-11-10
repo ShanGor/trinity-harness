@@ -1993,6 +1993,148 @@ it('preflights routine navigation and search without exposing input or requestin
   expect(calls).toHaveLength(before);
 });
 
+it.each(['搜寻演讲嘉宾', '搜尋講者', '搜索嘉宾', 'Search speakers'])(
+  'preflights a classified search field named %s while retaining consequence checks',
+  async (name) => {
+    const original = surface.targets[1]!.name;
+    try {
+      surface.targets[1]!.name = name;
+      const { registry, run } = await assembly();
+      await run('snapshot', { operation: 'read_page' });
+      expect(
+        await registry.assess(
+          {
+            id: 'fill',
+            name: 'browser',
+            args: {
+              operation: 'fill',
+              snapshotId: 'observation',
+              ref: 'r1',
+              text: 'speaker',
+            },
+          },
+          { sessionId: 's', workspaceRoot: '/ws' },
+        ),
+      ).toMatchObject({ decision: 'allowed' });
+      surface.targets[1]!.name = `${name} password`;
+      await run('changed', { operation: 'read_page' });
+      expect(
+        await registry.assess(
+          {
+            id: 'fill',
+            name: 'browser',
+            args: {
+              operation: 'fill',
+              snapshotId: 'observation2',
+              ref: 'r1',
+              text: 'speaker',
+            },
+          },
+          { sessionId: 's', workspaceRoot: '/ws' },
+        ),
+      ).toMatchObject({ decision: 'unavailable' });
+    } finally {
+      surface.targets[1]!.name = original;
+    }
+  },
+);
+
+it('repairs a reference from the wrong capture using only validated current-turn passages', async () => {
+  const { registry, store, blobs, run } = await assembly();
+  await run('original', { operation: 'get_page_text' });
+  // A new capture has the same URL and block IDs, but exposes only the heading.
+  const fresh = { ...observation(), observationId: 'fresh' };
+  fresh.hash = browserHash(fresh);
+  await blobs.put('browser/s/fresh.json', new TextEncoder().encode(JSON.stringify(fresh)), {
+    mimeType: 'application/json',
+  });
+  const overview = deliver(
+    fresh,
+    { operation: 'read_observation', observationId: 'fresh', blockIds: ['b0'] },
+    'fresh',
+    8192,
+  )!;
+  await store.append('s', [
+    {
+      ...meta(),
+      type: 'tool/call',
+      name: 'browser',
+      callId: 'fresh',
+      args: { operation: 'read_observation' },
+    },
+    { ...meta(), type: 'tool/result', callId: 'fresh', isError: false, value: overview },
+  ]);
+  registry.register(createResearchTool(store, blobs));
+  const notes = {
+    question: 'What did the source say?',
+    findings: [
+      {
+        claim: 'The source uses original punctuation.',
+        relation: 'context',
+        sources: [{ observationId: 'fresh', blockId: 'b1' }],
+      },
+    ],
+    openQuestions: [],
+    readyToAnswer: true,
+  };
+  const rejected = await registry.execute(
+    { id: 'notes', name: 'research', args: { action: 'record', notes } },
+    { sessionId: 's', workspaceRoot: '/ws' },
+  );
+  expect(rejected).toMatchObject({ isError: true, value: { reason: 'RANGE_NOT_EXPOSED' } });
+  const { recoverySources } = rejected.value as {
+    recoverySources: Array<{
+      observationId: string;
+      blockId: string;
+      start: number;
+      end: number;
+      quote: string;
+    }>;
+  };
+  expect(recoverySources[0]).toMatchObject({
+    observationId: 'observation',
+    blockId: 'b1',
+    quote: capture.blocks[1]!.text,
+  });
+  expect(recoverySources.length).toBeLessThanOrEqual(4);
+  for (const source of recoverySources) {
+    expect(Array.from(source.quote).length).toBeLessThanOrEqual(200);
+    expect(await resolveBrowserSource(source, await store.load('s'), 1, 's', blobs)).toMatchObject(
+      source,
+    );
+  }
+  const retry = { ...notes, findings: [{ ...notes.findings[0]!, sources: [recoverySources[0]!] }] };
+  expect(
+    await registry.execute(
+      { id: 'fixed', name: 'research', args: { action: 'record', notes: retry } },
+      { sessionId: 's', workspaceRoot: '/ws' },
+    ),
+  ).toMatchObject({ isError: false });
+  // Starting another turn cannot recover citations from the previous turn.
+  await store.append('s', [
+    {
+      ...meta(),
+      type: 'message/user',
+      surfaceOp: 'append',
+      content: [{ kind: 'text', text: 'next' }],
+    },
+  ]);
+  expect(
+    await registry.execute(
+      { id: 'old', name: 'research', args: { action: 'record', notes } },
+      { sessionId: 's', workspaceRoot: '/ws' },
+    ),
+  ).toMatchObject({ isError: true, value: { recoverySources: [] } });
+  // Suggestions also fail closed if the original artifact no longer passes integrity checks.
+  blobs.data.set('blob://browser/s/observation.json', new TextEncoder().encode('{}'));
+  expect(
+    await registry.execute(
+      { id: 'corrupt', name: 'research', args: { action: 'record', notes: retry } },
+      { sessionId: 's', workspaceRoot: '/ws' },
+    ),
+  ).toMatchObject({ isError: true, value: { recoverySources: [] } });
+});
+
 it.each([
   ['Delete report.txt', 'ask'],
   ['Pay HK$680', 'ask'],

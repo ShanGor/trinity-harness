@@ -5,6 +5,14 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Research behavior and recovery — 2026-11-10
+
+Implemented the [session-driven improvement plan](agent-behavior-improvement-plan-2026-11-10.md): bounded validated citation-repair candidates from already delivered same-URL passages, multilingual native search classification/preflight, replay-derived repeated-discovery and unavailable-target guidance, and 30-second MCP navigation/load command deadlines while preserving guest startup allowance. Existing ownership, exact exposure, approval and unknown-effect disposal rules remain authoritative; no automatic retry, forced answer, cumulative browser quota or driver fallback was added.
+
+General evidence-strength guidance now distinguishes facts from location/affiliation labels, missing search results and unexplained dates. Phone guidance emphasizes current-request language, useful progress after long waits and compact supported research answers. The opt-in personal evaluator adds synthetic uncertain-biography/brief-phone and data-residency-gap cases, retains committed delivery metadata and fingerprints the relevant guidance/evidence code. These are development fixtures, not semantic quality proof.
+
+Validation: `pnpm test --exclude 'apps/web/test/**'` passed 1,293 tests (25 opt-in tests skipped). The final focused browser/evidence/guidance/MCP/phone rerun passed 160 tests. Repository lint and full workspace typecheck passed; changed-file formatting and whitespace checks passed. Backend-only changes did not require frontend unit tests or a Web build. No deployment, live guest/browser acceptance or paid model evaluation has been performed. In particular, model language/factual compliance and the slow-page deadline tradeoff remain rollout gates.
+
 ### Current-session workspace viewer and automatic folders (2026-11-09)
 
 - [x] Added a Workspace drawer to Main/Chat/Work headers and side conversations, with per-folder browsing, dotfiles/empty directories, breadcrumbs, refresh, escaped bounded text previews and the bound folder path. The transcript/composer remain mounted.

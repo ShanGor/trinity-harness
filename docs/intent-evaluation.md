@@ -54,6 +54,15 @@ Promote changes based on representative repeated task success without material r
 
 ## General action economy evaluation
 
+The 2026-11-10 development cases `uncertain-biography-phone` and
+`research-evidence-gap` exercise evidence-strength judgment, unexplained dates,
+qualified answers and Chinese brief-phone presentation. The evaluator commits
+fixture delivery hints before dispatch and reports them alongside the prompts.
+These fixed-page fixtures do not measure live web discovery, blocked sources or
+guest timeout behavior. They have not established a semantic quality gain; use
+the repeated, human-reviewed comparison in the
+[improvement plan](agent-behavior-improvement-plan-2026-11-10.md).
+
 Development fixtures `retry-original-objective` and `bounded-readonly-analysis` exercise short continuations after an overbroad assistant proposal and diagnosis from sufficient supplied evidence. Compare these with `scoped-configuration-change` to ensure useful authorized edits remain possible. They are synthetic cross-domain cases, not production prompt rules or a host-health workflow.
 
 Reports include action metrics after the fixture's seeded history: calls by tool, failed results, declared mutation/unknown-effect calls and runtime guidance. Mutation counts describe attempted calls, not confirmed effects. Review final workspace differences and outcomes alongside the transcript; fewer calls alone is not success. The source fingerprint list includes general guidance and tool-budget implementation. If using a temporary baseline source overlay, record its effective source hashes separately because the report's on-disk hashes describe the checkout, not transformed code.

@@ -111,14 +111,12 @@ export class ZendriverMcpConnection implements ZendriverClient {
     params: unknown,
     signal?: AbortSignal,
     limit: number = BROWSER_LIMITS.transport,
+    timeoutMs: number = this.requestTimeoutMs,
   ): Promise<unknown> {
     signal?.throwIfAborted();
     if (this.failed || this.pending) throw new BrowserDriverError('DRIVER_FAILED');
     const id = this.nextId++;
-    const deadline = AbortSignal.any([
-      ...(signal ? [signal] : []),
-      AbortSignal.timeout(this.requestTimeoutMs),
-    ]);
+    const deadline = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]);
     return await new Promise<unknown>((resolve, reject) => {
       const cleanup = (): void => deadline.removeEventListener('abort', abort);
       const abort = (): void => {
@@ -134,7 +132,7 @@ export class ZendriverMcpConnection implements ZendriverClient {
               ? undefined
               : new BrowserDriverError(
                   'DRIVER_FAILED',
-                  `The browser driver did not respond within ${this.requestTimeoutMs / 1000} seconds. Its process was stopped; the operation may have taken effect. Check the browser runtime and host-managed guest egress before retrying.`,
+                  `The browser driver did not respond within ${timeoutMs / 1000} seconds. Its process was stopped; the operation may have taken effect. Check the browser runtime and host-managed guest egress before retrying.`,
                   'conclude',
                 ),
           );
@@ -198,6 +196,11 @@ export class ZendriverMcpConnection implements ZendriverClient {
         { name, arguments: args },
         signal,
         image ? Math.ceil((BROWSER_LIMITS.image * 4) / 3) + 4096 : BROWSER_LIMITS.transport,
+        // Guest startup may need a longer transport allowance; a page load must
+        // not inherit it. Expiry still disposes the channel, without retrying.
+        ['browser_goto', 'browser_wait_for_load'].includes(name)
+          ? Math.min(this.requestTimeoutMs, 30_000)
+          : this.requestTimeoutMs,
       ),
     );
     if (result.isError) throw new BrowserDriverError('DRIVER_FAILED');

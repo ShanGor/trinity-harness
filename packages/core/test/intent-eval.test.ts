@@ -69,6 +69,9 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
       '../src/context/context-manager.ts',
       '../src/tool-registry.ts',
       '../src/tools/browser.ts',
+      '../src/tools/browser-evidence.ts',
+      '../src/tools/research.ts',
+      '../src/loop/phone-guidance.ts',
     ];
     const sources = await Promise.all(
       sourcePaths.map(async (source) => ({
@@ -155,20 +158,38 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
         const startingSeq = (await store.load(sessionId)).length;
         const start = performance.now();
         const outcomes = [];
-        for (const prompt of task.prompts)
+        for (const prompt of task.prompts) {
+          let promptSeq: number | undefined;
+          const input =
+            `${prompt}\n\nAvailable fixture files (complete list): ${Object.keys(task.files).join(', ') || 'none'}.` +
+            ('pages' in task
+              ? `\nAvailable synthetic browser pages: ${Object.keys(task.pages).join(', ')}`
+              : '');
+          if ('delivery' in task) {
+            await store.append(sessionId, [
+              {
+                type: 'message/user',
+                eventId: crypto.randomUUID(),
+                at: new Date().toISOString(),
+                surfaceOp: 'append',
+                content: [{ kind: 'text', text: input }],
+                delivery: task.delivery,
+              },
+            ]);
+            promptSeq = (await store.load(sessionId)).length;
+          }
           outcomes.push(
             await loop.run(
               sessionId,
-              `${prompt}\n\nAvailable fixture files (complete list): ${Object.keys(task.files).join(', ') || 'none'}.` +
-                ('pages' in task
-                  ? `\nAvailable synthetic browser pages: ${Object.keys(task.pages).join(', ')}`
-                  : ''),
+              input,
               { emit: () => undefined },
               {
                 signal: AbortSignal.timeout(personal ? 120_000 : 90_000),
+                ...(promptSeq === undefined ? {} : { promptSeq }),
               },
             ),
           );
+        }
         const events = await store.load(sessionId);
         const usages = events.flatMap((event) =>
           event.type === 'model/usage' ? [event.usage] : [],
@@ -197,6 +218,7 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
           finalWorkspace: Object.fromEntries(sandbox.files),
           requestManifests: events.filter((event) => event.type === 'model/context'),
           prompts: task.prompts,
+          delivery: 'delivery' in task ? task.delivery : undefined,
           rubric: task.rubric,
           latencyMs: Math.round(performance.now() - start),
           outcomes,

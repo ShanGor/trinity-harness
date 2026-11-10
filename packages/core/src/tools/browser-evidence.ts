@@ -27,6 +27,55 @@ export class BrowserSourceError extends Error {
     this.name = 'BrowserSourceError';
   }
 }
+
+/** Suggestions are validated delivered passages, never automatic citation substitutions. */
+export async function browserSourceCandidates(
+  source: { observationId: string; blockId: string },
+  events: readonly SessionEvent[],
+  promptSeq: number,
+  sessionId: string,
+  blobs: BlobStore,
+  signal?: AbortSignal,
+): Promise<ResolvedBrowserSource[]> {
+  const observation = await loadBrowserObservation(
+    blobs,
+    events,
+    sessionId,
+    source.observationId,
+    signal,
+  );
+  const deliveries = browserDeliveries(events, sessionId, promptSeq)
+    .filter((delivery) => delivery.result.url === observation.url)
+    .reverse();
+  const candidates = deliveries.flatMap((delivery) =>
+    delivery.result.receipt.map((range) => ({
+      observationId: delivery.result.observationId,
+      ...range,
+    })),
+  );
+  // Prefer the requested block in this or an earlier capture of the same URL.
+  candidates.sort(
+    (a, b) => Number(b.blockId === source.blockId) - Number(a.blockId === source.blockId),
+  );
+  const result: ResolvedBrowserSource[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates.slice(0, 32)) {
+    signal?.throwIfAborted();
+    const reference = { ...candidate, end: Math.min(candidate.end, candidate.start + 200) };
+    const key = JSON.stringify(reference);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      result.push(
+        await resolveBrowserSource(reference, events, promptSeq, sessionId, blobs, signal),
+      );
+      if (result.length === 4) break;
+    } catch {
+      signal?.throwIfAborted(); // Corrupt or unavailable passages confer no evidence authority.
+    }
+  }
+  return result;
+}
 /** Resolve only committed, current-turn exposure. A stored blob alone is insufficient. */
 export async function resolveBrowserSource(
   source: { observationId: string; blockId: string; start?: number; end?: number },

@@ -196,3 +196,32 @@ it('classifies native navigation/search/expansion separately from friendly custo
     'unknown',
   ]);
 });
+
+it('recognizes multilingual native search fields without trusting arbitrary friendly labels', () => {
+  setup(`
+    <input type="text" name="query" placeholder="搜寻演讲嘉宾">
+    <input type="text" name="search" aria-label="搜尋講者">
+    <input type="text" name="query" aria-label="Search speakers">
+    <input type="text" role="searchbox" aria-label="Search speakers">
+    <search><input type="text" aria-label="Find speakers"></search>
+    <input type="text" name="profile" aria-label="Search profile">
+    <button>搜寻演讲嘉宾</button>
+    <button role="searchbox" aria-label="Search speakers">Custom action</button>
+    <input type="password" name="query" aria-label="Search" value="">
+  `);
+  const result = browserSurfaceSchema.parse(
+    browser.window.eval(browserSurfaceScript('interactive')),
+  );
+  expect(result.targets.map((target) => target.actionKind)).toEqual([
+    'search',
+    'search',
+    'search',
+    'search',
+    'search',
+    'unknown',
+    'unknown',
+    'unknown',
+    'unknown',
+  ]);
+  expect(result.targets.at(-1)).toMatchObject({ sensitive: true });
+});

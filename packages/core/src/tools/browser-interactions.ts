@@ -46,7 +46,7 @@ export function browserSurfaceScript(
       if(!visible(el)) continue;
       const tag=el.tagName;
       let role=el.getAttribute('role') || ({A:el.hasAttribute('href')?'link':'',BUTTON:'button',INPUT:el.type==='checkbox'?'checkbox':el.type==='radio'?'radio':el.type==='button'||el.type==='submit'?'button':'textbox',TEXTAREA:'textbox',SELECT:'combobox',SUMMARY:'button',MAIN:'main',ARTICLE:'article',SECTION:'region',FORM:'form',H1:'heading',H2:'heading',H3:'heading',H4:'heading',H5:'heading',H6:'heading'}[tag]||'');
-      if(!role || (${JSON.stringify(filter)}==='interactive' && !['button','link','textbox','checkbox','radio','combobox','tab','menuitem','switch'].includes(role))) continue;
+      if(!role || (${JSON.stringify(filter)}==='interactive' && !['button','link','textbox','searchbox','checkbox','radio','combobox','tab','menuitem','switch'].includes(role))) continue;
       if(targets.length>=100) {truncated=true;break;}
       const secret=sensitive(el);
       const labelled=(el.getAttribute('aria-labelledby')||'').split(/\\s+/).slice(0,10).map(id=>document.getElementById(id)?.innerText||'').join(' ');
@@ -55,7 +55,7 @@ export function browserSurfaceScript(
       if(tag==='A'&&el.hasAttribute('href')) {
         try { const url=new URL(el.getAttribute('href'),location.href); if(['http:','https:'].includes(url.protocol)&&!url.username&&!url.password) actionKind='navigation'; } catch { /* Unparseable destinations remain unknown. */ }
       } else if(tag==='SUMMARY'&&el.parentElement?.tagName==='DETAILS') actionKind='expand';
-      else if((tag==='INPUT'&&el.type==='search')||el.closest('form[role=search]')) actionKind='search';
+      else if((tag==='INPUT'&&(['text','search'].includes(el.type))&&(el.type==='search'||role==='searchbox'||(el.type==='text'&&/^(q|query|search|search_query|searchquery)$/i.test(el.name)&&/\\b(search|query|find)\\b|搜索|搜尋|搜寻|查找/i.test(name))))||el.closest('form[role=search],search')) actionKind='search';
       const r=el.getBoundingClientRect();
       const elementPath=path(el); if(elementPath.length>80){truncated=true;continue;}
       targets.push({actionKind,ref:'r'+targets.length,role:role.slice(0,100),name:Array.from(name.replace(/\\s+/g,' ').trim()).slice(0,150).join(''),path:elementPath,disabled:Boolean(el.disabled)||el.getAttribute('aria-disabled')==='true',sensitive:secret,activation:tag==='BUTTON'||(tag==='A'&&el.hasAttribute('href'))||(tag==='INPUT'&&['button','submit','reset'].includes(el.type))?'dom':tag==='INPUT'&&['checkbox','radio'].includes(el.type)?'dom':'pointer',box:{x:r.x,y:r.y,width:r.width,height:r.height}});

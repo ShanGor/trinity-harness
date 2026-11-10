@@ -153,7 +153,7 @@ The managed browser's network boundary belongs in its sandbox: explicitly allowe
 
 Logs contain command IDs, bounded error codes, timing and versions. Avoid upstream debug CDP logging in normal deployment because it can contain scripts, page values or credentials. Metrics compare navigation/readiness failures, block/challenge observations, action outcomes, latency and runtime restarts without storing page bodies.
 
-The private MCP command deadline remains 30 seconds. An expired deadline cancels the command, terminates the owned process and preserves a fixed safe timeout explanation in the existing `DRIVER_FAILED` result; caller cancellation remains distinct. The message does not expose upstream arguments or responses, establish a network cause, authorize retrying unknown effects, or change browser availability.
+Private MCP connections default to 30 seconds; the guest composition permits 100 seconds for startup and other transport operations. Navigation (`browser_goto`) and load readiness (`browser_wait_for_load`) use the smaller of the connection allowance and 30 seconds, including on the guest path. This is a per-command deadline, not a total tool latency guarantee. An expired deadline cancels the command, terminates the owned process and preserves a fixed safe timeout explanation in the existing `DRIVER_FAILED` result; caller cancellation remains distinct. The message does not expose upstream arguments or responses, establish a network cause, authorize retrying unknown effects, or change browser availability. See the [2026-11-10 research behavior plan](agent-behavior-improvement-plan-2026-11-10.md) for deployment and slow-page acceptance gates.
 
 ## 8. Implementation sequence and acceptance
 

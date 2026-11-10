@@ -109,6 +109,10 @@ export function progressGuidance(
   let repeated = 0;
   const recentBrowserReads: boolean[] = [];
   const seenBrowserBlocks = new Set<string>();
+  const discoveredLinks = new Set<string>();
+  const recentDiscovery: boolean[] = [];
+  const unavailableTargets = new Set<string>();
+  const repeatedUnavailableTargets = new Set<string>();
   let headingOnlySelection = false;
   let failures = 0;
   let liveAccessDenied = false;
@@ -130,11 +134,40 @@ export function progressGuidance(
       }
     }
     if (call?.name === 'browser') {
+      const args = call.args as { operation?: unknown; url?: unknown } | null;
       const parsed = browserResultSchema.safeParse(event.value);
+      const target =
+        args?.operation === 'navigate' && typeof args.url === 'string'
+          ? fingerprint(args.url)
+          : undefined;
+      const browserError = browserErrorSchema.safeParse(event.value);
+      if (
+        target &&
+        event.isError &&
+        browserError.success &&
+        browserError.data.code === 'PAGE_UNAVAILABLE'
+      ) {
+        if (unavailableTargets.has(target)) repeatedUnavailableTargets.add(target);
+        unavailableTargets.add(target);
+      } else if (target && !event.isError && parsed.success && !parsed.data.saved) {
+        unavailableTargets.delete(target);
+        repeatedUnavailableTargets.delete(target);
+      }
       const saved = ['read_observation', 'search_observation'].includes(
         String((call.args as { operation?: unknown } | null)?.operation),
       );
       if (!event.isError && parsed.success) {
+        if (args?.operation === 'web_search') {
+          const links = (parsed.data.links ?? []).flatMap((link) => {
+            const url = new URL(link.url);
+            if (url.origin === new URL(parsed.data.url).origin) return [];
+            url.hash = '';
+            return [fingerprint(url.href)];
+          });
+          recentDiscovery.push(links.some((link) => !discoveredLinks.has(link)));
+          if (recentDiscovery.length > 4) recentDiscovery.shift();
+          for (const link of links) discoveredLinks.add(link);
+        }
         if (!saved && !parsed.data.saved) {
           failures = 0;
           liveAccessDenied = false;
@@ -149,10 +182,10 @@ export function progressGuidance(
         );
         if (recentBrowserReads.length > 6) recentBrowserReads.shift();
         for (const signature of signatures) seenBrowserBlocks.add(signature);
-        const args = call.args as { operation?: unknown; blockIds?: unknown } | null;
+        const readArgs = call.args as { operation?: unknown; blockIds?: unknown } | null;
         headingOnlySelection =
-          args?.operation === 'read_observation' &&
-          Array.isArray(args.blockIds) &&
+          readArgs?.operation === 'read_observation' &&
+          Array.isArray(readArgs.blockIds) &&
           blocks.length > 0 &&
           blocks.every((block) => block.kind === 'heading');
         const signature = JSON.stringify(
@@ -214,6 +247,14 @@ export function progressGuidance(
     }
   }
   const advice: string[] = actionGuidance(events.slice(promptSeq));
+  if (repeatedUnavailableTargets.size)
+    advice.push(
+      'A navigation repeated a target already reported PAGE_UNAVAILABLE in this turn. Changing unrelated arguments or succeeding on another page does not establish that target recovered. Do not automatically retry it again; use delivered evidence or a different relevant source unless fresh evidence establishes recovery. This is source-specific advice, not a browser-wide outage.',
+    );
+  if (recentDiscovery.length === 4 && recentDiscovery.filter((novel) => !novel).length >= 3)
+    advice.push(
+      'At least three of the last four web searches discovered no new destination URLs beyond earlier search results. This does not prove the question is answered or the snippets are complete. Identify the unresolved user requirement and a plausible new source before another query variation; read relevant discovered sources or provide supported findings with explicit uncertainty when further discovery is unlikely to change the answer. Do not infer a fact from missing search results. This is strategy advice, not a tool limit or stop rule.',
+    );
   if (researchAvailable && citationFailures >= 2)
     advice.push(
       "Research citations have been rejected repeatedly. Prefer a delivered browser observation/block/range reference to resolve exact text without retyping. For legacy sources, change the quote, not just the claim: copy a short contiguous passage directly from the observed excerpt, preserving punctuation, or remove the unsupported finding and record the remaining notes. Check that each passage supports its claim. Successful browser reads remain usable. This is recovery advice, not a stop request. The final answer should address the user's question and evidence limits; omit internal research bookkeeping, retry plans, and complaints about the validator.",

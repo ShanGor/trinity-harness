@@ -111,6 +111,9 @@ node scripts/load-test.mjs 50
 
 ## Browser deployment
 
+- [ ] Research behavior recovery: deploy matching server/worker and Browser Runtime application code from the [2026-11-10 plan](agent-behavior-improvement-plan-2026-11-10.md). Verify same-URL citation repair with exact exposure/ownership fences, fresh multilingual native search controls, and real-guest navigation/load deadlines without automatic retries or lost unknown-effect handling. No migration or guest/browser binary rebuild is required.
+- [ ] Compare baseline/candidate research outcomes with fixed model/settings and repeated synthetic plus fresh held-out tasks. Review factual support, unresolved nationality/data-location evidence, conflicting dates, Chinese brief-phone language/progress/final delivery, latency and cost. Confirm the shorter page deadline does not materially regress legitimate slow sources. Source implementation and deterministic tests do not establish production quality improvement.
+
 Existing owner-controlled CDP is the supported live-reading mode; see [deployment-guide.md](./deployment-guide.md) for endpoint/owner configuration and the opt-in local fixture check. Managed Chrome provisioning and enforced browser-network/privacy isolation remain deployment TODOs; they are not automatic fallbacks or current guarantees.
 
 - [ ] Remote viewer rollout: build both pinned Zendriver patches into the guest image and Browser Runtime release, drain through the maintenance API, preserve user data volumes, and wake a fresh generation. Verify trusted HTML drag/drop, native slider dragging and immediate human clicks through the authenticated owner route. Record actual input/refresh latency on the deployed VM; command-count reductions and local Chrome fixtures do not establish a remote latency target.

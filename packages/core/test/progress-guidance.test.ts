@@ -464,6 +464,83 @@ it('does not mistake genuinely new saved pages for stalled research regardless o
   expect(progressGuidance(events, 1, 100, Infinity)).toBeNull();
 });
 
+it('detects search variations with no new destinations without equating discovery with evidence', () => {
+  const search = (id: string, urls: string[]): SessionEvent[] => {
+    const events = evidencePair(id, [`Different snippet ${id}`], false, 'web_search');
+    const result = events[1]!;
+    if (result.type !== 'tool/result') throw new Error('Expected result');
+    result.value = {
+      ...browserResultSchema.parse(result.value),
+      url: `https://search.invalid/?q=${id}`,
+      links: urls.map((url) => ({ url, title: 'Discovered destination', blockId: 'b0' })),
+    };
+    return events;
+  };
+  const events = [
+    user(),
+    ...['one', 'two', 'three', 'four'].flatMap((id) =>
+      search(id, [`https://source.invalid/private-name#${id}`, `https://search.invalid/?q=${id}`]),
+    ),
+  ];
+  const warning = progressGuidance(events, 1, 5, Infinity);
+  expect(warning).toContain('three of the last four web searches');
+  expect(warning).toContain('Do not infer a fact from missing search results');
+  expect(warning).not.toContain('private-name');
+  expect(progressGuidance(structuredClone(events), 1, 5, Infinity)).toBe(warning);
+  expect(
+    progressGuidance([...events, ...search('new', ['https://source.invalid/new'])], 1, 6, Infinity),
+  ).toBe(warning);
+  expect(
+    progressGuidance(
+      [
+        ...events,
+        ...search('new', ['https://source.invalid/new']),
+        ...search('newer', ['https://source.invalid/newer']),
+      ],
+      1,
+      7,
+      Infinity,
+    ),
+  ).toBeNull();
+  const next = [...events, user()];
+  expect(progressGuidance(next, next.length, 1, Infinity)).toBeNull();
+});
+
+it('keeps repeated unavailable-target advice across unrelated success and clears only matching recovery', () => {
+  const navigation = (id: string, url: string, failed: boolean): SessionEvent[] => {
+    const events = browserPair(id, 'navigate', failed, 'PAGE_UNAVAILABLE');
+    const call = events[0]!;
+    const result = events[1]!;
+    if (call.type !== 'tool/call' || result.type !== 'tool/result')
+      throw new Error('Expected pair');
+    call.args = { operation: 'navigate', url };
+    if (!failed) result.value = { ...browserResultSchema.parse(result.value), url };
+    return events;
+  };
+  const url = 'https://unavailable.invalid/private';
+  const events = [
+    user(),
+    ...navigation('one', url, true),
+    ...navigation('unrelated', 'https://working.invalid/', false),
+    ...navigation('two', url, true),
+  ];
+  const warning = progressGuidance(events, 1, 4, Infinity);
+  expect(warning).toContain('target already reported PAGE_UNAVAILABLE');
+  expect(warning).not.toContain(url);
+  expect(warning).not.toContain('three browser channel failures');
+  expect(
+    progressGuidance(
+      structuredClone([...events, ...navigation('other', 'https://working.invalid/', false)]),
+      1,
+      5,
+      Infinity,
+    ),
+  ).toBe(warning);
+  expect(
+    progressGuidance([...events, ...navigation('recovered', url, false)], 1, 5, Infinity),
+  ).toBeNull();
+});
+
 describe('general action guidance', () => {
   function read(id: string, path: string, text = 'do-not-copy-result'): SessionEvent[] {
     return [

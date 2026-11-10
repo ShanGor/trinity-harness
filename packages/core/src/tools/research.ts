@@ -13,8 +13,10 @@ import { prefixCommandArgv } from './command-prefix.js';
 import { defineTool } from './define-tool.js';
 import {
   BrowserSourceError,
+  browserSourceCandidates,
   resolveBrowserQuote,
   resolveBrowserSource,
+  type ResolvedBrowserSource,
 } from './browser-evidence.js';
 import { browserDeliveries } from './browser-artifacts.js';
 
@@ -127,7 +129,11 @@ function citationExcerpt(text: string, quote: string): string {
   return text.slice(Math.max(0, start), Math.max(0, start) + 600);
 }
 
-function browserSourceFailure(error: unknown, path: string): ToolResult {
+function browserSourceFailure(
+  error: unknown,
+  path: string,
+  recoverySources: ResolvedBrowserSource[] = [],
+): ToolResult {
   return {
     isError: true,
     value: {
@@ -138,7 +144,8 @@ function browserSourceFailure(error: unknown, path: string): ToolResult {
         error instanceof BrowserSourceError
           ? error.message
           : 'Browser evidence is unavailable or failed integrity/authorization checks.'
-      }`,
+      }. Reuse an already delivered reference from recoverySources if it supports the claim, or read the missing range from the original observation. References from different captures are not interchangeable. Do not retry the same rejected reference unchanged.`,
+      recoverySources,
     },
   };
 }
@@ -244,7 +251,28 @@ export function createResearchTool(store: SessionStore, blobs?: BlobStore): Tool
               );
             } catch (error) {
               ctx.signal?.throwIfAborted();
-              return browserSourceFailure(error, path);
+              let recoverySources: Awaited<ReturnType<typeof browserSourceCandidates>> = [];
+              if (
+                blobs &&
+                error instanceof BrowserSourceError &&
+                ['RANGE_NOT_EXPOSED', 'UNKNOWN_BLOCK', 'INVALID_RANGE', 'RANGE_TOO_LARGE'].includes(
+                  error.code,
+                )
+              ) {
+                try {
+                  recoverySources = await browserSourceCandidates(
+                    { observationId: source.observationId, blockId: source.blockId },
+                    events,
+                    promptSeq,
+                    ctx.sessionId,
+                    blobs,
+                    ctx.signal,
+                  );
+                } catch {
+                  ctx.signal?.throwIfAborted();
+                }
+              }
+              return browserSourceFailure(error, path, recoverySources);
             }
             continue;
           }
