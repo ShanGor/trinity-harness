@@ -1,3 +1,4 @@
+import { workspaceLinkPath, openWorkspaceDocument } from './workspace-links';
 import { chatDateHeadings } from './chat-dates';
 import { saveHistoryTimezone, useHistoryTimezone } from './history-timezone';
 import { publishResponseSpeech } from './response-speech-events';
@@ -2146,7 +2147,25 @@ function AssistantContent({
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             components={{
-              a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
+              a: ({ href, children, ...props }) => {
+                const path = workspaceLinkPath(href, item.citationList);
+                return path && browserSessionId ? (
+                  <a
+                    {...props}
+                    href={href}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      openWorkspaceDocument(browserSessionId, path);
+                    }}
+                  >
+                    {children}
+                  </a>
+                ) : (
+                  <a {...props} href={href} target="_blank" rel="noreferrer">
+                    {children}
+                  </a>
+                );
+              },
               table: ({ children }) => (
                 <div className="md-table-scroll">
                   <table>{children}</table>
@@ -2222,7 +2241,13 @@ function AssistantContent({
         </details>
       )}
       {!item.streaming && (
-        <AnswerCitationList citations={item.citationList} renderImage={renderEvidenceImage} />
+        <AnswerCitationList
+          onOpenWorkspace={
+            browserSessionId ? (path) => openWorkspaceDocument(browserSessionId, path) : undefined
+          }
+          citations={item.citationList}
+          renderImage={renderEvidenceImage}
+        />
       )}
       {item.recall && <MemoryContextDisclosure receipt={item.recall} />}
       <UsagePanel records={item.usage ?? EMPTY_USAGE} scope="Turn" active={item.streaming} />

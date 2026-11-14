@@ -146,13 +146,14 @@ export const workspaceDocumentRequestSchema = z.discriminatedUnion('operation', 
       operation: z.literal('save'),
       path: workspacePathSchema,
       expectedVersion: z.string().regex(/^[a-f0-9]{64}$/),
-      content: z.string().max(65536),
+      content: z.string().max(5 * 1024 * 1024),
     })
     .strict(),
 ]);
 export type WorkspaceDocumentRequest = z.infer<typeof workspaceDocumentRequestSchema>;
 export const workspaceDocumentSchema = z
   .object({
+    isText: z.boolean().optional(),
     version: z
       .string()
       .regex(/^[a-f0-9]{64}$/)
@@ -161,7 +162,10 @@ export const workspaceDocumentSchema = z
       .string()
       .max(7 * 1024 * 1024)
       .optional(),
-    text: z.string().max(65536).optional(),
+    text: z
+      .string()
+      .max(5 * 1024 * 1024)
+      .optional(),
     revisions: z
       .array(
         z.object({ version: z.string().regex(/^[a-f0-9]{64}$/), capturedAt: z.string() }).strict(),

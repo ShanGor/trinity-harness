@@ -1,3 +1,4 @@
+import { workspacePathSchema } from '@trinity-harness/shared';
 import { WorkspaceDocumentView } from './workspace-document';
 import { useEffect, useState, type ReactElement } from 'react';
 import {
@@ -80,6 +81,29 @@ export function WorkspaceBrowser({
       setFile(null);
     });
   };
+  useEffect(() => {
+    const receive = (event: Event): void => {
+      const detail: unknown = (event as CustomEvent<unknown>).detail;
+      if (
+        !detail ||
+        typeof detail !== 'object' ||
+        !('sessionId' in detail) ||
+        detail.sessionId !== sessionId ||
+        !('path' in detail)
+      )
+        return;
+      const parsed = workspacePathSchema.safeParse(detail.path);
+      if (!parsed.success || !parsed.data) return;
+      leave(() => {
+        setDirectory(null);
+        setFile(parsed.data);
+        setPath(parsed.data.split('/').slice(0, -1).join('/'));
+        setOpen(true);
+      });
+    };
+    window.addEventListener('trinity:workspace-open', receive);
+    return () => window.removeEventListener('trinity:workspace-open', receive);
+  }, [sessionId, dirty]);
   const segments = path ? path.split('/') : [];
   return (
     <>

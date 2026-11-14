@@ -148,3 +148,5 @@ Use successful export receipts for mechanical publication checks and inspect bou
 Export task diagnostics now include bounded rejection reason/repair codes and event sequences from the shared eligibility projection. CSS grid cells represented by block spans remain inert HTML with `layout-html`; do not infer table semantics or repeat capture to clear representation warnings. See [the acceptance report](docs/export-verification-acceptance-2026-11-14.md).
 
 Human workspace editor revisions use the authenticated Sandbox document capability and private durable workspace snapshots; preserve complete-text bounds, optimistic version checks, no-follow descriptor traversal and fail-closed interrupted locks. Captured/proposed snapshots are not a successful-save audit or automatic history of tool writes. See design “Human workspace preview and editor revisions”.
+
+Workspace artifact links open the originating session drawer. Keep full human previews separate from model read excerpts; CodeMirror renders editor viewports while complete UTF-8 file edits are bounded to 5 MiB. Preserve private Sandbox staging and revision/conflict checks for large saves.

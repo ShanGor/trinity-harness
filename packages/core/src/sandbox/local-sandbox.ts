@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { workspaceDocumentScript } from './workspace-document-script.js';
 import {
   workspaceDocumentRequestSchema,
@@ -371,23 +372,40 @@ export class LocalSandbox implements SandboxPort {
     signal?: AbortSignal,
   ): Promise<WorkspaceDocument> {
     workspaceDocumentRequestSchema.parse(request);
-    const result = await this.execArgv(
-      'node',
-      [
-        '--input-type=module',
-        '-e',
-        workspaceDocumentScript,
-        ...(JSON.stringify(request).match(/[\s\S]{1,4000}/gu) ?? []),
-      ],
-      {
-        maxOutputBytes: 8 * 1024 * 1024,
-        timeoutMs: 30_000,
-        signal,
-      },
-    );
-    if (result.exitCode !== 0 || result.outputOverflow)
-      throw new Error(result.stderr || 'Workspace document unavailable');
-    return workspaceDocumentSchema.parse(JSON.parse(result.stdout));
+    const stagingPath =
+      request.operation === 'save'
+        ? `model-context/workspace-edits/${randomUUID()}.txt`
+        : undefined;
+    try {
+      if (stagingPath && request.operation === 'save')
+        await this.writeBytes(stagingPath, Buffer.from(request.content));
+      const payload =
+        stagingPath && request.operation === 'save'
+          ? { ...request, content: undefined, stagingPath }
+          : request;
+      const result = await this.execArgv(
+        'node',
+        [
+          '--input-type=module',
+          '-e',
+          workspaceDocumentScript,
+          ...(JSON.stringify(payload).match(/[\s\S]{1,4000}/gu) ?? []),
+        ],
+        { maxOutputBytes: 10 * 1024 * 1024, timeoutMs: 30_000, signal },
+      );
+      if (result.exitCode !== 0 || result.outputOverflow)
+        throw new Error(result.stderr || 'Workspace document unavailable');
+      const parsed = workspaceDocumentSchema.parse(JSON.parse(result.stdout));
+      if (parsed.isText && parsed.base64 !== undefined) {
+        return workspaceDocumentSchema.parse({
+          version: parsed.version,
+          text: Buffer.from(parsed.base64, 'base64').toString('utf8'),
+        });
+      }
+      return parsed;
+    } finally {
+      if (stagingPath) await this.removeFile(stagingPath);
+    }
   }
 
   async listDirectory(relativePath: string, signal?: AbortSignal): Promise<WorkspaceDirectory> {

@@ -2456,42 +2456,46 @@ export async function buildServer(
     },
   );
 
-  app.post('/api/sessions/:sessionId/workspace/document', async (req, reply) => {
-    const sessionId = await sessionIdOf(req, reply);
-    if (!sessionId) return;
-    const granted = await authorizeSession(sessionId, req.identity, reply);
-    if (!granted) return;
-    const parsed = workspaceDocumentRequestSchema.safeParse(req.body);
-    if (!parsed.success || !parsed.data.path)
-      return reply.code(400).send({ error: 'Invalid document request' });
-    if (!deps.workspaceSandbox) return reply.code(501).send({ error: 'Workspace unavailable' });
-    const controller = new AbortController();
-    const abort = (): void => controller.abort();
-    req.raw.once('aborted', abort);
-    reply.raw.once('close', abort);
-    try {
-      const root = await workspaceRootFor(granted.meta, sessionId);
-      const sandbox = deps.workspaceSandbox(sessionId, root);
-      if (!sandbox.workspaceDocument)
-        return reply.code(501).send({ error: 'Runtime update required' });
-      const result = await sandbox.workspaceDocument(
-        parsed.data,
-        AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]),
-      );
-      if (!(await authorizeSession(sessionId, req.identity, reply))) return;
-      return reply
-        .header('cache-control', 'private, no-store')
-        .send(workspaceDocumentSchema.parse(result));
-    } catch {
-      return reply.code(409).send({
-        error:
-          'Document unavailable or changed. Reload before saving; inspect history after an interrupted save.',
-      });
-    } finally {
-      req.raw.removeListener('aborted', abort);
-      reply.raw.removeListener('close', abort);
-    }
-  });
+  app.post(
+    '/api/sessions/:sessionId/workspace/document',
+    { bodyLimit: 32 * 1024 * 1024 },
+    async (req, reply) => {
+      const sessionId = await sessionIdOf(req, reply);
+      if (!sessionId) return;
+      const granted = await authorizeSession(sessionId, req.identity, reply);
+      if (!granted) return;
+      const parsed = workspaceDocumentRequestSchema.safeParse(req.body);
+      if (!parsed.success || !parsed.data.path)
+        return reply.code(400).send({ error: 'Invalid document request' });
+      if (!deps.workspaceSandbox) return reply.code(501).send({ error: 'Workspace unavailable' });
+      const controller = new AbortController();
+      const abort = (): void => controller.abort();
+      req.raw.once('aborted', abort);
+      reply.raw.once('close', abort);
+      try {
+        const root = await workspaceRootFor(granted.meta, sessionId);
+        const sandbox = deps.workspaceSandbox(sessionId, root);
+        if (!sandbox.workspaceDocument)
+          return reply.code(501).send({ error: 'Runtime update required' });
+        const result = await sandbox.workspaceDocument(
+          parsed.data,
+          AbortSignal.any([controller.signal, AbortSignal.timeout(120_000)]),
+        );
+        if (!(await authorizeSession(sessionId, req.identity, reply))) return;
+        return reply
+          .header('cache-control', 'private, no-store')
+          .send(workspaceDocumentSchema.parse(result));
+      } catch {
+        return reply.code(409).send({
+          error:
+            'Document unavailable or changed. Reload before saving; inspect history after an interrupted save.',
+        });
+      } finally {
+        req.raw.removeListener('aborted', abort);
+        reply.raw.removeListener('close', abort);
+      }
+    },
+  );
 
   // Human-only workspace reads; no model context or filesystem routing from the client.
   for (const kind of ['directory', 'file'] as const) {

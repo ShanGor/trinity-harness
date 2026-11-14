@@ -18,6 +18,14 @@ it.each(['local', 'remote'])(
             {
               call: async (_session, input, signal) => {
                 const operation = guestOperationSchema.parse(input);
+                if (operation.kind === 'writeBytes') {
+                  await local.writeBytes(operation.path, Buffer.from(operation.data, 'base64'));
+                  return { kind: 'ok' };
+                }
+                if (operation.kind === 'remove') {
+                  await local.removeFile(operation.path);
+                  return { kind: 'ok' };
+                }
                 if (operation.kind !== 'exec' || !operation.args)
                   throw new Error('Expected argv exec');
                 return guestValueSchema.parse({
@@ -62,7 +70,7 @@ it.each(['local', 'remote'])(
           revision: original.version!,
         }),
       ).toEqual({ version: original.version, text: 'before\n' });
-      const full = '你'.repeat(20000);
+      const full = '你'.repeat(700000);
       await sandbox.workspaceDocument({
         operation: 'save',
         path: 'a.txt',
@@ -99,7 +107,7 @@ it.each(['local', 'remote'])(
       await writeFile(path.join(root, 'large'), 'a'.repeat(65537));
       expect(
         (await sandbox.workspaceDocument({ operation: 'read', path: 'large' })).text,
-      ).toBeUndefined();
+      ).toHaveLength(65537);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

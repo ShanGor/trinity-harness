@@ -1,9 +1,24 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react';
-import { Alert, Button, Flex, Input, Select, Spin } from 'antd';
-import ReactMarkdown from 'react-markdown';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { Alert, Button, Flex, Select, Spin } from 'antd';
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
+import remarkRehype from 'remark-rehype';
+import rehypeStringify from 'rehype-stringify';
+const WorkspaceEditor = lazy(() => import('./workspace-editor'));
 import remarkGfm from 'remark-gfm';
 import type { AcpClient } from '@trinity-harness/client-acp';
 import type { WorkspaceDocument, WorkspaceDocumentRequest } from '@trinity-harness/shared';
+
+export function renderWorkspaceMarkdown(text: string): string {
+  return String(
+    unified()
+      .use(remarkParse)
+      .use(remarkGfm)
+      .use(remarkRehype, { allowDangerousHtml: true })
+      .use(rehypeStringify, { allowDangerousHtml: true })
+      .processSync(text),
+  );
+}
 
 /** A bounded unified comparison; unchanged prefix/suffix are omitted. */
 export function compareText(before: string, after: string): string {
@@ -35,6 +50,12 @@ function Differences({
   after: string;
   label: string;
 }): ReactElement {
+  if (before.length + after.length > 256 * 1024)
+    return (
+      <Suspense fallback={<Spin />}>
+        <WorkspaceEditor value={compareText(before, after)} path="comparison.diff" readOnly />
+      </Suspense>
+    );
   return (
     <pre aria-label={label} style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
       {compareText(before, after)
@@ -84,6 +105,7 @@ export function WorkspaceDocumentView({
     client.workspaceDocument(sessionId, request, operationController.current?.signal);
   const [document, setDocument] = useState<WorkspaceDocument>();
   const [draft, setDraft] = useState('');
+  const [showChanges, setShowChanges] = useState(false);
   const [mode, setMode] = useState('preview');
   const [history, setHistory] = useState<NonNullable<WorkspaceDocument['revisions']>>([]);
   const [baseline, setBaseline] = useState<string>();
@@ -127,11 +149,14 @@ export function WorkspaceDocumentView({
   };
   const [downloadUrl, setDownloadUrl] = useState('');
   useEffect(() => {
-    if (document?.base64 === undefined) {
+    if (document?.base64 === undefined && document?.text === undefined) {
       setDownloadUrl('');
       return;
     }
-    const bytes = Uint8Array.from(atob(document.base64), (c) => c.charCodeAt(0));
+    const bytes =
+      document?.text !== undefined
+        ? new TextEncoder().encode(document.text)
+        : Uint8Array.from(atob(document!.base64!), (c) => c.charCodeAt(0));
     const url = URL.createObjectURL(
       new Blob([bytes], {
         type: path.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream',
@@ -139,7 +164,7 @@ export function WorkspaceDocumentView({
     );
     setDownloadUrl(url);
     return () => URL.revokeObjectURL(url);
-  }, [document?.base64, path]);
+  }, [document?.base64, document?.text, path]);
   const download = (): void => {
     if (!downloadUrl) return;
     const link = window.document.createElement('a');
@@ -157,6 +182,13 @@ export function WorkspaceDocumentView({
       webp: 'image/webp',
     } as Record<string, string>
   )[extension ?? ''];
+  const renderedMarkdown = useMemo(
+    () =>
+      /\.(md|markdown)$/i.test(path) && document?.text !== undefined
+        ? renderWorkspaceMarkdown(document.text)
+        : '',
+    [path, document?.text],
+  );
   return (
     <Flex vertical gap={12}>
       <Flex gap={8} wrap>
@@ -164,7 +196,10 @@ export function WorkspaceDocumentView({
         <Button disabled={document?.text === undefined || busy} onClick={() => setMode('edit')}>
           Edit
         </Button>
-        <Button disabled={document?.base64 === undefined} onClick={download}>
+        <Button
+          disabled={document?.base64 === undefined && document?.text === undefined}
+          onClick={download}
+        >
           Download original
         </Button>
         <Button
@@ -187,14 +222,13 @@ export function WorkspaceDocumentView({
       {busy && <Spin />}
       {mode === 'edit' && document?.text !== undefined && (
         <>
-          <Input.TextArea
-            aria-label="File contents"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            autoSize={{ minRows: 12, maxRows: 30 }}
-            disabled={busy}
-          />
-          <Differences label="Unsaved changes" before={document.text} after={draft} />
+          <Suspense fallback={<Spin />}>
+            <WorkspaceEditor path={path} value={draft} onChange={setDraft} readOnly={busy} />
+          </Suspense>
+          <Button onClick={() => setShowChanges((value) => !value)}>Compare changes</Button>
+          {showChanges && (
+            <Differences label="Unsaved changes" before={document.text} after={draft} />
+          )}
           <Flex gap={8}>
             <Button
               disabled={busy || draft === document.text}
@@ -278,15 +312,13 @@ export function WorkspaceDocumentView({
           />
         ) : document.text !== undefined ? (
           extension === 'md' || extension === 'markdown' ? (
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                img: () => <span>[Image: download the original to view linked media]</span>,
-                a: ({ children }) => <span>{children}</span>,
-              }}
-            >
-              {document.text}
-            </ReactMarkdown>
+            <iframe
+              title="Markdown preview"
+              sandbox=""
+              referrerPolicy="no-referrer"
+              srcDoc={`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'"><style>body{font:16px/1.6 system-ui;overflow-wrap:anywhere;padding:16px}pre{overflow:auto}img,svg{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px}</style>${renderedMarkdown}`}
+              style={{ width: '100%', height: '70vh', border: 0 }}
+            />
           ) : extension === 'html' || extension === 'htm' ? (
             <iframe
               title="HTML preview"
@@ -303,7 +335,7 @@ export function WorkspaceDocumentView({
         ) : (
           <Alert
             type="info"
-            message="Visual preview is unavailable for this format or file size. Download the original. Text editing is limited to complete UTF-8 files up to 64 KiB; downloads up to 5 MiB."
+            message="Visual preview is unavailable for this format or file size. Download the original. Text editing is limited to complete UTF-8 files up to 5 MiB; downloads up to 5 MiB."
           />
         ))}
     </Flex>

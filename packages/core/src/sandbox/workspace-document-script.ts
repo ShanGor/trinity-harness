@@ -42,10 +42,10 @@ try {
   if (req.operation === 'read' && !req.revision) {
     const data = await bytes(parent, name, 5 * 1024 * 1024);
     let text;
-    if (data.length <= 65536 && !data.includes(0)) {
+    if (!data.includes(0)) {
       try { text = new TextDecoder('utf-8', {fatal:true}).decode(data); } catch { text = undefined; }
     }
-    process.stdout.write(JSON.stringify({version: hash(data), base64: data.toString('base64'), ...(text === undefined ? {} : {text})}));
+    process.stdout.write(JSON.stringify({version: hash(data), base64: data.toString('base64'), isText: text !== undefined}));
   } else {
     const privateDir = await directory(root, 'model-context', true);
     const revisions = await directory(privateDir, 'workspace-revisions', true);
@@ -55,27 +55,33 @@ try {
       if (names.length > 100) throw Error('Revision limit reached');
       const result = [];
       for (const n of names) {
-        const record = JSON.parse((await bytes(store, n, 400000)).toString());
+        const record = JSON.parse((await bytes(store, n, 32 * 1024 * 1024)).toString());
         result.push({version: record.version, capturedAt: record.capturedAt});
       }
       result.sort((a,b) => b.capturedAt.localeCompare(a.capturedAt));
       process.stdout.write(JSON.stringify({revisions: result}));
     } else if (req.operation === 'read') {
       if (!/^[a-f0-9]{64}$/.test(req.revision)) throw Error('Invalid revision');
-      const record = JSON.parse((await bytes(store, req.revision + '.json', 400000)).toString());
+      const record = JSON.parse((await bytes(store, req.revision + '.json', 32 * 1024 * 1024)).toString());
       if (hash(Buffer.from(record.text)) !== req.revision || record.version !== req.revision) throw Error('Invalid revision');
-      process.stdout.write(JSON.stringify({version: record.version, text: record.text}));
+      process.stdout.write(JSON.stringify({version: record.version, base64: Buffer.from(record.text).toString('base64'), isText:true}));
     } else if (req.operation === 'save') {
       lockPath = at(store) + '/save.lock';
       lock = await open(lockPath, 'wx', 0o600);
-      const old = await bytes(parent, name, 65536);
+      const old = await bytes(parent, name, 5 * 1024 * 1024);
       const modeHandle = await open(at(parent) + '/' + name, C.O_RDONLY | C.O_NOFOLLOW);
       const mode = (await modeHandle.stat()).mode & 0o777; await modeHandle.close();
       if (hash(old) !== req.expectedVersion) throw Error('File changed. Reload before saving.');
       const oldText = new TextDecoder('utf-8', {fatal:true}).decode(old);
       if (old.includes(0)) throw Error('Binary editing unavailable');
+      if (req.stagingPath) {
+        if (!/^model-context\/workspace-edits\/[a-f0-9-]{36}\.txt$/.test(req.stagingPath)) throw Error('Invalid staging path');
+        const privateDir = await directory(root, 'model-context');
+        const edits = await directory(privateDir, 'workspace-edits');
+        req.content = new TextDecoder('utf-8', {fatal:true}).decode(await bytes(edits, req.stagingPath.split('/').at(-1), 5 * 1024 * 1024));
+      }
       const next = Buffer.from(req.content, 'utf8');
-      if (next.length > 65536) throw Error('Edit limit is 64 KiB');
+      if (next.length > 5 * 1024 * 1024) throw Error('Edit limit is 5 MiB');
       const names = (await readdir(at(store))).filter(n => n.endsWith('.json'));
       if (names.length >= 98) throw Error('Revision limit reached');
       // Both snapshots are durable before replacement; history records captured versions,
@@ -93,11 +99,11 @@ try {
       const h = await open(temp, 'wx', 0o600);
       try {
         await h.chmod(mode); await h.writeFile(next); await h.sync();
-        if (hash(await bytes(parent, name, 65536)) !== req.expectedVersion) throw Error('File changed. Reload before saving.');
+        if (hash(await bytes(parent, name, 5 * 1024 * 1024)) !== req.expectedVersion) throw Error('File changed. Reload before saving.');
         await rename(temp, at(parent) + '/' + name);
         await parent.sync();
       } finally { await h.close(); await unlink(temp).catch(e => { if (e.code !== 'ENOENT') throw e; }); }
-      process.stdout.write(JSON.stringify({version: hash(next), text: req.content}));
+      process.stdout.write(JSON.stringify({version: hash(next)}));
     } else throw Error('Invalid operation');
   }
 } catch (e) {

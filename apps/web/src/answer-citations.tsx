@@ -6,8 +6,10 @@ import type { AnswerCitation } from '@trinity-harness/shared';
 export const AnswerCitationList = memo(function AnswerCitationList({
   citations,
   renderImage,
+  onOpenWorkspace,
 }: {
   citations?: AnswerCitation[];
+  onOpenWorkspace?: (path: string) => void;
   renderImage?: (uri: string) => ReactElement;
 }): ReactElement | null {
   const [open, setOpen] = useState(false);
@@ -44,6 +46,10 @@ export const AnswerCitationList = memo(function AnswerCitationList({
                     <a href={url} target="_blank" rel="noopener noreferrer">
                       {citation.label}
                     </a>
+                  ) : citation.kind === 'workspace_reference' && onOpenWorkspace ? (
+                    <Button type="link" onClick={() => onOpenWorkspace(citation.path)}>
+                      {citation.label}
+                    </Button>
                   ) : (
                     <span>{citation.label}</span>
                   )}

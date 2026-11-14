@@ -6,8 +6,20 @@ import { AcpClient } from '@trinity-harness/client-acp';
 import { compareText } from '../src/workspace-document';
 import { WorkspaceBrowser } from '../src/workspace-browser';
 
+vi.mock('../src/workspace-editor', () => ({
+  default: ({ value, onChange }: { value: string; onChange: (value: string) => void }) =>
+    createElement('textarea', {
+      value,
+      onChange: (event: { target: { value: string } }) => onChange(event.target.value),
+    }),
+}));
+
 it('browses folders, previews text safely, refreshes, and cancels on close without touching the composer', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.stubGlobal(
+    'URL',
+    Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:test'), revokeObjectURL: vi.fn() }),
+  );
   vi.stubGlobal('matchMedia', () => ({ matches: false, addListener() {}, removeListener() {} }));
   const computedStyle = window.getComputedStyle.bind(window);
   vi.spyOn(window, 'getComputedStyle').mockImplementation((element) => computedStyle(element));
@@ -56,6 +68,7 @@ it('browses folders, previews text safely, refreshes, and cancels on close witho
       );
       editor.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    await click('Compare changes');
     expect(document.querySelector('[aria-label="Unsaved changes"]')?.textContent).toContain(
       '+changed draft',
     );
