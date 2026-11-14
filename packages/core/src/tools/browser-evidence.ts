@@ -144,10 +144,25 @@ export async function resolveBrowserSource(
       (r) => r.blockId === range.blockId && r.end > range.start && r.start < range.end,
     ),
   )!;
+  let sourceUrl = observation.url;
+  if (observation.derivation) {
+    const { loadDocumentCapture } = await import('./browser-documents.js');
+    const manifest = await loadDocumentCapture(
+      blobs,
+      events,
+      sessionId,
+      observation.derivation.captureId,
+      signal,
+    );
+    const mapping = observation.derivation.mappings.find((m) => m.blockId === block.id);
+    const document = manifest.documents.find((d) => d.documentId === mapping?.documentId);
+    if (!document) throw new BrowserSourceError('INVALID_RANGE', 'Missing capture source document');
+    sourceUrl = document.url;
+  }
   return {
     ...source,
     ...range,
-    url: observation.url,
+    url: sourceUrl,
     quote,
     callId: first.callId,
     evidenceSeq: first.seq,

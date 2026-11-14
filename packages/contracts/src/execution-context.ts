@@ -7,9 +7,19 @@ export const effectScopeSchema = z.enum([
   'control',
   'unknown',
 ]);
+export const effectResourcePathSchema = z
+  .string()
+  .min(1)
+  .max(1000)
+  .refine(
+    (path) =>
+      !path.includes('\\') &&
+      path.split('/').every((part) => part !== '' && part !== '.' && part !== '..'),
+  );
 export const toolEffectSchema = z.object({
   kind: z.enum(['read', 'navigation', 'mutation', 'unknown']),
   scope: effectScopeSchema,
+  resourcePaths: z.array(effectResourcePathSchema).max(32).optional(),
   evidence: z.enum(['none', 'observation', 'immutable-observation']).optional(),
 });
 export type ToolEffect = z.infer<typeof toolEffectSchema>;

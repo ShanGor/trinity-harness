@@ -68,6 +68,8 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
       '../../contracts/src/personal-assistant.ts',
       '../src/context/context-manager.ts',
       '../src/tool-registry.ts',
+      '../../contracts/src/research.ts',
+      '../../../skills/agent-browser/SKILL.md',
       '../src/tools/browser.ts',
       '../src/tools/browser-evidence.ts',
       '../src/tools/research.ts',
@@ -109,7 +111,7 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
                       'edit_file',
                       'task',
                       'recall',
-                      'browser only for fixtures with pages',
+                      'browser and research only for fixtures with pages',
                     ]
                   : ['read_file', 'task'],
               adapters:

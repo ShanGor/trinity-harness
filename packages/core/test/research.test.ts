@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import {
   researchNotesSchema,
   researchPageSchema,
@@ -102,6 +103,13 @@ describe('research evidence notes', () => {
     expect(result).toMatchObject({
       isError: false,
       value: { kind: 'research-notes', promptSeq: 1, notes },
+    });
+    expect(result.value).toMatchObject({
+      validation: {
+        references: 'matched-delivered-evidence',
+        claimSupport: 'not-assessed',
+        readiness: 'model-authored',
+      },
     });
     await store.append('s', [
       {
@@ -409,4 +417,69 @@ it('recovers spilled browser evidence and notes through session-scoped blobs', a
   expect(
     await registry.execute({ id: 'status', name: 'research', args: { action: 'status' } }, ctx),
   ).toEqual(recorded);
+});
+
+it('advertises whole-block, explicit-range and legacy citation alternatives without requiring resolved receipt fields', async () => {
+  const { registry } = await assembly();
+  const shape = z
+    .object({
+      properties: z.object({
+        notes: z.object({
+          properties: z.object({
+            findings: z.object({
+              items: z.object({
+                properties: z.object({
+                  sources: z.object({
+                    items: z.object({
+                      anyOf: z.array(
+                        z.object({
+                          required: z.array(z.string()),
+                          properties: z.record(z.string(), z.unknown()),
+                        }),
+                      ),
+                    }),
+                  }),
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    })
+    .parse(registry.schemas()[0]!.parameters);
+  const alternatives =
+    shape.properties.notes.properties.findings.items.properties.sources.items.anyOf;
+  expect(alternatives.map((branch) => branch.required)).toEqual([
+    ['observationId', 'blockId'],
+    ['observationId', 'blockId', 'start', 'end'],
+    ['url', 'quote'],
+  ]);
+  expect(alternatives[0]!.properties.start).toEqual({ not: {} });
+  expect(alternatives[2]!.properties.observationId).toEqual({ not: {} });
+});
+
+it.each([
+  { observationId: 'obs', blockId: 'b1' },
+  { observationId: 'obs', blockId: 'b1', start: 0, end: 20 },
+  { url: page.url, quote: 'Interactive apps' },
+])('normalizes supported citation input %j and preserves replay compatibility', (source) => {
+  const input = { ...notes, findings: [{ ...notes.findings[0], sources: [source] }] };
+  const parsed = researchNotesSchema.parse(input);
+  expect(parsed.findings[0]!.sources[0]).toMatchObject(source);
+  expect(researchNotesSchema.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed);
+});
+
+it.each([
+  { observationId: 'obs', url: page.url, quote: 'Interactive apps' },
+  { blockId: 'b1', url: page.url, quote: 'Interactive apps' },
+  { observationId: 'obs', blockId: 'b1', start: 0 },
+  { observationId: 'obs', blockId: 'b1', end: 20 },
+  { observationId: 'obs', blockId: 'b1', start: 20, end: 10 },
+])('rejects incomplete references without falling back to URL matching: %j', (source) => {
+  expect(
+    researchNotesSchema.safeParse({
+      ...notes,
+      findings: [{ ...notes.findings[0], sources: [source] }],
+    }).success,
+  ).toBe(false);
 });

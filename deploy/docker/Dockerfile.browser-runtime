@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends patch \
 COPY apps/browser-runtime/patches/zendriver-mcp-user-data-dir.patch /tmp/zendriver-mcp-user-data-dir.patch
 COPY apps/browser-runtime/patches/zendriver-mcp-human-input.patch /tmp/zendriver-mcp-human-input.patch
 COPY apps/browser-runtime/patches/zendriver-mcp-viewport-capture.patch /tmp/zendriver-mcp-viewport-capture.patch
+COPY apps/browser-runtime/patches/zendriver-mcp-frame-read.patch /tmp/zendriver-mcp-frame-read.patch
+COPY apps/browser-runtime/patches/zendriver-mcp-document.patch /tmp/zendriver-mcp-document.patch
 COPY scripts/build-zendriver-mcp.sh /tmp/build-zendriver-mcp.sh
 RUN bash /tmp/build-zendriver-mcp.sh /opt/zendriver
 

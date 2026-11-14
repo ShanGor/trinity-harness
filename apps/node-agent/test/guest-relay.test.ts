@@ -14,12 +14,21 @@ import type {
 import { FirecrackerGuestRelay } from '../src/guest-relay.js';
 import { buildNodeAgent } from '../src/server.js';
 
-it.each([
+const responseValues = [
   { kind: 'read', content: 'guest', truncated: false, offset: 1, totalLines: 1 },
   { kind: 'operationError', operation: 'read', code: 'FILE_NOT_FOUND', effect: 'none' },
-] as const)(
-  'performs Firecracker CONNECT and validates a generation-bound $kind response',
-  async (value) => {
+] as const;
+
+it.each(
+  responseValues.flatMap((value) =>
+    (['rejected', 'closed', 'silent', 'http-reset'] as const).map((startup) => ({
+      value,
+      startup,
+    })),
+  ),
+)(
+  'recovers a $startup CONNECT before dispatch and validates a generation-bound $value.kind response',
+  async ({ value, startup }) => {
     // Keep UDS path below Linux's 108-byte sockaddr_un limit.
     const root = await mkdtemp(path.join(os.tmpdir(), 'tg-'));
     const generation = randomUUID();
@@ -46,8 +55,18 @@ it.each([
     let handshake = '';
     let connections = 0;
     let requests = 0;
+    let probes = 0;
     let responseValue: unknown = value;
     const http = createHttpServer((request, reply) => {
+      if (request.method === 'GET' && request.url === '/') {
+        probes += 1;
+        if (startup === 'http-reset' && probes === 1) {
+          request.socket.destroy();
+          return;
+        }
+        reply.writeHead(404).end();
+        return;
+      }
       requests += 1;
       expect(request.url).toBe('/rpc');
       const chunks: Buffer[] = [];
@@ -68,8 +87,9 @@ it.each([
       socket.once('data', (chunk: Buffer) => {
         handshake = chunk.toString();
         connections += 1;
-        if (connections === 1) {
-          socket.end('ERR guest not ready\n');
+        if (connections === 1 && startup !== 'http-reset') {
+          if (startup === 'rejected') socket.end('ERR guest not ready\n');
+          else if (startup === 'closed') socket.end();
           return;
         }
         socket.write('OK 42\n');
@@ -82,11 +102,12 @@ it.each([
         await new FirecrackerGuestRelay(root).call(
           environment,
           envelope,
-          AbortSignal.timeout(3000),
+          AbortSignal.timeout(4500),
         ),
       ).toEqual(value);
       expect(handshake).toBe('CONNECT 4050\n');
-      expect(connections).toBe(2);
+      expect(connections).toBe(3);
+      expect(probes).toBe(startup === 'http-reset' ? 2 : 1);
       expect(requests).toBe(1);
       envelope = { ...envelope, requestId: randomUUID(), operation: { kind: 'desktopFrame' } };
       responseValue = { kind: 'ok' };
@@ -101,7 +122,7 @@ it.each([
       expect(requests).toBe(2);
       responseValue = { invalid: true };
       await expect(new FirecrackerGuestRelay(root).call(environment, envelope)).rejects.toThrow();
-      expect(connections).toBe(4);
+      expect(connections).toBe(7);
       expect(requests).toBe(3);
     } finally {
       http.closeAllConnections();
@@ -263,6 +284,21 @@ it('revalidates PG owner/workspace/generation around guest dispatch and fails cl
     expect(revoked.statusCode).toBe(409);
     expect(revoked.body).not.toContain('private');
     expect(revoked.body).not.toContain('FILE_NOT_FOUND');
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      relay.call.mockRejectedValueOnce(
+        Object.assign(new Error('private guest content /workspace/secret'), { code: 'ECONNRESET' }),
+      );
+      const failed = await send();
+      expect(failed.statusCode).toBe(503);
+      expect(failed.body).not.toContain('private');
+      expect(diagnostic).toHaveBeenCalledExactlyOnceWith('[node-agent] request failed', {
+        failure: 'unclassified',
+        code: 'ECONNRESET',
+      });
+    } finally {
+      diagnostic.mockRestore();
+    }
   } finally {
     await app.close();
   }

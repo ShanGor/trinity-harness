@@ -154,7 +154,7 @@ async function assembly(
               ? 'ready'
               : args.some((a) => a.includes('document.elementFromPoint'))
                 ? { allowed: true }
-                : args.some((a) => a.includes('privacyDenied'))
+                : args.some((a) => a.includes('privacyDenied') && !a.includes('semantic-v2'))
                   ? surface
                   : args.some((a) => a.includes('MutationObserver'))
                     ? 'timed_out'
@@ -207,6 +207,56 @@ async function assembly(
 }
 
 describe('browser web discovery', () => {
+  it('tracks repeated discovery through direct navigation using only fitted delivered links', async () => {
+    const page: BrowserCapture = {
+      ...capture,
+      url: 'https://html.duckduckgo.com/html/?q=one',
+      blocks: [
+        {
+          ...capture.blocks[0]!,
+          text: 'Query heading one',
+          links: [
+            {
+              title: 'Reference',
+              url: 'https://duckduckgo.com/l/?uddg=https%3A%2F%2Fsource.invalid%2Farticle',
+            },
+            { title: 'Feedback', url: 'https://duckduckgo.com/feedback.html' },
+          ],
+        },
+      ],
+    };
+    const { run, store } = await assembly(undefined, page);
+    for (const query of ['one', 'two', 'three', 'four']) {
+      page.url = `https://html.duckduckgo.com/html/?q=${query}`;
+      page.blocks[0]!.text = `Query heading ${query}`;
+      const result = browserResultSchema.parse(
+        (await run(query, { operation: 'navigate', url: page.url })).value,
+      );
+      expect(result.discovery).toMatchObject({ kind: 'search', complete: true });
+      expect(result.discovery?.destinationKeys).toHaveLength(1);
+      expect(result.contentStatus).toBe('text-delivered');
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(
+        BROWSER_LIMITS.overview,
+      );
+    }
+    expect(progressGuidance(await store.load('s'), 1, 5, Infinity)).toContain(
+      'last four search observations',
+    );
+  });
+
+  it('distinguishes empty delivery from evidence that a document contains no information', async () => {
+    const { run } = await assembly(undefined, { ...capture, blocks: [], readiness: 'partial' });
+    const result = browserResultSchema.parse(
+      (await run('empty', { operation: 'get_page_text' })).value,
+    );
+    expect(result).toMatchObject({
+      contentStatus: 'no-content-delivered',
+      blocks: [],
+      receipt: [],
+      readiness: 'partial',
+    });
+  });
+
   it('searches the user query as encoded navigation and keeps replayable observations and links', async () => {
     const query = '"System one" calibrated decision 中文 & site:example.com';
     const url = `https://www.google.com/search?${new URLSearchParams({ q: query })}`;
@@ -230,6 +280,7 @@ describe('browser web discovery', () => {
       effect: 'applied',
       links: [{ blockId: 'b0', ...link }],
       linksTruncated: false,
+      discovery: { kind: 'search', complete: true },
     });
     expect(browserDeliveries(await store.load('s'), 's')).toHaveLength(1);
     expect(blobs.data.has(value.artifactUri)).toBe(true);
@@ -242,6 +293,7 @@ describe('browser web discovery', () => {
       blockIds: ['b0'],
     });
     expect(replay).toMatchObject({ isError: false, value: { saved: true, links: value.links } });
+    expect(browserResultSchema.parse(replay.value).discovery).toBeUndefined();
     // A discovered destination is not a captured primary source.
     const notes = createResearchTool(store, blobs);
     const unsupported = await notes.execute(
@@ -462,7 +514,9 @@ describe('browser contracts and capture', () => {
     sandbox.argvHandler = async (command, args, opts) => {
       const response = await original(command, args, opts);
       if (args.includes('eval')) {
-        const value = args.some((arg) => arg.includes('privacyDenied'))
+        const value = args.some(
+          (arg) => arg.includes('privacyDenied') && !arg.includes('semantic-v2'),
+        )
           ? {
               ...surface,
               targets: Array.from({ length: 100 }, (_, i) => ({
@@ -1545,6 +1599,98 @@ describe('URL/quote references to typed browser evidence', () => {
 });
 
 describe('scoped browser interactions and screenshots', () => {
+  it('keeps control changes and missing delivered targets distinct without exposing values', async () => {
+    const { run, store } = await assembly();
+    const first = browserResultSchema.parse((await run('page', { operation: 'read_page' })).value);
+    expect(
+      await run('bad-scope', {
+        operation: 'get_page_text',
+        scope: { snapshotId: first.observationId, ref: 'not-delivered' },
+      }),
+    ).toMatchObject({ value: { reason: 'TARGET_NOT_DELIVERED', effect: 'none' } });
+    const fresh = browserResultSchema.parse((await run('fresh', { operation: 'read_page' })).value);
+    await store.append('s', [
+      {
+        ...meta(),
+        type: 'browser/control_changed',
+        generation: crypto.randomUUID(),
+        epoch: 1,
+        mode: 'agent',
+      },
+    ]);
+    expect(
+      await run(
+        'after-control',
+        {
+          operation: 'click',
+          snapshotId: fresh.observationId,
+          ref: 'r0',
+        },
+        's',
+        true,
+      ),
+    ).toMatchObject({ value: { reason: 'CONTROL_CHANGED', effect: 'none' } });
+  });
+  it.each([
+    ['binding', 'BINDING_CHANGED'],
+    ['document', 'DOCUMENT_CHANGED'],
+  ] as const)('reports a value-free reason for a changed %s', async (change, reason) => {
+    let current = { ...binding };
+    const { run, calls } = await assembly({ authorize: async () => current });
+    const first = browserResultSchema.parse((await run('page', { operation: 'read_page' })).value);
+    current = {
+      ...current,
+      ...(change === 'binding'
+        ? { bindingId: 'private-binding-identifier' }
+        : { documentRevision: 'private-document-identifier' }),
+    };
+    const result = await run(
+      'stale',
+      {
+        operation: 'click',
+        snapshotId: first.observationId,
+        ref: 'r0',
+      },
+      's',
+      true,
+    );
+    expect(result).toMatchObject({
+      isError: true,
+      value: { code: 'STALE_TARGET', reason, effect: 'none', recovery: 'reobserve' },
+    });
+    expect(JSON.stringify(result)).not.toContain('private-');
+    expect(calls.some((a) => a.includes('click'))).toBe(false);
+  });
+
+  it('distinguishes an undelivered snapshot from an intervening operation', async () => {
+    const { run } = await assembly();
+    expect(
+      await run(
+        'missing',
+        {
+          operation: 'click',
+          snapshotId: 'invented',
+          ref: 'r0',
+        },
+        's',
+        true,
+      ),
+    ).toMatchObject({ value: { reason: 'SNAPSHOT_NOT_DELIVERED', effect: 'none' } });
+    const first = browserResultSchema.parse((await run('page', { operation: 'read_page' })).value);
+    await run('next', { operation: 'read_page' });
+    expect(
+      await run(
+        'old',
+        {
+          operation: 'click',
+          snapshotId: first.observationId,
+          ref: 'r0',
+        },
+        's',
+        true,
+      ),
+    ).toMatchObject({ value: { reason: 'INTERVENING_OPERATION', effect: 'none' } });
+  });
   it('requires per-call authorization before effects and applies only an exposed ref', async () => {
     const { run, calls } = await assembly();
     const first = browserResultSchema.parse((await run('page', { operation: 'read_page' })).value);
@@ -1581,7 +1727,7 @@ describe('scoped browser interactions and screenshots', () => {
     const { run, calls, sandbox } = await assembly();
     const old = sandbox.argvHandler!;
     sandbox.argvHandler = async (c, a, o) =>
-      a.some((v) => v.includes('privacyDenied'))
+      a.some((v) => v.includes('privacyDenied') && !v.includes('semantic-v2'))
         ? {
             stdout: JSON.stringify({
               success: true,
@@ -1618,7 +1764,7 @@ describe('scoped browser interactions and screenshots', () => {
       );
       const old = sandbox.argvHandler!;
       sandbox.argvHandler = async (c, a, o) =>
-        a.some((v) => v.includes('privacyDenied'))
+        a.some((v) => v.includes('privacyDenied') && !v.includes('semantic-v2'))
           ? {
               stdout: JSON.stringify({
                 success: true,
@@ -1657,7 +1803,10 @@ describe('scoped browser interactions and screenshots', () => {
           's',
           true,
         ),
-      ).toMatchObject({ isError: true, value: { code: 'STALE_TARGET', effect: 'none' } });
+      ).toMatchObject({
+        isError: true,
+        value: { code: 'STALE_TARGET', reason: 'SURFACE_CHANGED', effect: 'none' },
+      });
       expect(calls.filter((a) => a.includes('click'))).toHaveLength(before);
     },
   );
@@ -1787,6 +1936,7 @@ describe('scoped browser interactions and screenshots', () => {
       ).value,
     );
     expect(result.image).toMatchObject({ width: 200, height: 100, crop: { x: 5, y: 5 }, scale: 1 });
+    expect(result.contentStatus).toBe('image-delivered');
     expect(result.receipt).toEqual([]);
     expect(sandbox.binaryFiles.size).toBe(0);
     const events = await store.load('s');
@@ -1838,7 +1988,10 @@ describe('scoped browser interactions and screenshots', () => {
         's',
         true,
       ),
-    ).toMatchObject({ isError: true, value: { code: 'STALE_TARGET', effect: 'none' } });
+    ).toMatchObject({
+      isError: true,
+      value: { code: 'STALE_TARGET', reason: 'IMAGE_NOT_ACTIONABLE', effect: 'none' },
+    });
   });
   it('reattaches original screenshot pixels on a later turn through a saved read', async () => {
     const { run, sandbox, store, blobs, calls } = await assembly();
@@ -1877,6 +2030,7 @@ describe('scoped browser interactions and screenshots', () => {
     expect(recalled.saved).toBe(true);
     expect(recalled.capturedAt).toBe(captured.capturedAt);
     expect(recalled.image).toEqual(captured.image);
+    expect(recalled.contentStatus).toBe('image-delivered');
     const events = await store.load('s');
     expect(await resolveBrowserImage(blobs, events, 's', captured.image!.uri)).toEqual(png);
     const messages = toModelMessages(events);
@@ -1920,7 +2074,7 @@ describe('scoped browser interactions and screenshots', () => {
     const { run, sandbox } = await assembly();
     const old = sandbox.argvHandler!;
     sandbox.argvHandler = async (c, a, o) =>
-      a.some((v) => v.includes('privacyDenied'))
+      a.some((v) => v.includes('privacyDenied') && !v.includes('semantic-v2'))
         ? {
             stdout: JSON.stringify({ success: true, data: { ...surface, privacyDenied: true } }),
             stderr: '',
@@ -2212,4 +2366,21 @@ it('does not approve a generic final-action button and reuses exact current site
     surface.targets[0]!.name = original;
     surface.targets[0]!.actionKind = 'expand';
   }
+});
+
+it('rejects semantic-only Markdown export without reopening a page or writing files', async () => {
+  const { run, sandbox, calls } = await assembly();
+  const read = await run('capture-export', { operation: 'navigate', url: capture.url });
+  const observationId = browserResultSchema.parse(read.value).observationId;
+  const before = calls.length;
+  const written = vi.spyOn(sandbox, 'writeFile');
+  const result = await run('export', { operation: 'export_markdown', observationId }, 's', true);
+  expect(result.isError).toBe(true);
+  expect(result.value).toMatchObject({
+    code: 'INVALID_ARGUMENTS',
+    effect: 'none',
+    message: expect.stringContaining('Check the tool schema'),
+  });
+  expect(written).not.toHaveBeenCalled();
+  expect(calls.length).toBe(before);
 });

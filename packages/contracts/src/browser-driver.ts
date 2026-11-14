@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { browserDocumentResultSchema, type BrowserDocumentGraph } from './browser-document.js';
 import { browserArgumentsSchema, browserResultSchema, browserErrorSchema } from './browser.js';
 import type { BrowserBinding, BrowserCapture, BrowserSurface } from './browser.js';
 import type { ToolContext, ToolResult } from './tools.js';
@@ -53,6 +54,7 @@ export type BrowserDriverState = z.infer<typeof browserDriverStateSchema>;
 
 /** Only fixed operations are exposed here; JavaScript and selectors stay adapter-owned. */
 export interface BrowserDriverPort {
+  captureDocument?(binding: BrowserBinding, ctx: ToolContext): Promise<BrowserDocumentGraph>;
   verify(binding: BrowserBinding, ctx: ToolContext): Promise<void>;
   surface(
     binding: BrowserBinding,
@@ -101,7 +103,7 @@ export const browserRuntimeRequestSchema = z
 export type BrowserRuntimeRequest = z.infer<typeof browserRuntimeRequestSchema>;
 export const browserRuntimeResultSchema = z
   .object({
-    value: z.union([browserResultSchema, browserErrorSchema]),
+    value: z.union([browserResultSchema, browserDocumentResultSchema, browserErrorSchema]),
     isError: z.boolean(),
   })
   .superRefine((r, ctx) => {

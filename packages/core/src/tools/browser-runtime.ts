@@ -58,7 +58,18 @@ export async function authorizeManagedBrowserCommand(
   )
     return false;
   const parsed = browserArgumentsSchema.safeParse(call.args);
-  if (!parsed.success || ['read_observation', 'search_observation'].includes(parsed.data.operation))
+  if (
+    !parsed.success ||
+    [
+      'read_observation',
+      'search_observation',
+      'read_capture',
+      'search_capture',
+      'extract_capture',
+      'export_capture',
+      'export_markdown',
+    ].includes(parsed.data.operation)
+  )
     return false;
   return (
     canonicalBrowserJson(parsed.data) === canonicalBrowserJson(request.args) &&
@@ -223,7 +234,8 @@ export class HttpBrowserRuntime
       );
       if (
         result.value.operation !== request.args.operation ||
-        (result.value.kind === 'browser-result-v1' &&
+        ((result.value.kind === 'browser-result-v1' ||
+          result.value.kind === 'browser-document-result-v1') &&
           (result.value.sessionId !== request.sessionId || result.value.callId !== request.callId))
       )
         throw new Error('Browser runtime result mismatch');
@@ -1202,6 +1214,7 @@ export class ManagedBrowserSupervisor
           'LIMIT_REACHED',
           'INVALID_ARGUMENTS',
           'ARTIFACT_UNAVAILABLE',
+          'DISABLED',
         ].includes(result.value.code)) ||
         (result.value.code === 'PAGE_UNAVAILABLE' &&
           ['navigate', 'web_search'].includes(request.args.operation)));

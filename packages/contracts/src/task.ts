@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { LLMRequest } from './llm.js';
 import type { ModelUsage } from './usage.js';
-import { effectScopeSchema } from './execution-context.js';
+import { effectScopeSchema, effectResourcePathSchema } from './execution-context.js';
 
 export const taskBudgetSchema = z.object({
   /** An omitted ceiling is unlimited; persisted ceilings remain effective on replay. */
@@ -32,6 +32,9 @@ export const taskCheckSchema = z.object({
   kind: z.enum(['command', 'observation']),
   purpose: z.enum(['outcome', 'method']).optional(),
   dependency: effectScopeSchema.optional(),
+  resourcePaths: z.array(effectResourcePathSchema).max(32).optional(),
+  /** Bind mechanical document checks to their exact operation, never screenshots. */
+  operation: z.enum(['capture_document', 'export_capture', 'export_markdown']).optional(),
   /** Exact command for command checks. Never executed by this tool. */
   command: z.string().min(1).max(4000).optional(),
 });
@@ -107,11 +110,41 @@ export const taskEvidenceSchema = z.object({
   checkIds: z.array(z.string()).max(32).optional(),
 });
 export type TaskEvidence = z.infer<typeof taskEvidenceSchema>;
+export const taskEvidenceRejectionSchema = z.object({
+  checkId: z.string().max(80),
+  checkRevisionSeq: z.number().int().positive(),
+  callId: z.string().max(200),
+  resultSeq: z.number().int().positive().optional(),
+  invalidatingSeq: z.number().int().positive().optional(),
+  reason: z.enum([
+    'wrong_method',
+    'wrong_operation',
+    'wrong_resource',
+    'wrong_dependency',
+    'changed_check',
+    'later_effect',
+    'unknown_effect',
+    'failed_result',
+    'missing_result',
+    'outside_request',
+    'legacy_boundary',
+  ]),
+  repair: z.enum([
+    'select_matching_receipt',
+    'review_check_revision',
+    'observe_affected_state',
+    'inspect_effect_before_retry',
+    'inspect_failed_result',
+    'use_current_request',
+  ]),
+});
+export type TaskEvidenceRejection = z.infer<typeof taskEvidenceRejectionSchema>;
 export const taskStatusSchema = z.object({
   status: z.enum(['verified', 'unverified', 'incomplete']),
   pending: z.array(z.string()).max(32),
   evidence: z.array(taskEvidenceSchema).max(32),
   evidenceTruncated: z.boolean(),
+  rejections: z.array(taskEvidenceRejectionSchema).max(32).optional(),
   commandRepairs: z
     .array(
       z.object({

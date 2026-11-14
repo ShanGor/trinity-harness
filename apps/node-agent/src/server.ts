@@ -162,8 +162,29 @@ export function buildNodeAgent(
   };
   app.post('/guest', guestHandler);
   app.post('/guest-browser', guestHandler);
-  app.setErrorHandler((_error, _req, reply) =>
-    reply.code(503).send({ error: 'node operation unavailable' }),
-  );
+  app.setErrorHandler((error, _req, reply) => {
+    // Only fixed classifications reach host logs; errors may contain paths or
+    // guest/request content, so never log their raw messages or arguments.
+    const failures = [
+      'Guest connection startup timed out or was cancelled',
+      'Invalid vsock handshake',
+      'Rejected vsock connection',
+      'Guest operation failed; effect may be unknown',
+      'Guest response overflow',
+      'Stale guest response',
+    ];
+    console.error('[node-agent] request failed', {
+      failure:
+        error instanceof Error && failures.includes(error.message) ? error.message : 'unclassified',
+      code:
+        error instanceof Error &&
+        'code' in error &&
+        typeof error.code === 'string' &&
+        /^[A-Z_]{1,40}$/.test(error.code)
+          ? error.code
+          : 'UNKNOWN',
+    });
+    return reply.code(503).send({ error: 'node operation unavailable' });
+  });
   return app;
 }

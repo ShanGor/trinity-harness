@@ -11,6 +11,7 @@ export class BrowserDriverError extends Error {
     readonly code: BrowserError['code'],
     message: string = code,
     readonly recovery?: BrowserError['recovery'],
+    readonly reason?: BrowserError['reason'],
   ) {
     super(message);
   }
@@ -18,6 +19,12 @@ export class BrowserDriverError extends Error {
 
 /** Classify inadmissible documents before validating canonical evidence. */
 export function parseBrowserCapture(value: unknown): BrowserCapture {
+  if (z.object({ privacyDenied: z.literal(true) }).safeParse(value).success)
+    throw new BrowserDriverError(
+      'PRIVACY_DENIED',
+      'A readable embedded document contains protected controls. Do not scope around this privacy boundary.',
+      'navigate',
+    );
   const document = z.object({ url: z.string() }).safeParse(value);
   if (
     document.success &&

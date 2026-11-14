@@ -1,5 +1,7 @@
+import type { ToolResult } from '@trinity-harness/contracts';
 import { readFileOptionsSchema } from '@trinity-harness/contracts';
 import { z } from 'zod';
+import { workspaceCopy, workspaceCopyPaths } from './workspace-copy.js';
 import { isAbsolute, relative } from 'node:path';
 import { prefixCommandArgv, literalCommandArgv, matchesCommandPrefix } from './command-prefix.js';
 
@@ -10,7 +12,12 @@ import { assessFileChange, assessTargetedEdit } from './file-assessment.js';
 
 export const readFileTool = defineTool({
   name: 'read_file',
-  effect: { kind: 'read', scope: 'workspace', evidence: 'observation' },
+  effectFor: (args) => ({
+    kind: 'read',
+    scope: 'workspace',
+    evidence: 'observation',
+    resourcePaths: [args.path],
+  }),
   description:
     'Inspect workspace UTF-8 text with bounded streaming reads. Prefer this over Bash for file inspection. Defaults: 64 KiB and 2000 lines; maxBytes may be raised to 1 MiB. offset selects a 1-based starting line. Continue by passing the returned continuation as cursor (omit offset); this seeks directly, supports long lines and rejects changed files. startsMidLine/endsMidLine mark partial lines. totalLines is available only at EOF. Sensitive paths may require approval.',
   parameters: readFileOptionsSchema
@@ -81,10 +88,32 @@ export const globTool = defineTool({
 export const bashTool = defineTool({
   name: 'bash',
   effectFor: (args) =>
-    isReadOnlyBashCommand(args.command)
-      ? { kind: 'read', scope: 'workspace', evidence: 'observation' }
-      : { kind: 'unknown', scope: 'workspace', evidence: 'none' },
+    workspaceCopyPaths(args.command)
+      ? {
+          kind: 'mutation',
+          scope: 'workspace',
+          evidence: 'none',
+          resourcePaths: [workspaceCopyPaths(args.command)![1]],
+        }
+      : isReadOnlyBashCommand(args.command)
+        ? { kind: 'read', scope: 'workspace', evidence: 'observation' }
+        : { kind: 'unknown', scope: 'workspace', evidence: 'none' },
   assess: async (args, ctx) => {
+    const copy = workspaceCopyPaths(args.command);
+    if (copy) {
+      const inspected = await workspaceCopy(copy, ctx, true);
+      if (inspected?.exitCode === 0 && !inspected.outputOverflow && inspected.stdout === 'new')
+        return {
+          decision: 'allowed',
+          authorized: true,
+          summary: `Create new workspace file “${copy[1]}”.`,
+        };
+      return {
+        decision: 'unavailable',
+        summary:
+          'New-file copy requires a regular workspace source and an absent destination. Use a named file change for replacement; symlinks and directory targets are unsupported.',
+      };
+    }
     const argv = prefixCommandArgv(args.command);
     if (
       isReadOnlyBashCommand(args.command) &&
@@ -162,7 +191,15 @@ export const bashTool = defineTool({
       .describe('Optional timeout override (default 60s, max 600s)'),
   }),
   timeoutMs: 600_000,
-  execute: async (args, ctx) => {
+  execute: async (args, ctx): Promise<ToolResult> => {
+    const copy = workspaceCopyPaths(args.command);
+    if (copy) {
+      const result = await workspaceCopy(copy, ctx, false);
+      return {
+        value: result ?? { code: 'DISABLED' },
+        isError: !result || result.exitCode !== 0,
+      };
+    }
     const result = await ctx.sandbox.exec(args.command, {
       timeoutMs: args.timeout_ms,
       signal: ctx.signal,

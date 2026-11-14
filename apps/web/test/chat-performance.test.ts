@@ -369,11 +369,24 @@ describe('chat typing and streaming performance', () => {
     expect(
       [...container.querySelectorAll('button')].some((button) => button.textContent === 'Edit'),
     ).toBe(false);
-    await click(container.querySelector('[aria-label="Delete response"]'));
+    expect(container.querySelector('[aria-label="Delete response"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Delete message"]')).toBeNull();
+    await click(container.querySelector('[aria-label="More response actions"]'));
+    expect(fake.removeMessage).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(document.querySelector('[role="menuitem"]')).not.toBeNull());
+    await click(document.querySelector('[role="menuitem"]'));
     expect(fake.removeMessage).toHaveBeenCalledWith('s0', promptId, 'assistant');
     expect(container.textContent).not.toContain('Successful answer');
     expect(container.textContent).toContain('Original request');
-    await click(container.querySelector('[aria-label="Delete message"]'));
+    await click(container.querySelector('[aria-label="More message actions"]'));
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector('.ant-dropdown:not(.ant-dropdown-hidden) [role="menuitem"]'),
+      ).not.toBeNull(),
+    );
+    await click(
+      document.querySelector('.ant-dropdown:not(.ant-dropdown-hidden) [role="menuitem"]'),
+    );
     expect(fake.removeMessage).toHaveBeenCalledWith('s0', promptId, 'user');
     expect(container.textContent).not.toContain('Original request');
   });

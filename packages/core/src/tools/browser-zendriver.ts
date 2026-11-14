@@ -13,6 +13,7 @@ import {
   type BrowserDriverState,
   type BrowserSurface,
   type BrowserCapture,
+  type BrowserDocumentGraph,
   type BrowserHumanCapture,
   type BrowserHumanAction,
   type BrowserFrameTarget,
@@ -21,6 +22,8 @@ import {
   type BrowserHumanInputResult,
   type ToolContext,
 } from '@trinity-harness/contracts';
+import { captureRenderedDocuments } from './browser-document-driver.js';
+import { captureEmbeddedFrames } from './browser-frame-capture.js';
 import { browserExtractor } from './browser-extractor.js';
 import {
   browserSurfaceScript,
@@ -545,13 +548,30 @@ export class ZendriverBrowserDriver implements BrowserDriverPort, BrowserAccessP
       await this.evaluate(browserSurfaceScript(filter, scope), ctx.signal),
     );
   }
+  async captureDocument(binding: BrowserBinding, ctx: ToolContext): Promise<BrowserDocumentGraph> {
+    await this.verify(binding, ctx);
+    const graph = await captureRenderedDocuments(this.client, ctx.signal);
+    await this.verify(binding, ctx);
+    return graph;
+  }
   async capture(
     _binding: BrowserBinding,
     mode: 'article' | 'documentation',
     scope: number[] | undefined,
     ctx: { signal?: AbortSignal },
   ): Promise<BrowserCapture> {
-    return parseBrowserCapture(await this.evaluate(browserExtractor(mode, scope), ctx.signal));
+    const capture = parseBrowserCapture(
+      await this.evaluate(browserExtractor(mode, scope, true), ctx.signal),
+    );
+    if (scope) {
+      await captureEmbeddedFrames(this.client, capture, mode, ctx.signal, true);
+      return capture;
+    }
+    return !scope &&
+      ((capture.extraction?.unavailableFrames ?? 0) > 0 ||
+        (capture.extraction?.openShadowRoots ?? 0) > 0)
+      ? captureEmbeddedFrames(this.client, capture, mode, ctx.signal)
+      : capture;
   }
   async navigate(
     _binding: BrowserBinding,

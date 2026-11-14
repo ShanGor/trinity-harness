@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { browserResultSchema, type SessionEvent } from '@trinity-harness/contracts';
+import {
+  browserResultSchema,
+  turnGuidanceEventSchema,
+  type SessionEvent,
+} from '@trinity-harness/contracts';
 import { progressGuidance } from '../src/loop/progress-guidance.js';
 import { toModelMessages } from '../src/index.js';
+import { browserDiscovery } from '../src/tools/browser-discovery.js';
+import { personalModelMessages } from '../src/loop/to-model-messages.js';
 
 const meta = () => ({ eventId: crypto.randomUUID(), at: '2026-01-01T00:00:00.000Z' });
 const user = (): SessionEvent => ({
@@ -483,7 +489,7 @@ it('detects search variations with no new destinations without equating discover
     ),
   ];
   const warning = progressGuidance(events, 1, 5, Infinity);
-  expect(warning).toContain('three of the last four web searches');
+  expect(warning).toContain('three of the last four search observations');
   expect(warning).toContain('Do not infer a fact from missing search results');
   expect(warning).not.toContain('private-name');
   expect(progressGuidance(structuredClone(events), 1, 5, Infinity)).toBe(warning);
@@ -504,6 +510,110 @@ it('detects search variations with no new destinations without equating discover
   ).toBeNull();
   const next = [...events, user()];
   expect(progressGuidance(next, next.length, 1, Infinity)).toBeNull();
+});
+
+it('shares discovery across operation paths and providers, without counting saved reads', () => {
+  const search = (
+    id: string,
+    operation: string,
+    url: string,
+    target = 'https://source.invalid/reference',
+  ): SessionEvent[] => {
+    const events = evidencePair(id, [`Different query heading ${id}`], false, operation);
+    const result = events[1]!;
+    if (result.type !== 'tool/result') throw new Error('Expected result');
+    const value = browserResultSchema.parse(result.value);
+    value.url = url;
+    value.links = [{ blockId: 'b0', title: 'Reference', url: target }];
+    value.discovery = browserDiscovery(url, value.operation, value.links, true);
+    result.value = value;
+    return events;
+  };
+  const events = [
+    user(),
+    ...search('one', 'web_search', 'https://www.google.com/search?q=one'),
+    ...search(
+      'two',
+      'navigate',
+      'https://html.duckduckgo.com/html/?q=two',
+      'https://duckduckgo.com/l/?uddg=https%3A%2F%2Fsource.invalid%2Freference%23section',
+    ),
+    ...search('three', 'navigate', 'https://www.bing.com/search?q=three'),
+    ...search('four', 'navigate', 'https://html.duckduckgo.com/html/?q=four'),
+  ];
+  const warning = progressGuidance(events, 1, 5, Infinity);
+  expect(warning).toContain('last four search observations');
+  expect(warning).toContain('Partial captures');
+  expect(warning).not.toContain('source.invalid');
+  expect(progressGuidance(structuredClone(events), 1, 5, Infinity)).toBe(warning);
+  const saved = [user(), ...search('first', 'navigate', 'https://www.google.com/search?q=first')];
+  for (const id of ['saved1', 'saved2', 'saved3'])
+    saved.push(...search(id, 'read_observation', `https://www.google.com/search?q=${id}`));
+  expect(progressGuidance(saved, 1, 5, Infinity) ?? '').not.toContain(
+    'last four search observations',
+  );
+  const next = [...events, user()];
+  expect(progressGuidance(next, next.length, 1, Infinity)).toBeNull();
+  const newSources = [
+    ...events,
+    ...search('new1', 'navigate', 'https://www.bing.com/search?q=new1', 'https://new.invalid/one'),
+    ...search('new2', 'navigate', 'https://www.bing.com/search?q=new2', 'https://new.invalid/two'),
+  ];
+  expect(progressGuidance(newSources, 1, 7, Infinity) ?? '').not.toContain(
+    'last four search observations',
+  );
+});
+
+it('keeps the latest guidance near the next decision after later tool pairs and recovery', () => {
+  const events: SessionEvent[] = [
+    user(),
+    { ...meta(), type: 'turn/guidance', promptSeq: 1, advice: 'Change the reading strategy.' },
+    ...pair('first', 'read-only-tool', 'observed evidence'),
+    ...pair('second', 'read-only-tool', 'more evidence'),
+  ];
+  const messages = toModelMessages(events);
+  expect(messages.at(-1)).toMatchObject({
+    role: 'user',
+    context: 'control',
+    content: '[Runtime progress guidance]\nChange the reading strategy.',
+  });
+  expect(messages.filter((m) => m.content.includes('Runtime progress guidance'))).toHaveLength(1);
+  expect(messages.filter((m) => m.role === 'tool').map((m) => m.toolCallId)).toEqual([
+    'first',
+    'second',
+  ]);
+  expect(toModelMessages(structuredClone(events))).toEqual(messages);
+  const before = structuredClone(events);
+  const personal = personalModelMessages(events, {
+    version: 2,
+    promptId: events[0]!.eventId,
+    policyRevision: 0,
+    memories: [],
+    episodes: [],
+    dialogue: [],
+    omitted: false,
+  });
+  expect(personal.at(-1)).toEqual(messages.at(-1));
+  expect(personal.filter((m) => m.role === 'tool').map((m) => m.toolCallId)).toEqual([
+    'first',
+    'second',
+  ]);
+  expect(events).toEqual(before);
+  const interrupted: SessionEvent[] = [
+    ...events,
+    {
+      ...meta(),
+      type: 'tool/call',
+      callId: 'pending',
+      name: 'browser',
+      args: { operation: 'navigate' },
+    },
+  ];
+  const recovery = toModelMessages(interrupted);
+  expect(recovery.at(-2)).toMatchObject({ role: 'tool', toolCallId: 'pending' });
+  expect(recovery.at(-1)).toEqual(messages.at(-1));
+  const closed = toModelMessages([...events, { ...meta(), type: 'turn/end', reason: 'completed' }]);
+  expect(closed.some((m) => m.content.includes('Runtime progress guidance'))).toBe(false);
 });
 
 it('keeps repeated unavailable-target advice across unrelated success and clears only matching recovery', () => {
@@ -610,3 +720,161 @@ describe('general action guidance', () => {
     );
   });
 });
+
+it('retains extraction recovery across screenshots and replay, clearing only on a fresh text capture', () => {
+  const capture = (id: string, status: 'heading-only' | 'text-captured'): SessionEvent[] => {
+    const events = browserPair(id, 'get_page_text');
+    const result = events[1]!;
+    if (result.type !== 'tool/result') throw new Error('Expected result');
+    result.value = {
+      ...browserResultSchema.parse(result.value),
+      extraction: {
+        status,
+        visibleFrames: status === 'heading-only' ? 1 : 0,
+        openShadowRoots: 0,
+        canvases: 0,
+        inspectionTruncated: false,
+        scope: 'top-document',
+      },
+    };
+    return events;
+  };
+  const events = [
+    user(),
+    ...capture('shell', 'heading-only'),
+    ...browserPair('pixels', 'screenshot'),
+    ...browserPair('saved', 'read_observation'),
+  ];
+  const guidance = progressGuidance(structuredClone(events), 1, 4, Infinity);
+  expect(guidance).toContain('not evidence that navigation failed');
+  expect(guidance).toContain('curl/shell HTTP');
+  expect(guidance).toContain('do not claim a complete export');
+  expect(
+    progressGuidance([...events, ...capture('body', 'text-captured')], 1, 5, Infinity) ?? '',
+  ).not.toContain('Browser extraction has limited');
+  const next = [...events, user()];
+  expect(progressGuidance(next, next.length, 1, Infinity)).toBeNull();
+});
+
+it('treats successful rendered capture as live recovery, with independent coverage advice', () => {
+  const events: SessionEvent[] = [
+    user(),
+    ...Array.from({ length: 3 }, (_, i) => pair('fail' + i, snapshot, 'failed', true)).flat(),
+    {
+      ...meta(),
+      type: 'tool/call',
+      name: 'browser',
+      callId: 'capture',
+      args: { operation: 'capture_document' },
+    },
+    {
+      ...meta(),
+      type: 'tool/result',
+      callId: 'capture',
+      isError: false,
+      value: {
+        kind: 'browser-document-result-v1',
+        operation: 'capture_document',
+        buildId: 'trinity-document-v1',
+        browserVersion: 'Chrome',
+        sessionId: 's',
+        callId: 'capture',
+        captureId: 'cap',
+        hash: 'a'.repeat(64),
+        coverage: 'partial',
+        stability: 'checked-interval',
+        documents: [],
+        omittedFrames: 1,
+        omissionReasons: ['frame-unavailable'],
+        resources: { captured: 0, unavailable: 1 },
+        ranges: [],
+        continuation: null,
+      },
+    },
+  ];
+  const guidance = progressGuidance(events, 1, 5, 64);
+  expect(guidance).toContain('Convert and read available saved documents offline');
+  expect(guidance).not.toContain('three browser channel failures');
+});
+it('keeps missing document capability separate from ordinary live access', () => {
+  const events: SessionEvent[] = [
+    user(),
+    {
+      ...meta(),
+      type: 'tool/call',
+      name: 'browser',
+      callId: 'capture',
+      args: { operation: 'capture_document' },
+    },
+    {
+      ...meta(),
+      type: 'tool/result',
+      callId: 'capture',
+      isError: true,
+      value: {
+        kind: 'browser-error-v1',
+        operation: 'capture_document',
+        code: 'DISABLED',
+        effect: 'none',
+        message: 'Old guest',
+      },
+    },
+  ];
+  const guidance = progressGuidance(events, 1, 2, 64);
+  expect(guidance).toContain('does not disable ordinary live navigation');
+  expect(guidance).not.toContain('Live browser access was denied or disabled');
+});
+
+it.each([false, true])(
+  'bounds combined recovery guidance with unavailable capture=%s',
+  (unavailable) => {
+    const heading = browserPair('heading', 'get_page_text');
+    const result = heading[1]!;
+    if (result.type !== 'tool/result') throw new Error('Expected browser result');
+    result.value = {
+      ...browserResultSchema.parse(result.value),
+      extraction: {
+        scope: 'top-document',
+        status: 'heading-only',
+        visibleFrames: 1,
+        embeddedFrames: 0,
+        unavailableFrames: 1,
+        openShadowRoots: 0,
+        canvases: 0,
+        inspectionTruncated: false,
+      },
+    };
+    const events: SessionEvent[] = [
+      user(),
+      ...heading,
+      ...pair('failure1', 'inspect', '', true),
+      ...pair('failure2', 'inspect', '', true),
+      ...['a', 'b'].flatMap((callId): SessionEvent[] => [
+        { ...meta(), type: 'tool/call', name: 'research', callId, args: { action: 'record' } },
+        {
+          ...meta(),
+          type: 'tool/result',
+          callId,
+          isError: true,
+          value: { code: 'RESEARCH_SOURCE_MISMATCH' },
+        },
+      ]),
+      ...(unavailable ? browserPair('capture', 'capture_document', true, 'DISABLED') : []),
+    ];
+    const advice = progressGuidance(events, 1, 8, 10, true)!;
+    expect(advice.length).toBeLessThanOrEqual(2000);
+    expect(
+      turnGuidanceEventSchema.safeParse({ ...meta(), type: 'turn/guidance', promptSeq: 1, advice })
+        .success,
+    ).toBe(true);
+    expect(advice.endsWith('.')).toBe(true);
+    expect(progressGuidance(structuredClone(events), 1, 8, 10, true)).toBe(advice);
+    if (unavailable) {
+      expect(advice).toContain('capture is unavailable on the installed build');
+      expect(advice).not.toContain('use one rendered document capture');
+    } else {
+      expect(advice).toContain('Browser extraction has limited');
+      expect(advice).not.toContain('Repeated tool failures');
+    }
+  },
+);

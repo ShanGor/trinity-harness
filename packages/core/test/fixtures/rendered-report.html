@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+  <head>
+    <style>
+      .steps {
+        display: grid;
+        grid-template-columns: 160px 24px 160px;
+        gap: 12px;
+        color: rgb(20, 20, 20);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Report</h1>
+    <p>Content in the embedded document.</p>
+    <div class="steps">
+      <div>Work sources</div>
+      <svg
+        width="8"
+        height="24"
+        viewBox="0 0 8 24"
+        aria-hidden="true"
+        style="display: block; color: rgb(20, 20, 20); justify-self: end"
+      >
+        <path d="M4 0V20M1 17L4 20L7 17" fill="none" stroke="currentColor" stroke-width="1.5" />
+      </svg>
+      <div>Permission check</div>
+    </div>
+    <svg width="100" height="40" viewBox="0 0 100 40">
+      <g transform="translate(10 10)">
+        <circle cx="10" cy="10" r="8" fill="#fff" stroke="#222" />
+        <path d="M10 10L60 10" stroke="#222" />
+      </g>
+      <text x="40" y="30">Approved</text>
+    </svg>
+    <table>
+      <tr>
+        <th colspan="2">Decision</th>
+      </tr>
+      <tr>
+        <td>Review</td>
+        <td>Approve</td>
+      </tr>
+    </table>
+    <a href="https://example.com/source">Source</a>
+  </body>
+</html>

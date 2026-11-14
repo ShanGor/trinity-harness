@@ -194,3 +194,67 @@ it('preserves visible button labels, line breaks and nested list order while exc
   );
   expect(result.blocks.map((b) => b.text)).toEqual(['A B查看更多', 'Parent', 'Child', 'Next']);
 });
+
+it('distinguishes a loaded heading-only shell from extracted body content', () => {
+  const result = extract(
+    '<body><h1>Document</h1><iframe src="https://example.com/private"></iframe><canvas></canvas></body>',
+  );
+  expect(result.readiness).toBe('partial');
+  expect(result.extraction).toMatchObject({
+    status: 'heading-only',
+    visibleFrames: 1,
+    openShadowRoots: 0,
+    canvases: 1,
+    inspectionTruncated: false,
+    scope: 'top-document',
+  });
+  expect(JSON.stringify(result)).not.toContain('/private');
+});
+
+it('reports hidden frames separately from visible extraction boundaries', () => {
+  const result = extract(
+    '<body><main><p>Body text</p><iframe hidden src="https://example.com/private"></iframe></main></body>',
+  );
+  expect(result.readiness).toBe('ready');
+  expect(result.extraction?.status).toBe('text-captured');
+  expect(result.extraction?.visibleFrames).toBe(0);
+});
+
+it('extracts readable embedded documents and rejects their private drafts', () => {
+  extract('<body><h1>Shell</h1><iframe></iframe></body>');
+  const frame = globalThis.document.querySelector('iframe')!;
+  const child = frame.contentDocument!;
+  child.body.innerHTML =
+    '<h2>Embedded article</h2><p>Actual article body</p><img src="https://example.com/image.png" alt="Diagram">';
+  vi.spyOn(
+    (frame.contentWindow as unknown as { Element: typeof Element }).Element.prototype,
+    'getClientRects',
+  ).mockReturnValue([{}] as unknown as DOMRectList);
+  const captured = browserCaptureSchema.parse(browser.window.eval(browserExtractor('article')));
+  expect(captured.blocks.map((b) => b.text)).toContain('Actual article body');
+  expect(captured.blocks.find((b) => b.image)?.image?.url).toBe('https://example.com/image.png');
+  expect(captured.extraction?.embeddedFrames).toBe(1);
+  child.body.innerHTML += '<textarea autocomplete="one-time-code">private draft</textarea>';
+  expect(browser.window.eval(browserExtractor('article'))).toEqual({ privacyDenied: true });
+});
+
+it('reads open shadow content in order and applies privacy checks inside it', () => {
+  extract('<body><main><h1>Shell</h1><div id="host"></div></main></body>');
+  const host = globalThis.document.querySelector('#host')!;
+  const shadow = host.attachShadow({ mode: 'open' });
+  shadow.innerHTML = 'Before <h2>Shadow article</h2><p>Actual shadow body</p> After';
+  const capture = browserCaptureSchema.parse(
+    browser.window.eval(browserExtractor('article', undefined, true)),
+  );
+  expect(capture.blocks.map((b) => b.text)).toEqual([
+    'Shell',
+    'Before',
+    'Shadow article',
+    'Actual shadow body',
+    'After',
+  ]);
+  shadow.innerHTML += '<textarea autocomplete="one-time-code">private</textarea>';
+  expect(browser.window.eval(browserExtractor('article', undefined, true))).toEqual({
+    privacyDenied: true,
+  });
+});

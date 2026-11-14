@@ -103,6 +103,20 @@ describe('CoreToolRegistry', () => {
     expect(Object.keys(schema!.parameters)).toContain('properties');
   });
 
+  it('advertises defaulted tool arguments as optional inputs and applies defaults at dispatch', async () => {
+    const registry = new CoreToolRegistry(new FakeSandbox());
+    registry.register({
+      name: 'bounded-read',
+      description: 'Read with a default limit',
+      parameters: z.object({ path: z.string(), limit: z.number().int().positive().default(10) }),
+      execute: async (args) => ({ value: args, isError: false }),
+    });
+    expect(registry.schemas()[0]!.parameters.required).toEqual(['path']);
+    expect(
+      await registry.execute({ id: 'read', name: 'bounded-read', args: { path: 'x' } }, baseCtx),
+    ).toMatchObject({ isError: false, value: { path: 'x', limit: 10 } });
+  });
+
   it('dispose unregisters the tool', async () => {
     const registry = new CoreToolRegistry(new FakeSandbox());
     const handle = registry.register(writeFileTool);

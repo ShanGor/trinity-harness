@@ -20,6 +20,12 @@ import {
 } from './browser-evidence.js';
 import { browserDeliveries } from './browser-artifacts.js';
 
+const referenceValidation = {
+  references: 'matched-delivered-evidence',
+  claimSupport: 'not-assessed',
+  readiness: 'model-authored',
+} as const;
+
 /** Identify the installed CLI; do not treat another executable's output as browser evidence. */
 export function browserCommand(command: unknown): { action: string; argv: string[] } | null {
   const argv = prefixCommandArgv(command);
@@ -155,7 +161,7 @@ export function createResearchTool(store: SessionStore, blobs?: BlobStore): Tool
     name: 'research',
     effect: { kind: 'read', scope: 'reference', evidence: 'none' },
     description:
-      'Track a research question, evidence-backed findings and unresolved questions. Record replaces the bounded notes for this turn; status recovers them. Prefer observationId/blockId and optional code-point start/end from successful browser results; the server resolves exact passages. Legacy observed URL/quote sources remain supported. Extraction call IDs are optional and resolved automatically. Source matching verifies observed text, not the truth of a claim. Set readyToAnswer when evidence permits a useful qualified conclusion, stating remaining uncertainty.',
+      'Optional working notes for extended research: track a research question, evidence-backed findings and unresolved questions. Direct answers and short explanations do not require notes. Failed note recording does not invalidate successful source reads or require more research. Record replaces the bounded notes for this turn; status recovers them. Prefer observationId/blockId and optional code-point start/end from successful browser results; the server resolves exact passages. Legacy observed URL/quote sources remain supported. Extraction call IDs are optional and resolved automatically. Source matching verifies observed text, not the truth of a claim. Set readyToAnswer when evidence permits a useful qualified conclusion, stating remaining uncertainty.',
     parameters: researchArgumentsSchema,
     concurrency: 'exclusive',
     execute: async (args, ctx): Promise<ToolResult> => {
@@ -214,7 +220,7 @@ export function createResearchTool(store: SessionStore, blobs?: BlobStore): Tool
                   );
                 }
               }
-            return { value: parsed.data, isError: false };
+            return { value: { ...parsed.data, validation: referenceValidation }, isError: false };
           }
         }
         return { value: { kind: 'research-notes', promptSeq, notes: null }, isError: false };
@@ -351,7 +357,10 @@ export function createResearchTool(store: SessionStore, blobs?: BlobStore): Tool
           }
           source.callId = observed[0];
         }
-      return { value: { kind: 'research-notes', promptSeq, notes }, isError: false };
+      return {
+        value: { kind: 'research-notes', promptSeq, notes, validation: referenceValidation },
+        isError: false,
+      };
     },
   });
 }

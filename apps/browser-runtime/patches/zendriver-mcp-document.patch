@@ -1,0 +1,291 @@
+--- a/src/tools/frames.rs
++++ b/src/tools/frames.rs
+@@ -37,6 +37,8 @@
+     pub name: Option<String>,
+     /// `true` for the main (top-level) frame.
+     pub is_main: bool,
++    /// Identity-proven owner path in the parent document; absent means unavailable.
++    pub owner_path: Option<Vec<i64>>,
+ }
+ 
+ /// Output of `browser_frame_list`.
+@@ -46,6 +48,8 @@
+     /// `zendriver::Tab::frames` (unspecified but typically tree-traversal
+     /// order).
+     pub frames: Vec<FrameSummary>,
++    pub capture_protocol: String,
++    pub build_id: String,
+ }
+ 
+ /// Enumerate all frames on the current tab.
+@@ -58,38 +62,115 @@
+ ) -> Result<FrameListOutput, ErrorData> {
+     let s = state.lock().await;
+     let tab = current_tab(&s).await?;
+-    // The event registry can miss frames attached before subscription. Read
+-    // Chrome's authoritative tree; never synthesize frame identity from URLs.
+-    let tree = tab.session().call("Page.getFrameTree", serde_json::json!({}))
+-        .await.map_err(|e| map_error(McpServerError::from(zendriver::ZendriverError::from(e))))?;
++    owned_frames(&tab).await
++}
++
++/// Frame identity and owner paths are established in the parent's isolated world.
++/// Attaching a separate target requires an already proven ancestor chain.
++pub async fn owned_frames(tab: &zendriver::Tab) -> Result<FrameListOutput, ErrorData> {
++    let tree = tab
++        .session()
++        .call("Page.getFrameTree", serde_json::json!({}))
++        .await
++        .map_err(|e| map_error(McpServerError::from(zendriver::ZendriverError::from(e))))?;
+     let mut pending = vec![(tree["frameTree"].clone(), None)];
+     let mut out = Vec::new();
+     while let Some((node, parent)) = pending.pop() {
+-        if out.len() >= 100 { return Err(ErrorData::internal_error("Frame tree limit", None)); }
+-        let frame = &node["frame"];
+-        let id = frame["id"].as_str().ok_or_else(|| ErrorData::internal_error("Missing frame id", None))?.to_owned();
+-        out.push(FrameSummary { id: id.clone(), url: frame["url"].as_str().unwrap_or_default().to_owned(),
+-            is_main: parent.is_none(), parent_id: parent, name: frame["name"].as_str().map(str::to_owned) });
++        if out.len() >= 100 {
++            return Err(ErrorData::internal_error("Frame tree limit", None));
++        }
++        let f = &node["frame"];
++        let id = f["id"]
++            .as_str()
++            .ok_or_else(|| ErrorData::internal_error("Missing frame identity", None))?
++            .to_owned();
++        out.push(FrameSummary {
++            id: id.clone(),
++            url: f["url"].as_str().unwrap_or_default().to_owned(),
++            parent_id: parent.clone(),
++            is_main: parent.is_none(),
++            name: None,
++            owner_path: None,
++        });
+         if let Some(children) = node["childFrames"].as_array() {
+-            for child in children.iter().rev() { pending.push((child.clone(), Some(id.clone()))); }
+-        }
+-    }
+-    // Site-isolated frames may live only in separate targets. Prove each
+-    // target's DOM owner belongs to this tab before exposing its metadata.
+-    let targets = tab.session().call("Target.getTargets", serde_json::json!({})).await
++            for child in children.iter().rev() {
++                pending.push((child.clone(), Some(id.clone())));
++            }
++        }
++    }
++    let tree_ids: Vec<String> = out.iter().map(|f| f.id.clone()).collect();
++    let main = out
++        .iter()
++        .find(|f| f.is_main)
++        .ok_or_else(|| ErrorData::internal_error("Missing main frame", None))?
++        .id
++        .clone();
++    let targets = tab
++        .session()
++        .call("Target.getTargets", serde_json::json!({}))
++        .await
+         .map_err(|e| map_error(McpServerError::from(zendriver::ZendriverError::from(e))))?;
+     if let Some(items) = targets["targetInfos"].as_array() {
+-        for target in items.iter().filter(|t| t["type"] == "iframe") {
+-            let Some(id) = target["targetId"].as_str() else { continue };
+-            if out.iter().any(|f| f.id == id) {continue;}
+-            if tab.session().call("DOM.getFrameOwner", serde_json::json!({"frameId":id})).await.is_ok() {
+-                let parent = out.iter().find(|f| f.is_main).map(|f| f.id.clone());
+-                out.push(FrameSummary {id:id.to_owned(),url:target["url"].as_str().unwrap_or_default().to_owned(),parent_id:parent,is_main:false,name:None});
++        for t in items.iter().filter(|t| t["type"] == "iframe") {
++            let Some(id) = t["targetId"].as_str() else {
++                continue;
++            };
++            if !out.iter().any(|f| f.id == id) {
++                if out.len() >= 100 {
++                    return Err(ErrorData::internal_error("Frame target limit", None));
++                }
++                out.push(FrameSummary {
++                    id: id.into(),
++                    url: t["url"].as_str().unwrap_or_default().into(),
++                    parent_id: None,
++                    is_main: false,
++                    name: None,
++                    owner_path: None,
++                });
+             }
+-            if out.len() >= 100 {return Err(ErrorData::internal_error("Frame target limit",None));}
+-        }
+-    }
+-    Ok(FrameListOutput { frames: out })
++        }
++    }
++    let mut queue = std::collections::VecDeque::from([(main, tab.session().clone())]);
++    let mut attached: Vec<String> = Vec::new();
++    let result:Result<(),ErrorData>=async {
++        while let Some((parent,session))=queue.pop_front(){
++            let world=match session.call("Page.createIsolatedWorld",serde_json::json!({"frameId":parent,"worldName":"trinity-frame-owners"})).await{Ok(v)=>v,Err(_)=>continue};
++            let Some(context)=world["executionContextId"].as_i64() else {continue};
++            for f in out.iter_mut().filter(|f|!f.is_main&&f.owner_path.is_none()){
++                let owner=match session.call("DOM.getFrameOwner",serde_json::json!({"frameId":f.id})).await{Ok(v)=>v,Err(_)=>continue};
++                let object=match session.call("DOM.resolveNode",serde_json::json!({"backendNodeId":owner["backendNodeId"],"executionContextId":context,"objectGroup":"trinity-frame-owners"})).await{Ok(v)=>v,Err(_)=>continue};
++                let path=match session.call("Runtime.callFunctionOn",serde_json::json!({"objectId":object["object"]["objectId"],"returnByValue":true,
++                    "functionDeclaration":"function(){if(this.ownerDocument!==document)return null;let el=this,path=[];while(el!==document.documentElement){if(path.length>=80)return null;const p=el.parentNode;if(!p)return null;if(p.nodeType===11&&p.host){path.unshift(Array.prototype.indexOf.call(p.childNodes,el));path.unshift(-1);el=p.host;}else{path.unshift(Array.prototype.indexOf.call(p.childNodes,el));el=p;}}return path;}"
++                })).await{Ok(v)=>serde_json::from_value::<Vec<i64>>(v["result"]["value"].clone()).ok(),Err(_)=>None};
++                let Some(path)=path else {continue};
++                f.owner_path=Some(path);f.parent_id=Some(parent.clone());
++                if session.call("Page.createIsolatedWorld",serde_json::json!({"frameId":f.id,"worldName":"trinity-frame-owners"})).await.is_ok(){queue.push_back((f.id.clone(),session.clone()));}
++                else if let Ok(target)=tab.session().call("Target.attachToTarget",serde_json::json!({"targetId":f.id,"flatten":true})).await{
++                    if let Some(sid)=target["sessionId"].as_str(){attached.push(sid.into());queue.push_back((f.id.clone(),zendriver::SessionHandle::new(tab.session().connection().clone(),sid.to_owned())));}
++                }
++            }
++            session.call("Runtime.releaseObjectGroup",serde_json::json!({"objectGroup":"trinity-frame-owners"})).await
++                .map_err(|e|map_error(McpServerError::from(zendriver::ZendriverError::from(e))))?;
++        }
++        Ok(())
++    }.await;
++    for sid in attached {
++        tab.session()
++            .call(
++                "Target.detachFromTarget",
++                serde_json::json!({"sessionId":sid}),
++            )
++            .await
++            .map_err(|e| map_error(McpServerError::from(zendriver::ZendriverError::from(e))))?;
++    }
++    result?;
++    out.retain(|f| f.is_main || f.owner_path.is_some() || tree_ids.contains(&f.id));
++    out.sort_by(|a, b| b.is_main.cmp(&a.is_main).then(a.id.cmp(&b.id)));
++    Ok(FrameListOutput {
++        frames: out,
++        capture_protocol: "rendered-document-v1".into(),
++        build_id: "trinity-document-v1".into(),
++    })
+ }
+ 
+ // ---------- browser_frame_goto -------------------------------------------
+--- a/src/tools/eval.rs
++++ b/src/tools/eval.rs
+@@ -76,43 +76,98 @@
+     let s = state.lock().await;
+     let tab = current_tab(&s).await?;
+     let value: serde_json::Value = if let Some(fid) = input.frame_id.as_deref() {
+-        match lookup_frame(&tab, fid).await {
+-            Ok(frame) => frame.evaluate(&input.expression).await.map_err(|e| map_error(McpServerError::from(e)))?,
+-            Err(_) => {
+-                // A frame missing from the event registry may still exist in
+-                // this tab's authoritative tree. Chrome validates frameId here.
+-                let mut attached = None;
+-                let session = match tab.session().call("Page.createIsolatedWorld", serde_json::json!({"frameId":fid,"worldName":"trinity-frame-read"})).await {
+-                    Ok(world) => (tab.session().clone(), world),
+-                    Err(_) => {
+-                        tab.session().call("DOM.getFrameOwner",serde_json::json!({"frameId":fid})).await
+-                            .map_err(|e| map_error(McpServerError::from(zendriver::ZendriverError::from(e))))?;
+-                        let target = tab.session().call("Target.attachToTarget",serde_json::json!({"targetId":fid,"flatten":true})).await
+-                            .map_err(|e| map_error(McpServerError::from(zendriver::ZendriverError::from(e))))?;
+-                        let sid=target["sessionId"].as_str().ok_or_else(||ErrorData::internal_error("Missing child session",None))?.to_owned();
+-                        let child=zendriver::SessionHandle::new(tab.session().connection().clone(),sid.clone());
+-                        attached=Some(sid);
+-                        let world=match child.call("Page.createIsolatedWorld",serde_json::json!({"frameId":fid,"worldName":"trinity-frame-read"})).await {
+-                            Ok(world)=>world,
+-                            Err(error)=>{
+-                                tab.session().call("Target.detachFromTarget",serde_json::json!({"sessionId":attached.take()})).await.map_err(|e|map_error(McpServerError::from(zendriver::ZendriverError::from(e))))?;
+-                                return Err(map_error(McpServerError::from(zendriver::ZendriverError::from(error))));
+-                            }
+-                        };
+-                        (child,world)
++        {
++            // A frame missing from the event registry may still exist in
++            // this tab's authoritative tree. Chrome validates frameId here.
++            let mut attached = None;
++            let session = match tab
++                .session()
++                .call(
++                    "Page.createIsolatedWorld",
++                    serde_json::json!({"frameId":fid,"worldName":"trinity-frame-read"}),
++                )
++                .await
++            {
++                Ok(world) => (tab.session().clone(), world),
++                Err(_) => {
++                    let frames = crate::tools::frames::owned_frames(&tab).await?;
++                    if !frames
++                        .frames
++                        .iter()
++                        .any(|f| f.id == fid && (f.is_main || f.owner_path.is_some()))
++                    {
++                        return Err(ErrorData::internal_error(
++                            "Frame ownership unavailable",
++                            None,
++                        ));
+                     }
+-                };
+-                let (session,world)=session;
+-                let evaluated: Result<serde_json::Value, ErrorData> = async {
++                    let target = tab
++                        .session()
++                        .call(
++                            "Target.attachToTarget",
++                            serde_json::json!({"targetId":fid,"flatten":true}),
++                        )
++                        .await
++                        .map_err(|e| {
++                            map_error(McpServerError::from(zendriver::ZendriverError::from(e)))
++                        })?;
++                    let sid = target["sessionId"]
++                        .as_str()
++                        .ok_or_else(|| ErrorData::internal_error("Missing child session", None))?
++                        .to_owned();
++                    let child = zendriver::SessionHandle::new(
++                        tab.session().connection().clone(),
++                        sid.clone(),
++                    );
++                    attached = Some(sid);
++                    let world = match child
++                        .call(
++                            "Page.createIsolatedWorld",
++                            serde_json::json!({"frameId":fid,"worldName":"trinity-frame-read"}),
++                        )
++                        .await
++                    {
++                        Ok(world) => world,
++                        Err(error) => {
++                            tab.session()
++                                .call(
++                                    "Target.detachFromTarget",
++                                    serde_json::json!({"sessionId":attached.take()}),
++                                )
++                                .await
++                                .map_err(|e| {
++                                    map_error(McpServerError::from(
++                                        zendriver::ZendriverError::from(e),
++                                    ))
++                                })?;
++                            return Err(map_error(McpServerError::from(
++                                zendriver::ZendriverError::from(error),
++                            )));
++                        }
++                    };
++                    (child, world)
++                }
++            };
++            let (session, world) = session;
++            let evaluated: Result<serde_json::Value, ErrorData> = async {
+                     let context = world["executionContextId"].as_i64().ok_or_else(|| ErrorData::internal_error("Missing frame context",None))?;
+                     let result = session.call("Runtime.evaluate", serde_json::json!({"expression":input.expression,"contextId":context,"returnByValue":true,"awaitPromise":true}))
+                         .await.map_err(|e| map_error(McpServerError::from(zendriver::ZendriverError::from(e))))?;
+                     if result.get("exceptionDetails").is_some() {return Err(ErrorData::internal_error("Frame evaluation failed",None));}
+                     Ok(result["result"]["value"].clone())
+                 }.await;
+-                if let Some(sid)=attached {tab.session().call("Target.detachFromTarget",serde_json::json!({"sessionId":sid})).await.map_err(|e|map_error(McpServerError::from(zendriver::ZendriverError::from(e))))?;}
+-                evaluated?
++            if let Some(sid) = attached {
++                tab.session()
++                    .call(
++                        "Target.detachFromTarget",
++                        serde_json::json!({"sessionId":sid}),
++                    )
++                    .await
++                    .map_err(|e| {
++                        map_error(McpServerError::from(zendriver::ZendriverError::from(e)))
++                    })?;
+             }
++            evaluated?
+         }
+     } else {
+         tab.evaluate(&input.expression)

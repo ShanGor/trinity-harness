@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactElement } from 'react';
-import { App, Button, Input, Modal } from 'antd';
+import { App, Button, Dropdown, Input, Modal } from 'antd';
+import { MoreOutlined } from '@ant-design/icons';
 import type { AcpClient } from '@trinity-harness/client-acp';
 import { newId, type ServerEvent } from '@trinity-harness/shared';
 import type { ChatItem } from './chat-items';
@@ -112,15 +113,23 @@ export function MessageControls({
                 Edit
               </Button>
             )}
-            <Button
-              type="text"
-              className="message-text-action"
-              aria-label={`Delete ${item.role === 'user' ? 'message' : 'response'}`}
+            <Dropdown
+              trigger={['click']}
               disabled={pending}
-              onClick={() => void remove()}
+              menu={{
+                items: [{ key: 'delete', label: 'Delete', danger: true }],
+                onClick: ({ key }) => {
+                  if (key === 'delete') void remove();
+                },
+              }}
             >
-              Delete
-            </Button>
+              <Button
+                type="text"
+                aria-label={`More ${item.role === 'user' ? 'message' : 'response'} actions`}
+                disabled={pending}
+                icon={<MoreOutlined />}
+              />
+            </Dropdown>
           </>
         )}
       </ResponseActions>

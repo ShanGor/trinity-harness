@@ -48,7 +48,7 @@ export class CoreToolRegistry implements ToolRegistry {
     return [...this.tools.values()].map((def) => ({
       name: def.name,
       description: def.description,
-      parameters: z.toJSONSchema(def.parameters) as Record<string, unknown>,
+      parameters: z.toJSONSchema(def.parameters, { io: 'input' }) as Record<string, unknown>,
     }));
   }
 

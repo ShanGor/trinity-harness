@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { checkWorkspaceCopy } from './check-workspace-copy.js';
+import { browserHtmlToMarkdown } from '../packages/core/src/tools/browser-html-markdown.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, symlink, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -156,6 +158,16 @@ console.log(`Guest ${phase}: typed missing-file errors and subsequent healthy re
 const identity = await remote.execArgv('/usr/bin/id', ['-u'], { signal, maxOutputBytes: 1024 });
 assert.equal(identity.exitCode, 0);
 assert.equal(identity.stdout.trim(), '1000');
+await remote.writeFile('normalize-check.html', '<h1>Rendered 中文</h1><p>Saved frame document</p>');
+const normalized = await browserHtmlToMarkdown(
+  (await remote.readFile('normalize-check.html')).content,
+  signal,
+);
+assert.match(normalized.text, /# Rendered 中文/);
+assert.match(normalized.text, /Saved frame document/);
+console.log(`Guest ${phase}: saved HTML read and Turndown conversion passed.`);
+await checkWorkspaceCopy(remote, signal);
+console.log(`Guest ${phase}: exclusive workspace-copy acceptance passed.`);
 for (const codepoint of ['4e2d', '570b', '3042', 'ac00']) {
   const fonts = await remote.execArgv(
     '/usr/bin/fc-list',
@@ -287,6 +299,18 @@ try {
   };
   const binding = await driver.authorize(sessionId, 'navigate', url, signal);
   await driver.navigate(binding, url, context);
+  const captureBinding = await driver.authorize(sessionId, 'capture_document', url, signal);
+  const rendered = await driver.captureDocument(captureBinding, context);
+  assert.equal(rendered.protocol, 'rendered-document-v1');
+  assert.equal(rendered.buildId, 'trinity-document-v1');
+  assert.equal(rendered.omittedFrames, 0);
+  assert(
+    rendered.documents.some((document) =>
+      document.nodes.some((node) => node.text?.includes('Trinity Firecracker Zendriver')),
+    ),
+    'Guest rendered capture must include the fixture heading, not just negotiate a protocol.',
+  );
+  console.log(`Guest ${phase}: rendered-document capability and fixture content capture passed.`);
   const preview = await captureBrowserPreview(
     driver,
     driver,

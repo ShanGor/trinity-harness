@@ -54,12 +54,16 @@ export class FirecrackerGuestRelay implements GuestRelayPort, BrowserGuestRelayP
       const connecting = AbortSignal.any([active, AbortSignal.timeout(60_000)]);
       const attempt = (): void => {
         const socket = connect({ path: socketPath, signal: active });
+        const handshakeDeadline = AbortSignal.timeout(2000);
         let header = Buffer.alloc(0);
         let complete = false;
         const fail = (error: Error): void => {
           if (!complete) {
             complete = true;
             connecting.removeEventListener('abort', aborted);
+            handshakeDeadline.removeEventListener('abort', booting);
+            socket.removeListener('end', booting);
+            socket.removeListener('close', booting);
             const code = (error as NodeJS.ErrnoException).code;
             if (
               !connecting.aborted &&
@@ -76,7 +80,14 @@ export class FirecrackerGuestRelay implements GuestRelayPort, BrowserGuestRelayP
         };
         const aborted = (): void =>
           fail(new Error('Guest connection startup timed out or was cancelled'));
+        // An early vsock CONNECT can close cleanly or remain unanswered while
+        // the guest listener starts. No HTTP bytes are sent before its OK.
+        const booting = (): void =>
+          fail(Object.assign(new Error('Guest CONNECT is not ready'), { code: 'GUEST_BOOTING' }));
         connecting.addEventListener('abort', aborted, { once: true });
+        handshakeDeadline.addEventListener('abort', booting, { once: true });
+        socket.once('end', booting);
+        socket.once('close', booting);
         socket.once('error', fail);
         if (connecting.aborted) {
           aborted();
@@ -101,6 +112,9 @@ export class FirecrackerGuestRelay implements GuestRelayPort, BrowserGuestRelayP
           }
           complete = true;
           connecting.removeEventListener('abort', aborted);
+          handshakeDeadline.removeEventListener('abort', booting);
+          socket.removeListener('end', booting);
+          socket.removeListener('close', booting);
           socket.removeListener('data', read);
           socket.removeListener('error', fail);
           socket.pause();
@@ -115,6 +129,39 @@ export class FirecrackerGuestRelay implements GuestRelayPort, BrowserGuestRelayP
       return undefined;
     };
     try {
+      // The vsock listener may accept CONNECT before systemd's Unix-socket
+      // proxy can reach the guest HTTP server. Probe its fixed, read-only 404
+      // route first; only these probes may be retried after HTTP dispatch.
+      const readiness = AbortSignal.any([active, AbortSignal.timeout(60_000)]);
+      for (;;) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const probe = httpRequest(
+              { host: 'guest', port: 80, path: '/', method: 'GET', agent, signal: readiness },
+              (response) => {
+                let size = 0;
+                response.on('error', reject);
+                response.on('data', (chunk: Buffer) => {
+                  size += chunk.length;
+                  if (size > 1024) response.destroy(new Error('Guest readiness response overflow'));
+                });
+                response.once('end', () => {
+                  if (response.statusCode === 404) resolve();
+                  else reject(new Error('Guest readiness response unavailable'));
+                });
+              },
+            );
+            probe.once('error', reject);
+            probe.end();
+          });
+          break;
+        } catch (error) {
+          readiness.throwIfAborted();
+          const code = (error as NodeJS.ErrnoException).code;
+          if (!['ECONNRESET', 'ECONNREFUSED', 'EPIPE'].includes(code ?? '')) throw error;
+          await delay(500, undefined, { signal: readiness });
+        }
+      }
       return await new Promise<GuestValue>((resolve, reject) => {
         const body = JSON.stringify(rpc);
         const request = httpRequest(

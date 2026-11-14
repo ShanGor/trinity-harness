@@ -1,7 +1,9 @@
 import {
   browserResultSchema,
+  browserDocumentResultSchema,
   browserErrorSchema,
   researchResultSchema,
+  turnGuidanceEventSchema,
   type SessionEvent,
 } from '@trinity-harness/contracts';
 import { browserCommand } from '../tools/research.js';
@@ -114,6 +116,9 @@ export function progressGuidance(
   const unavailableTargets = new Set<string>();
   const repeatedUnavailableTargets = new Set<string>();
   let headingOnlySelection = false;
+  let extractionGap = false;
+  let partialDocumentCapture = false;
+  let documentCaptureUnavailable = false;
   let failures = 0;
   let liveAccessDenied = false;
   let readyToAnswer = false;
@@ -136,6 +141,21 @@ export function progressGuidance(
     if (call?.name === 'browser') {
       const args = call.args as { operation?: unknown; url?: unknown } | null;
       const parsed = browserResultSchema.safeParse(event.value);
+      const documentCapture = browserDocumentResultSchema.safeParse(event.value);
+      if (
+        !event.isError &&
+        documentCapture.success &&
+        documentCapture.data.callId === event.callId &&
+        documentCapture.data.operation === 'capture_document' &&
+        args?.operation === 'capture_document'
+      ) {
+        partialDocumentCapture = documentCapture.data.coverage === 'partial';
+        extractionGap = false;
+        documentCaptureUnavailable = false;
+        failures = 0;
+        liveAccessDenied = false;
+        continue;
+      }
       const target =
         args?.operation === 'navigate' && typeof args.url === 'string'
           ? fingerprint(args.url)
@@ -153,17 +173,34 @@ export function progressGuidance(
         unavailableTargets.delete(target);
         repeatedUnavailableTargets.delete(target);
       }
-      const saved = ['read_observation', 'search_observation'].includes(
-        String((call.args as { operation?: unknown } | null)?.operation),
-      );
+      const saved = [
+        'read_observation',
+        'search_observation',
+        'extract_capture',
+        'read_capture',
+        'search_capture',
+        'export_capture',
+        'export_markdown',
+      ].includes(String((call.args as { operation?: unknown } | null)?.operation));
       if (!event.isError && parsed.success) {
-        if (args?.operation === 'web_search') {
-          const links = (parsed.data.links ?? []).flatMap((link) => {
-            const url = new URL(link.url);
-            if (url.origin === new URL(parsed.data.url).origin) return [];
-            url.hash = '';
-            return [fingerprint(url.href)];
-          });
+        const discovery = parsed.data.discovery;
+        // Old events have no adapter metadata. Preserve their original web_search
+        // semantics without teaching the loop provider URL or redirect formats.
+        if (
+          !saved &&
+          !parsed.data.saved &&
+          parsed.data.callId === event.callId &&
+          parsed.data.operation === args?.operation &&
+          (discovery || args?.operation === 'web_search')
+        ) {
+          const links =
+            discovery?.destinationKeys ??
+            (parsed.data.links ?? []).flatMap((link) => {
+              const url = new URL(link.url);
+              if (url.origin === new URL(parsed.data.url).origin) return [];
+              url.hash = '';
+              return [fingerprint(url.href)];
+            });
           recentDiscovery.push(links.some((link) => !discoveredLinks.has(link)));
           if (recentDiscovery.length > 4) recentDiscovery.shift();
           for (const link of links) discoveredLinks.add(link);
@@ -171,6 +208,19 @@ export function progressGuidance(
         if (!saved && !parsed.data.saved) {
           failures = 0;
           liveAccessDenied = false;
+        }
+        if (
+          !saved &&
+          !parsed.data.saved &&
+          ['navigate', 'get_page_text', 'web_search'].includes(parsed.data.operation)
+        ) {
+          const extraction = parsed.data.extraction;
+          extractionGap = Boolean(
+            extraction &&
+            (extraction.status !== 'text-captured' ||
+              (extraction.unavailableFrames ?? extraction.visibleFrames) ||
+              extraction.canvases),
+          );
         }
         const blocks = parsed.data.blocks;
         const signatures = blocks.map((block) =>
@@ -207,7 +257,13 @@ export function progressGuidance(
           )
         )
           failures += 1;
-        if (error.success && ['NOT_AUTHORIZED', 'DISABLED'].includes(error.data.code))
+        if (
+          error.success &&
+          error.data.code === 'DISABLED' &&
+          args?.operation === 'capture_document'
+        )
+          documentCaptureUnavailable = true;
+        else if (error.success && ['NOT_AUTHORIZED', 'DISABLED'].includes(error.data.code))
           liveAccessDenied = true;
       }
       continue;
@@ -246,29 +302,41 @@ export function progressGuidance(
       repeated = 0;
     }
   }
-  const advice: string[] = actionGuidance(events.slice(promptSeq));
+  const advice: string[] = [];
+  if (documentCaptureUnavailable)
+    advice.push(
+      'Rendered document capture is unavailable on the installed build. This does not disable ordinary live navigation or semantic reads. Use supported saved/live evidence and report the precise extraction limit; do not retry capture or switch drivers.',
+    );
+  if (partialDocumentCapture)
+    advice.push(
+      'Rendered document capture has explicit omitted or limited scopes. Convert and read available saved documents offline; conversion errors do not require recapture. Media gaps do not invalidate text evidence. Do not repeat unchanged capture, reload, or replay input to repair coverage. Preserve the unresolved user requirement and report the specific document/media limit when it cannot be retrieved. This is recovery advice, not proof of completion.',
+    );
+  if (extractionGap && !documentCaptureUnavailable)
+    advice.push(
+      'Browser extraction has limited top-document coverage. This is not evidence that navigation failed. Reuse the existing page; inspect one fresh screenshot or read_page if needed to distinguish loading from an extraction boundary. When capture_document is advertised, use one rendered document capture for unresolved frame/extraction gaps, then extract_capture/read_capture offline. Export requires the exact captureId from that successful capture, never an observationId or snapshotId. If capture_document is absent and no authorized saved rendered capture exists, a new HTML/media export is unavailable: report the deployment capability gap instead of probing saved operations or transcribing scrolling screenshots as a complete export. Unresolved frames, closed shadow roots and canvas text require supported browser capabilities; do not guess their contents or endpoints. Do not reopen the same rendered page, repeat unchanged extraction, or switch to curl/shell HTTP or view-source as an extraction workaround. If the advertised operations cannot retrieve the missing content, report the precise limitation and do not claim a complete export.',
+    );
   if (repeatedUnavailableTargets.size)
     advice.push(
       'A navigation repeated a target already reported PAGE_UNAVAILABLE in this turn. Changing unrelated arguments or succeeding on another page does not establish that target recovered. Do not automatically retry it again; use delivered evidence or a different relevant source unless fresh evidence establishes recovery. This is source-specific advice, not a browser-wide outage.',
     );
   if (recentDiscovery.length === 4 && recentDiscovery.filter((novel) => !novel).length >= 3)
     advice.push(
-      'At least three of the last four web searches discovered no new destination URLs beyond earlier search results. This does not prove the question is answered or the snippets are complete. Identify the unresolved user requirement and a plausible new source before another query variation; read relevant discovered sources or provide supported findings with explicit uncertainty when further discovery is unlikely to change the answer. Do not infer a fact from missing search results. This is strategy advice, not a tool limit or stop rule.',
+      'At least three of the last four search observations delivered no new destination URLs beyond earlier search results. Equivalent browser operations share this discovery history. Partial captures and link limits can omit destinations; this does not prove the question is answered or the snippets are complete. Identify the unresolved user requirement and a plausible new source before another query variation; read relevant discovered sources or provide supported findings with explicit uncertainty when further discovery is unlikely to change the answer. Do not infer a fact from missing search results. This is strategy advice, not a tool limit or stop rule.',
     );
   if (researchAvailable && citationFailures >= 2)
     advice.push(
-      "Research citations have been rejected repeatedly. Prefer a delivered browser observation/block/range reference to resolve exact text without retyping. For legacy sources, change the quote, not just the claim: copy a short contiguous passage directly from the observed excerpt, preserving punctuation, or remove the unsupported finding and record the remaining notes. Check that each passage supports its claim. Successful browser reads remain usable. This is recovery advice, not a stop request. The final answer should address the user's question and evidence limits; omit internal research bookkeeping, retry plans, and complaints about the validator.",
+      "Research citations have been rejected repeatedly. Prefer a delivered browser observation/block/range reference to resolve exact text without retyping. For legacy sources, change the quote, not just the claim: copy a short contiguous passage directly from the observed excerpt, preserving punctuation, or remove the unsupported finding and record the remaining notes. Check that each passage supports its claim. Successful browser reads remain usable. Notes are optional: when those reads support the requested answer, answer without a successful note record. Do not collect sources solely to make notes validate. This is recovery advice, not a stop request. The final answer should address the user's question and evidence limits; omit internal research bookkeeping, retry plans, and complaints about the validator.",
     );
   if (researchAvailable && readyToAnswer)
     advice.push(
-      'Your research notes mark the evidence ready for answering. Produce the final answer with supported findings, source URLs and explicit uncertainty. Explore further only if you identify a concrete unresolved requirement from the user request.',
+      'Your research notes mark the evidence ready for answering. Readiness and findings are model-authored. Reference validation checks delivered passages, not whether claims follow from them. Check the claims against those passages, preserve unsupported details as unknown, and answer the current request with source URLs and explicit uncertainty. Explore further only for a concrete unresolved requirement from the user request.',
     );
   if (liveAccessDenied)
-    advice.push(
+    advice.unshift(
       'Live browser access was denied or disabled. Changing domains, retrying the same operation, or reading saved evidence does not restore live authorization. Use relevant saved evidence if available and return a useful qualified answer or a focused clarification with the access limitation. Do not delegate live research to work around an unavailable browser.',
     );
   if (failures >= 3)
-    advice.push(
+    advice.unshift(
       'At least three browser channel failures or empty reads occurred without a successful live operation. Successful saved reads do not demonstrate live recovery. Follow the structured error recovery once; change sources only for a source-specific failure. If access remains unavailable, answer from supported evidence or ask the focused question needed to proceed, explicitly reporting incomplete work. Do not keep testing domains or retrying the same unsuccessful sequence.',
     );
   if (headingOnlySelection)
@@ -287,5 +355,14 @@ export function progressGuidance(
     advice.push(
       'The turn is in its final quarter of the step budget. Prioritize unresolved requirements, avoid redundant exploration, and prepare a useful final answer with sources and limitations. The final step is reserved for answering.',
     );
-  return advice.length ? advice.join('\n') : null;
+  advice.push(...actionGuidance(events.slice(promptSeq)));
+  // The event contract bounds the combined text, not each individual warning.
+  // Keep complete messages in priority order; generic repetition is lowest priority.
+  const limit = turnGuidanceEventSchema.shape.advice.maxLength!;
+  let bounded = '';
+  for (const message of advice) {
+    const candidate = bounded ? `${bounded}\n${message}` : message;
+    if (candidate.length <= limit) bounded = candidate;
+  }
+  return bounded || null;
 }

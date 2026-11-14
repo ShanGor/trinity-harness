@@ -158,7 +158,7 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
       messages.push({
         role: 'user',
         context: 'control',
-        content: `[Agent working plan and verification. Model-authored interpretation/checks; the original user request remains authoritative. For task verify, prefer the exact resultSeq from eligible evidence; an exact recorded callId also works. Never guess provider IDs. Follow commandRepairs: exact_command_required means run its command unchanged through bash (extra formatting, filters or diagnostics change the command); fresh_evidence_required means collect a fresh exact-command result; verification_required means task verify with checkId as id and the supplied resultSeq. Inspect prior effects and apply normal permissions before rerunning commands; never repeat mutations merely to repair bookkeeping. Repeating a plan or assessing fulfilled cannot replace verification.]\n${JSON.stringify({ intent: plan.intent, interpretation: plan.interpretation, assumptions: plan.assumptions, revisionReason: plan.revisionReason, checks: plan.checks, ...verificationState })}`,
+        content: `[Agent working plan and verification. Model-authored interpretation/checks; the original user request remains authoritative. For task verify, prefer the exact resultSeq from eligible evidence; an exact recorded callId also works. Never guess provider IDs. Use rejections for the exact check revision, result and invalidating sequence. Select matching receipts or inspect only the affected state; unknown effects require inspection before retry. Follow commandRepairs: exact_command_required means run its command unchanged through bash (extra formatting, filters or diagnostics change the command); fresh_evidence_required means collect a fresh exact-command result; verification_required means task verify with checkId as id and the supplied resultSeq. Inspect prior effects and apply normal permissions before rerunning commands; never repeat mutations merely to repair bookkeeping. Repeating a plan or assessing fulfilled cannot replace verification.]\n${JSON.stringify({ intent: plan.intent, interpretation: plan.interpretation, assumptions: plan.assumptions, revisionReason: plan.revisionReason, checks: plan.checks, ...verificationState })}`,
       });
     const recovery = events.findLast(
       (event) => event.type === 'task/recovery' && event.promptId === promptId,
@@ -239,8 +239,8 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
     if (closed.has(i) && !finals.has(i)) return;
     switch (event.type) {
       case 'turn/guidance': {
-        if (i === latestGuidance)
-          messages.push({ role: 'user', content: `[Runtime progress guidance]\n${event.advice}` });
+        // Put current control guidance at the next decision, after complete tool
+        // pairs. It must not disappear behind a long sequence of later results.
         break;
       }
       case 'message/user': {
@@ -410,6 +410,13 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
       })),
     );
   }
+  const guidance = events[latestGuidance];
+  if (guidance?.type === 'turn/guidance')
+    messages.push({
+      role: 'user',
+      context: 'control',
+      content: `[Runtime progress guidance]\n${guidance.advice}`,
+    });
   return messages;
 }
 

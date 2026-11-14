@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import { browserResultSchema } from '@trinity-harness/contracts';
 import type {
   BrowserRuntimeRequest,
   BrowserRuntimeResult,
@@ -29,7 +30,7 @@ function success(r: BrowserRuntimeRequest): BrowserRuntimeResult {
     isError: false,
     value: {
       kind: 'browser-result-v1',
-      operation: r.args.operation,
+      operation: browserResultSchema.shape.operation.parse(r.args.operation),
       sessionId: r.sessionId,
       callId: r.callId,
       observationId: 'observation',

@@ -35,16 +35,38 @@ export function browserHash(
 export function browserArtifactUri(sessionId: string, observationId: string): string {
   return `blob://browser/${encodeURIComponent(sessionId)}/${observationId}.json`;
 }
+/** Source deletion/replacement fences apply to stored artifacts as well as current context. */
+export function suppressedBrowserCalls(events: readonly SessionEvent[]): Set<string> {
+  const prompts = new Set(
+    events.flatMap((event) =>
+      event.type === 'message/removed' || event.type === 'prompt/discarded'
+        ? [event.promptId]
+        : event.type === 'message/user' && event.revision
+          ? [event.revision.promptId]
+          : [],
+    ),
+  );
+  const suppressed = new Set<string>();
+  let promptId: string | undefined;
+  for (const event of events) {
+    if (event.type === 'message/user') promptId = event.eventId;
+    if (event.type === 'tool/call' && event.name === 'browser' && promptId && prompts.has(promptId))
+      suppressed.add(event.callId);
+  }
+  return suppressed;
+}
 export function browserDeliveries(
   events: readonly SessionEvent[],
   sessionId: string,
   from = 0,
 ): { result: BrowserResult; callId: string; seq: number }[] {
   const calls = new Set<string>();
+  const suppressed = suppressedBrowserCalls(events);
   const deliveries: { result: BrowserResult; callId: string; seq: number }[] = [];
   for (let i = from; i < events.length; i++) {
     const event = events[i]!;
-    if (event.type === 'tool/call' && event.name === 'browser') calls.add(event.callId);
+    if (event.type === 'tool/call' && event.name === 'browser' && !suppressed.has(event.callId))
+      calls.add(event.callId);
     if (event.type !== 'tool/result' || event.isError || !calls.has(event.callId)) continue;
     const parsed = browserResultSchema.safeParse(event.value);
     if (
@@ -55,6 +77,12 @@ export function browserDeliveries(
     )
       continue;
     const result = parsed.data;
+    if (
+      ['capture_document', 'read_capture', 'search_capture', 'export_capture'].includes(
+        result.operation,
+      )
+    )
+      continue;
     if (result.snapshot && result.snapshot.snapshotId !== result.observationId) continue;
     if (
       result.image &&
@@ -111,6 +139,28 @@ export async function loadBrowserObservation(
     parsed.blocks.some((b, i) => b.id !== `b${i}`)
   )
     throw new Error('Invalid observation integrity');
+  if (parsed.derivation) {
+    const { loadDocumentCapture, convertDocumentCapture } = await import('./browser-documents.js');
+    const manifest = await loadDocumentCapture(
+      blobs,
+      events,
+      sessionId,
+      parsed.derivation.captureId,
+      signal,
+    );
+    if (manifest.hash !== parsed.derivation.captureHash)
+      throw new Error('Capture derivation integrity failure');
+    const converted = convertDocumentCapture(
+      manifest,
+      parsed.derivation.rootDocumentId,
+      parsed.derivation.offset,
+    );
+    if (
+      canonicalBrowserJson(converted.blocks) !== canonicalBrowserJson(parsed.blocks) ||
+      canonicalBrowserJson(converted.derivation) !== canonicalBrowserJson(parsed.derivation)
+    )
+      throw new Error('Capture source mapping mismatch');
+  }
   return parsed;
 }
 export function browserPromptIndex(events: readonly SessionEvent[]): number {

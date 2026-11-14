@@ -29,9 +29,59 @@ Enterprise-grade, multi-user, browser ↔ server general-purpose AI Agent platfo
 - **Kubernetes (M5)** — `deploy/docker/*.Dockerfile` images and the `deploy/helm/trinity-harness` chart: server HPA 2–20 + PDB, agent-worker HPA 1–50 (KEDA for queue-depth 0→N, see the checklist), hardened `securityContext`, default-deny egress NetworkPolicy with allowlist, gVisor `runtimeClassName` option for the worker, Ingress with SSE buffering disabled. Release gate: [`docs/production-checklist.md`](docs/production-checklist.md).
 - **Load test (M5)** — `pnpm load:test` (`scripts/load-test.mjs`): auth / prompt-enqueue / SSE-replay-fan-out phases with p50/p95/p99 and an error-rate gate, runnable against any deployed instance.
 
-## Quick start (local development)
+## Run the deployed single-host stack
 
-This starts the full local app: the web UI, API, background agent worker and audit consumer. You need Node.js **22.12+**, pnpm **11+**, PostgreSQL **16+**, Redis **7+**, and an API key for the provider selected by `MODEL`.
+Use this path for an existing Podman deployment. Run commands from the repository root as the same unprivileged user who deployed it. PostgreSQL, Redis and the provisioned Firecracker Node Agent are separate host services. Initial setup requires Node.js 22.12+, pnpm 11+, Podman, Cargo, the Bifrost Bridge checkout, and the [Firecracker host and guest prerequisites](deploy/firecracker/README.md).
+
+| Task                                             | Command                                | Applies changes?                                                   |
+| ------------------------------------------------ | -------------------------------------- | ------------------------------------------------------------------ |
+| Install or update application code/configuration | `./scripts/deploy-podman.sh`           | Builds images, applies migrations and replaces all five containers |
+| Start existing containers                        | `./scripts/podman-services.sh start`   | Uses their saved configuration                                     |
+| Restart existing containers                      | `./scripts/podman-services.sh restart` | Restarts the same containers; no rebuild or migration              |
+| Stop application containers                      | `./scripts/podman-services.sh stop`    | Keeps containers and data; leaves Node Agent and guests running    |
+| Inspect container state                          | `./scripts/podman-services.sh status`  | Reports process state only                                         |
+
+For first installation, run `pnpm install`, create `.env` from `.env.example` once, configure credentials and the matching host runtime, then run `./scripts/deploy-podman.sh`. This packaging requires `EXECUTION_DRIVER=firecracker` and `BROWSER_DRIVER=zendriver`. Keep an existing `.env`; startup uses `ADMIN_EMAIL`/`ADMIN_PASSWORD` to bootstrap an account only when no users exist.
+
+Open **http://localhost:8080** (or your configured `WEB_PORT`) and sign in. The deployment runs `trinity-browser-runtime`, `trinity-server`, `trinity-agent-worker`, `trinity-audit-consumer` and `trinity-gateway`. It starts an inactive installed Node Agent if needed, but does not restart an active Node Agent or replace guest images.
+
+Keep one supervisor for each deployed service. Stop IDE run configurations and `pnpm dev:*` watchers for this deployment before using Podman. In particular, `pnpm dev:browser-runtime` must not replace or run alongside the deployed Browser Runtime on port 3010. Separate development environments need separate ports, databases, queues and runtime assignments.
+
+### Check application and guest readiness
+
+```bash
+./scripts/podman-services.sh status
+curl --fail http://127.0.0.1:8080/api/health
+systemctl is-active trinity-node-agent.service
+podman logs --tail 50 trinity-browser-runtime
+podman logs --tail 50 trinity-agent-worker
+```
+
+Use your configured web port in the health URL. Start/restart also checks authenticated Node Agent and Browser Runtime request validation. These checks establish service readiness; they do not prove that a guest boots, its RPC connection works, or a browser page can be read. Verify those separately through an authenticated session: check the VM sidebar, request a fresh page read, and inspect the terminal result. A `running` VM or a guest console's RPC-ready marker alone is insufficient.
+
+If a turn remains on **“I’m getting your PC ready. This may take a moment…”**, inspect its terminal error and guest routing rather than repeatedly restarting application containers. That message is a progress notification, not a readiness receipt. See [runtime diagnostics and recovery](docs/runtime-implementation.md) and [Firecracker operation and recovery](deploy/firecracker/README.md#operation-and-recovery).
+
+### Apply the correct kind of update
+
+| Change                                                                             | Required delivery                                                                                                                         |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Application TypeScript, web bundle, dependencies or deployment `.env`              | `./scripts/deploy-podman.sh`; `restart` retains old images and saved configuration                                                        |
+| Guest runtime code, bundled guest skills/dependencies, Chrome or patched Zendriver | Prepare a fresh guest payload, build and test a new immutable guest image, install through node maintenance, then wake a fresh generation |
+| Host Node Agent, launcher or networking                                            | Follow the host maintenance release procedure; application restart does not upgrade them                                                  |
+
+For a guest update, follow the [guest build and replacement guide](deploy/firecracker/README.md#development-guest-with-actual-tools-and-zendriver) and [node maintenance gate](deploy/firecracker/README.md#draining-a-node-before-release). Use fresh candidate directories, build the matching patched Zendriver before payload preparation, and retain the old verified image and an offline data-volume backup. Desktop candidates require the desktop build and acceptance checks. Run the privileged install through the maintenance wrapper, confirm VMM shutdown, preserve each assigned data disk and runtime metadata, and verify the new generation through the authenticated owner route. A built candidate is not installed until that image replacement succeeds. Failed acceptance remains a failed gate; inspect rollback and maintenance state before resuming.
+
+### Recover browser ownership failures
+
+`NOT_EXECUTED` with `effect: "unknown"` can mean the runtime rejected an abandoned active binding before dispatch. It can also represent other uncertain outcomes; trace the exact call and journal before drawing a conclusion. Do not repeat navigation or input automatically.
+
+For an ordinary inactive browser, the Browser sidebar's **More controls → Restart browser**, then **Start browser**, can recover it. An active binding owned by a lost supervisor requires administrator recovery: confirm the old supervisor and its assigned guest browser processes are gone, using node drain and confirmed guest shutdown when needed. Invalidate only the matching session/owner/generation binding under the browser lock, preserve command/input journals, evidence and profiles, then resume and start one supervisor. Current automatic recovery and generic `reobserve` advice do not resolve that abandoned binding. Do not clear bindings, remove profile locks or delete disks merely because a service was restarted. See [the runtime recovery details](docs/runtime-implementation.md).
+
+Full packaging instructions: [deployment guide](docs/deployment-guide.md#single-host-podman-deployment).
+
+## Development terminals (alternative to Podman)
+
+Use this workflow when developing the services outside Podman. Stop the corresponding deployed services first. This starts the web UI, API, background agent worker and audit consumer; managed browsing also needs the Browser Runtime below. You need Node.js **22.12+**, pnpm **11+**, PostgreSQL **16+**, Redis **7+**, and an API key for the provider selected by `MODEL`.
 
 ### 1. Install and configure
 
@@ -108,7 +158,7 @@ To start again later, ensure PostgreSQL and Redis are running, then start the fo
 
 ## Firecracker guest execution (optional)
 
-The four local commands above start the control plane and web app. With Firecracker enabled, components run in three places:
+With the development-terminal workflow, the four commands above start the control plane and web app. Podman already starts the equivalent application services. With Firecracker enabled, components run in three places:
 
 | Where                | Components                                        | What they do                                                                                    |
 | -------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -116,7 +166,7 @@ The four local commands above start the control plane and web app. With Firecrac
 | KVM host             | Node Agent and Firecracker/jailer systemd units   | The Node Agent starts and stops assigned VMs and relays authorized guest RPC.                   |
 | Firecracker guest VM | `apps/guest-runtime` (`trinity-guest.service`)    | Runs workspace file and shell operations, skills, and—when configured—Zendriver/Chrome.         |
 
-For **Zendriver** browsing, also start the Browser Runtime in a fifth terminal:
+For **Zendriver** browsing in the development-terminal workflow only, start the Browser Runtime in a fifth terminal. Podman already manages this service:
 
 ```bash
 pnpm dev:browser-runtime
@@ -127,8 +177,8 @@ The server, worker and Browser Runtime must share `EXECUTION_DRIVER=firecracker`
 The **Node Agent runs on the KVM host** as a privileged systemd service, separate from the four or five development terminals. After one-time host installation and configuration, start or check it with:
 
 ```bash
-sudo systemctl start trinity-node-agent.service
-sudo systemctl status trinity-node-agent.service
+pkexec /usr/bin/systemctl start trinity-node-agent.service
+systemctl status trinity-node-agent.service
 ```
 
 Its root-owned configuration is `/etc/trinity/node-agent.env`; it needs the control database URL, the matching `NODE_RUNTIME_TOKEN`, node ID, `/srv/trinity-node` state directory, and an explicit storage mode. Do not start the Node Agent inside the guest or load model/provider keys into it. The Node Agent service and host images, storage and networking must be provisioned before using guest execution. Follow the [Firecracker host and guest setup guide](deploy/firecracker/README.md) for those one-time steps and environment settings.
@@ -141,17 +191,19 @@ The `browser` tool always provides saved reads (`read_observation` / `search_obs
 
 **Trusted CDP (optional; no extra service).** Live access stays off while `BROWSER_CDP_ENDPOINT` is unset. To enable it, attach to an operator-started Chrome: set `BROWSER_CDP_ENDPOINT=9222` (or a full URL) and optionally `BROWSER_CDP_OWNER_ID` to restrict browser use to one user. The worker talks to that Chrome directly through the pinned `agent-browser` CLI (0.38.x), so no browser process runs inside Trinity and no extra service is needed. Chrome must be started with remote debugging by the operator; Trinity never launches or replaces it.
 
-**Managed Zendriver (separate supervisor process).** Set `BROWSER_DRIVER=zendriver`, `BROWSER_RUNTIME_ENDPOINT=http://127.0.0.1:3010`, and a shared `BROWSER_RUNTIME_TOKEN` (min 32 characters, same value in server, worker and runtime). With `EXECUTION_DRIVER=local`, set `BROWSER_PROFILE_DIR` to the protected persistent profile directory mounted into the Browser Runtime. With `EXECUTION_DRIVER=firecracker`, set it to the per-user profile directory on the encrypted guest data volume; do not mount that guest path into the host Browser Runtime. Then run the supervisor as an additional process next to `dev:server` / `dev:worker`:
+**Managed Zendriver (separate supervisor process).** Set `BROWSER_DRIVER=zendriver`, `BROWSER_RUNTIME_ENDPOINT=http://127.0.0.1:3010`, and a shared `BROWSER_RUNTIME_TOKEN` (min 32 characters, same value in server, worker and runtime). With `EXECUTION_DRIVER=local`, set `BROWSER_PROFILE_DIR` to the protected persistent profile directory mounted into the Browser Runtime. With `EXECUTION_DRIVER=firecracker`, profile paths come from authenticated guest metadata on the persistent data volume; no host `BROWSER_PROFILE_DIR` mount is required. In the development-terminal workflow, run the supervisor next to `dev:server` / `dev:worker` (Podman already starts it):
 
 ```bash
 pnpm dev:browser-runtime   # or `pnpm start:browser-runtime` (no watch)
 ```
 
-It launches a private Chrome per session under `<BROWSER_PROFILE_DIR>/<tenant-id>/<user-id>`, with exclusive per-profile leases, bounded idle shutdown and per-call PostgreSQL command journaling.
+An owner’s personal Main, side Chat and Work sessions share a browser anchored to Main, with serialized operations and per-call PostgreSQL command journaling. Local mode uses `<BROWSER_PROFILE_DIR>/<tenant-id>/<user-id>` with exclusive profile leases; Firecracker uses the assigned persistent guest profile. The configured desktop mode has its own guest browser service.
 
 **Sandbox egress follows the host configuration.** Set `SANDBOX_PROXY_URL=http://127.0.0.1:20112` in the deployment `.env` to use an existing host HTTP proxy for the whole Firecracker guest, then apply the host egress installer through the maintenance release wrapper. Empty/unset uses direct host routing. This does not change the host default route or control-plane traffic. Proxy settings stay on the host; no Clash configuration or browser-specific guest route is needed. Locally launched managed Chrome also consumes this setting. The development network still blocks IPv6 and private/reserved destinations; see the [host guide](deploy/firecracker/README.md#whole-guest-egress-with-sandbox_proxy_url).
 
-**Profile locks.** A graceful stop (`CTRL+C`, SIGINT/SIGTERM) terminates managed Chrome via SIGTERM so Chrome removes its own `Singleton*` locks; the runtime then exits deterministically. After a crash or SIGKILL, the next session start reclaims provably stale locks automatically: the lease's recorded pid is dead on this host, the Chrome `SingletonLock` owner pid is dead, and no live process references the profile directory. Ambiguous cases (live pid, foreign host, unverifiable ownership) fail closed and still need operator recovery: confirm every Chrome using the profile has stopped, then remove `.locks/<tenant-id>-<user-id>.lock` and the profile's `Singleton*` symlinks.
+**Document capture and export.** Use the typed `browser` tool for live navigation and input. Extraction starts with `capture_document`; `export_capture` saves the rendered HTML/media bundle, and `export_markdown` saves the bundle first, then converts saved HTML offline with bundled Turndown/GFM. Downloaded media references point to local files where capture succeeded; unavailable resources and coverage gaps remain explicit. There is no separate capture enable flag or native converter to install. Capture requires the matching guest application and patched Zendriver build; a `DISABLED` build-mismatch error requires guest delivery, not another navigation attempt. See [browser capture design and limits](docs/browser-tool-design.md) and the [current acceptance status](docs/project-progress.md).
+
+**Profile locks.** Graceful runtime shutdown releases resources it owns. Crash recovery reclaims only provably stale local profile locks; live, foreign or unverifiable owners fail closed. Firecracker profiles belong to the guest. Confirm ownership and process shutdown before any operator repair; profile-lock recovery and abandoned PostgreSQL browser-binding recovery are separate mechanisms.
 
 ## Configuration (`.env`)
 

@@ -97,6 +97,7 @@ export class CdpAccessError extends Error {
           'STALE_TARGET',
           'The owned document changed. Observe the current page before acting.',
           'reobserve',
+          'DOCUMENT_CHANGED',
         );
         break;
       case 'CDP_UNSUPPORTED_CLI':

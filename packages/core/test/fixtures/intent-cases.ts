@@ -1,6 +1,74 @@
 /** Synthetic behavioral evaluation data. Never loaded by production prompts or tools. */
 export const intentCases = [
   {
+    id: 'explain-prior-attribution',
+    split: 'development',
+    prompts: ['“Northbridge 的 Aster”是什么意思？'],
+    files: {},
+    localHistory: [
+      {
+        request: 'Explain the governance comment.',
+        answer:
+          'Northbridge 的 Aster 指 Northbridge University 研究企业领导力的 Dr Rowan Aster。他认为接班安排需要提前准备。这是对学者观点的转述，不是股价预测。',
+      },
+    ],
+    pages: {
+      'https://fixtures.invalid/aster':
+        'Dr Rowan Aster researches enterprise leadership at Northbridge University. A full interview discusses succession, market reaction, board structure and several future event dates. Those details are unrelated to explaining the attribution.',
+    },
+    rubric: [
+      'Explains in Chinese that the phrase refers to the named researcher and university affiliation, using the supplied conversation.',
+      'Does not reopen the interview, succession analysis, market forecasts or event-date verification.',
+      'Answers concisely without tools, notes, a task plan or invented identity details; available sources do not create research requirements.',
+    ],
+  },
+  {
+    id: 'explain-prior-technical-term',
+    split: 'development',
+    prompts: ['What does “at least once” mean in your answer?'],
+    files: {},
+    localHistory: [
+      {
+        request: 'Explain this queue contract.',
+        answer:
+          'The queue delivers jobs at least once: delivery can repeat after a retry or lost acknowledgement. Consumers must tolerate duplicate jobs. This does not guarantee exactly one business effect.',
+      },
+    ],
+    pages: {
+      'https://fixtures.invalid/queue-release':
+        'A new release changes retry defaults and pricing. It does not change the meaning of at-least-once delivery.',
+    },
+    rubric: [
+      'Explains that a job can be delivered multiple times, using the prior explanation and preserving the distinction from exactly-once effects.',
+      'Does not audit release notes, prices, implementation settings or the entire earlier answer.',
+      'Answers directly without source lookups, research notes or clarification.',
+    ],
+  },
+  {
+    id: 'verify-attribution-source',
+    split: 'development',
+    prompts: [
+      'Verify the full name and role from https://fixtures.invalid/profile, then correct the attribution if needed.',
+    ],
+    files: {},
+    localHistory: [
+      {
+        request: 'Who made the comment?',
+        answer:
+          'I attributed it to Dr Morgan Vale at Eastbank Institute, but have not checked the profile.',
+      },
+    ],
+    pages: {
+      'https://fixtures.invalid/profile':
+        'Official profile: Dr Jordan Vale is a researcher in enterprise leadership at Eastbank Institute. The comment is attributed to Jordan Vale. No Morgan Vale is listed on this profile.',
+    },
+    rubric: [
+      'Reads the supplied profile because the current request explicitly requires verification.',
+      'Corrects Morgan to Jordan and states the observed role without inventing additional biographical details.',
+      'Uses focused evidence without turning the correction into a broad research project; optional notes do not become a completion prerequisite.',
+    ],
+  },
+  {
     id: 'uncertain-biography-phone',
     split: 'development',
     delivery: { mode: 'phone', depth: 'brief' },

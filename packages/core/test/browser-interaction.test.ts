@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   browserControlRecordSchema,
+  browserResultSchema,
   browserInteractionRequestSchema,
   type BrowserControlRecord,
   type BrowserInputRecord,
@@ -109,7 +110,7 @@ function result(request: BrowserRuntimeRequest): BrowserRuntimeResult {
     isError: false,
     value: {
       kind: 'browser-result-v1',
-      operation: request.args.operation,
+      operation: browserResultSchema.shape.operation.parse(request.args.operation),
       callId: request.callId,
       sessionId: request.sessionId,
       observationId: 'obs',

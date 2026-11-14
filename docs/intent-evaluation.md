@@ -68,3 +68,21 @@ Development fixtures `retry-original-objective` and `bounded-readonly-analysis` 
 Reports include action metrics after the fixture's seeded history: calls by tool, failed results, declared mutation/unknown-effect calls and runtime guidance. Mutation counts describe attempted calls, not confirmed effects. Review final workspace differences and outcomes alongside the transcript; fewer calls alone is not success. The source fingerprint list includes general guidance and tool-budget implementation. If using a temporary baseline source overlay, record its effective source hashes separately because the report's on-disk hashes describe the checkout, not transformed code.
 
 The 2026-10-25 tool affordance update adds exact `resultSeq` selection for task verification, retaining legacy call IDs and all evidence fences. Compare evidence-selection failures and control-call counts alongside completion, rather than counting a shorter failed run as an improvement. Development iterations and observed limitations are recorded in [the action-control evaluation report](action-control-evaluation-2026-10-25.md).
+
+## Explanation and verification follow-ups (2026-11-13)
+
+Development cases `explain-prior-attribution` and `explain-prior-technical-term`
+provide sufficient prior dialogue plus optional browser sources. Review whether
+the model explains the requested phrase without reopening the earlier research.
+`verify-attribution-source` requires a supplied profile read and correction; it
+checks that action economy does not suppress necessary verification. Fixtures
+with pages now expose the real research tool as well as the typed browser, so
+optional bookkeeping is available during evaluation. This changes evaluation
+conditions: use the same fixture/runtime version on both sides of a comparison.
+Reports fingerprint the research contract and browser skill as well as the tool
+registry. These new cases have not been run against a paid provider. Scripted
+completion regressions prove no harness requirement for notes, not model judgment.
+
+## Export verification evaluation (2026-11-14)
+
+`packages/core/test/export-model-acceptance.test.ts` is opt-in via `TRINITY_RUN_EXPORT_EVAL=1` and requires MODEL plus TRINITY_EXPORT_EVAL_REPORT. It runs two repeats with the AI SDK gateway, real offline export/Sandbox and a fixed synthetic browser, explicitly preloading the browser skill. It records source hashes, text/tool transcripts, usage, artifacts and terminal results while excluding provider reasoning. Passing means the trials were recorded, not semantic certification. Four trials and their manual review, residual redundant actions and deployed-guest-copy boundaries are documented in [the acceptance report](export-verification-acceptance-2026-11-14.md).

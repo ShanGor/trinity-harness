@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { browserDocumentArguments, browserDerivationSchema } from './browser-document.js';
 
 export const BROWSER_LIMITS = {
   artifact: 256 * 1024,
@@ -43,14 +44,39 @@ export const browserBlockSchema = z.object({
   text: z.string().max(64_000),
   sectionId: id.nullable(),
   links: z.array(z.object({ title: z.string().max(200), url: browserUrlSchema })).max(20),
+  image: z
+    .object({
+      url: browserUrlSchema,
+      alt: z.string().max(1000),
+      data: z
+        .string()
+        .max(120000)
+        .regex(/^data:image\/png;base64,[A-Za-z0-9+/=]+$/)
+        .optional(),
+    })
+    .optional(),
+  listDepth: z.number().int().min(0).max(40).optional(),
+  ordinal: z.number().int().min(-1000000).max(1000000).optional(),
+  level: z.number().int().min(1).max(6).optional(),
   rows: z
-    .array(z.array(z.object({ text: z.string().max(8000), header: z.boolean() })).max(40))
+    .array(z.array(z.object({ text: z.string().max(10000), header: z.boolean() })).max(40))
     .max(100)
     .optional(),
 });
+// Structural counts describe extraction limits, never document completeness or page values.
+export const browserExtractionSchema = z.object({
+  status: z.enum(['empty', 'heading-only', 'text-captured']),
+  visibleFrames: z.number().int().min(0).max(100),
+  openShadowRoots: z.number().int().min(0).max(100),
+  canvases: z.number().int().min(0).max(100),
+  inspectionTruncated: z.boolean(),
+  scope: z.literal('top-document'),
+  embeddedFrames: z.number().int().min(0).max(10000).optional(),
+  unavailableFrames: z.number().int().min(0).max(10000).optional(),
+});
 export const browserCaptureSchema = z.object({
   schemaVersion: z.literal(1),
-  extractorVersion: z.enum(['semantic-v1', 'semantic-v2']),
+  extractorVersion: z.enum(['semantic-v1', 'semantic-v2', 'rendered-v1']),
   url: browserUrlSchema,
   title: z.string().max(1000),
   publishedAt: z.object({ value: z.string().max(200), origin: z.string().max(200) }).nullable(),
@@ -60,6 +86,7 @@ export const browserCaptureSchema = z.object({
   exclusions: z.array(z.string().max(200)).max(20),
   blocks: z.array(browserBlockSchema).max(1000),
   captureTruncated: z.boolean(),
+  extraction: browserExtractionSchema.optional(),
 });
 export type BrowserCapture = z.infer<typeof browserCaptureSchema>;
 export const browserViewportSchema = z.object({
@@ -131,6 +158,7 @@ export const browserSurfaceSchema = z.object({
 });
 export type BrowserSurface = z.infer<typeof browserSurfaceSchema>;
 export const browserObservationSchema = browserCaptureSchema.extend({
+  derivation: browserDerivationSchema.optional(),
   observationId: id,
   sessionId: z.string().min(1).max(200),
   bindingId: id,
@@ -225,6 +253,8 @@ const search = z.object({
   cursor: z.object({ blockId: id, offset: z.number().int().nonnegative() }).optional(),
 });
 export const browserArgumentsSchema = z.discriminatedUnion('operation', [
+  ...browserDocumentArguments,
+  z.object({ operation: z.literal('export_markdown'), captureId: id }),
   navigate,
   webSearch,
   readPage,
@@ -240,7 +270,17 @@ export const browserArgumentsSchema = z.discriminatedUnion('operation', [
 export type BrowserArguments = z.infer<typeof browserArgumentsSchema>;
 export const browserResultSchema = z.object({
   kind: z.literal('browser-result-v1'),
+  capture: z
+    .object({
+      captureId: id,
+      documentId: id,
+      offset: z.number().int().nonnegative(),
+      nextOffset: z.number().int().nonnegative().nullable(),
+    })
+    .optional(),
   operation: z.enum([
+    'extract_capture',
+    'export_markdown',
     'navigate',
     'web_search',
     'read_page',
@@ -268,6 +308,7 @@ export const browserResultSchema = z.object({
   saved: z.boolean(),
   securityMode: z.enum(['trusted-cdp', 'trusted-managed', 'enforced']).optional(),
   captureTruncated: z.boolean(),
+  extraction: browserExtractionSchema.optional(),
   representation: browserCaptureSchema.shape.representation,
   scope: z.string().max(200),
   exclusions: browserCaptureSchema.shape.exclusions,
@@ -278,6 +319,19 @@ export const browserResultSchema = z.object({
     .max(20)
     .optional(),
   linksTruncated: z.boolean().optional(),
+  /** Adapter-derived comparison keys for delivered search links, not read authority. */
+  discovery: z
+    .object({
+      kind: z.literal('search'),
+      destinationKeys: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(20),
+      complete: z
+        .boolean()
+        .describe(
+          'The capture was ready and its captured link list fit. This does not establish complete search coverage.',
+        ),
+    })
+    .optional(),
+  contentStatus: z.enum(['text-delivered', 'image-delivered', 'no-content-delivered']).optional(),
   duplicateSuppressed: z.boolean(),
   outputTruncated: z.boolean(),
   blocks: z
@@ -327,6 +381,18 @@ export const browserErrorSchema = z.object({
   effect: z.enum(['none', 'applied', 'unknown']),
   message: z.string().max(500),
   recovery: z.enum(['focused_read', 'conclude', 'reobserve', 'navigate']).optional(),
+  reason: z
+    .enum([
+      'SNAPSHOT_NOT_DELIVERED',
+      'INTERVENING_OPERATION',
+      'CONTROL_CHANGED',
+      'BINDING_CHANGED',
+      'DOCUMENT_CHANGED',
+      'SURFACE_CHANGED',
+      'TARGET_NOT_DELIVERED',
+      'IMAGE_NOT_ACTIONABLE',
+    ])
+    .optional(),
 });
 export type BrowserError = z.infer<typeof browserErrorSchema>;
 
@@ -358,3 +424,34 @@ export interface BrowserBinding {
   observedUrl?: string;
   driver?: z.infer<typeof browserDriverMetadataSchema>;
 }
+
+export const browserMarkdownExportSchema = z.object({
+  kind: z.literal('browser-markdown-export'),
+  path: z.string().regex(/^browser-capture-[a-f0-9]{32}\/content\.md$/),
+  bundlePath: z.string().regex(/^browser-capture-[a-f0-9]{32}$/),
+  captureId: id,
+  converter: z.enum(['turndown', 'document-normalize']),
+  converterVersion: z.string().min(1).max(100),
+  inputHash: z.string().regex(/^[a-f0-9]{64}$/),
+  warnings: z.boolean(),
+  warningCodes: z
+    .array(z.enum(['inline-svg', 'unsupported-table', 'layout-html']))
+    .max(3)
+    .optional(),
+  outputHash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  outputBytes: z.number().int().nonnegative().optional(),
+  limitations: z
+    .object({
+      omittedFrames: z.number().int().nonnegative(),
+      truncatedDocuments: z.number().int().nonnegative(),
+      inlineSvg: z.number().int().nonnegative(),
+      savedMediaFiles: z.number().int().nonnegative().optional(),
+      unavailableResources: z.number().int().nonnegative(),
+    })
+    .optional(),
+  coverage: z.literal('unverified'),
+});
+export type BrowserMarkdownExport = z.infer<typeof browserMarkdownExportSchema>;

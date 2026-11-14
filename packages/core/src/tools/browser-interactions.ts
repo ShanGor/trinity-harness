@@ -23,7 +23,7 @@ export function browserSurfaceScript(
   return `(() => {
     const scopePath = ${JSON.stringify(scopePath ?? null)};
     const visible = el => {
-      for(let p=el;p;p=p.parentElement) { const s=getComputedStyle(p); if(p.hidden || p.getAttribute('aria-hidden')==='true' || s.display==='none' || s.visibility==='hidden' || s.opacity==='0' || (p.tagName==='DETAILS'&&!p.open&&el.closest('summary')?.parentElement!==p)) return false; }
+      for(let p=el;p;p=p.parentElement||p.getRootNode()?.host) { const s=getComputedStyle(p); if(p.hidden || p.getAttribute('aria-hidden')==='true' || s.display==='none' || s.visibility==='hidden' || s.opacity==='0' || (p.tagName==='DETAILS'&&!p.open&&el.closest('summary')?.parentElement!==p)) return false; }
       return el.getClientRects().length>0;
     };
     const path = el => { const result=[]; while(el!==document.documentElement&&el.parentElement) { result.unshift(Array.from(el.parentElement.children).indexOf(el)); el=el.parentElement; } return result; };
@@ -33,8 +33,10 @@ export function browserSurfaceScript(
     const targets=[]; let visited=0, truncated=false, privacyDenied=false;
     const editable=el=>el.hasAttribute('contenteditable') && el.getAttribute('contenteditable')!=='false';
     const sensitive=el=>editable(el) || el.matches('input[type=password],input[type=file]') || /password|secret|token|credit|card|cvc|ssn|one-time-code/i.test([el.name,el.id,el.autocomplete,el.getAttribute('aria-label')].join(' '));
+    const roots=[document];
+    for(let i=0;i<roots.length;i++){if(roots.length>100){privacyDenied=true;break;}let n=0;for(const el of roots[i].querySelectorAll('*')){if(++n>20000){privacyDenied=true;break;}if(el.shadowRoot)roots.push(el.shadowRoot);}}
     let privateNodes=0;
-    for(const el of document.querySelectorAll('input,textarea,[contenteditable]')) {
+    for(const el of roots.flatMap(root=>Array.from(root.querySelectorAll('input,textarea,[contenteditable]')))) {
       if(++privateNodes>5000){privacyDenied=true;break;}
       // Public articles often contain an empty comment editor. Only populated
       // editors (including non-text drafts) require whole-page suppression.

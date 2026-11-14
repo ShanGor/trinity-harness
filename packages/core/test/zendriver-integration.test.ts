@@ -3,8 +3,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PNG } from 'pngjs';
+import { convertDocumentCapture, persistDocumentGraph } from '../src/tools/browser-documents.js';
 import {
   LocalSandbox,
   LocalBlobStore,
@@ -34,8 +35,61 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
     let url: string;
     const generation = randomUUID();
     const sessionId = randomUUID();
+    let documentImageRequests = 0;
     const server = createServer((request, response) => {
       response.setHeader('content-type', 'text/html; charset=utf-8');
+      if (request.url === '/document-large') {
+        response.end('<main><h1>Large fixture</h1><p>' + '多语言😀'.repeat(5000) + '</p></main>');
+        return;
+      }
+      if (request.url === '/document-image') {
+        documentImageRequests++;
+        response.setHeader('content-type', 'image/png');
+        const image = new PNG({ width: 1, height: 1 });
+        image.data.fill(255);
+        response.end(PNG.sync.write(image));
+        return;
+      }
+      if (request.url === '/document-leaf') {
+        response.end('<main><p>Nested leaf 😀 中文</p></main>');
+        return;
+      }
+      if (request.url === '/document-child') {
+        response.end(
+          '<main><p>Duplicate URL child</p><table><tr><th>语言</th><th>Value</th></tr><tr><td>中文</td><td>42</td></tr></table><iframe src="http://127.0.0.1:' +
+            (server.address() as { port: number }).port +
+            '/document-leaf"></iframe></main>',
+        );
+        return;
+      }
+      if (request.url === '/document-parent') {
+        const child =
+          'http://localhost:' + (server.address() as { port: number }).port + '/document-child';
+        response.end(
+          '<main><p>Before children</p><iframe src="' +
+            child +
+            '"></iframe><iframe src="' +
+            child +
+            '"></iframe><iframe srcdoc="<p>Opaque child</p>"></iframe><p>After children</p><img src="/document-image" alt="Fixture pixel"><div id="shadow"></div></main><script>document.querySelector("#shadow").attachShadow({mode:"open"}).innerHTML="<p>Open shadow text</p>"</script>',
+        );
+        return;
+      }
+      if (request.url === '/embedded-child') {
+        response.end(
+          '<main><h2>Embedded fixture</h2><p>' +
+            'Cross origin article text. '.repeat(20) +
+            '</p></main>',
+        );
+        return;
+      }
+      if (request.url === '/embedded-parent') {
+        response.end(
+          '<h1>Shell</h1><iframe width="600" height="400" src="http://localhost:' +
+            (server.address() as { port: number }).port +
+            '/embedded-child"></iframe>',
+        );
+        return;
+      }
       if (request.url === '/network-error') {
         response.destroy();
         return;
@@ -103,11 +157,184 @@ describe.skipIf(process.env['ZENDRIVER_INTEGRATION'] !== '1')(
       await driver.navigate(binding, url, context);
       binding = await driver.authorize(sessionId, 'read_page', undefined, context.signal);
     }, 30_000);
+    beforeEach(() => {
+      context = { ...context, signal: AbortSignal.timeout(20000) };
+    });
     afterAll(async () => {
       await connection?.dispose();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       if (root) await rm(root, { recursive: true, force: true });
     });
+    it('captures a rendered cross-origin document graph with the application build capability', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(30000) };
+      const current = await driver.authorize(
+        sessionId,
+        'navigate',
+        url + 'embedded-parent',
+        ctx.signal,
+      );
+      await driver.navigate(current, url + 'embedded-parent', ctx);
+      await connection.call('browser_wait_for_load', { ready_state: 'complete' }, ctx.signal);
+      const fresh = await driver.authorize(sessionId, 'capture_document', undefined, ctx.signal);
+      const graph = await driver.captureDocument(fresh, ctx);
+      expect(graph.buildId).toBe('trinity-document-v1');
+      expect(graph.documents).toHaveLength(2);
+      expect(graph.omittedFrames).toBe(0);
+      expect(graph.documents[1]!.parentDocumentId).toBe(graph.documents[0]!.documentId);
+      expect(
+        graph.documents[0]!.nodes.find((n) => n.id === graph.documents[1]!.ownerNodeId)?.tag,
+      ).toBe('iframe');
+      expect(
+        graph.documents[1]!.nodes.some((n) => n.text?.includes('Cross origin article text.')),
+      ).toBe(true);
+      await driver.navigate(fresh, url, ctx);
+      binding = await driver.authorize(sessionId, 'read_page', undefined, ctx.signal);
+    }, 40000);
+    it('captures nested OOPIFs, duplicate URLs, srcdoc, shadow structure and decoded media without refetch', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(60000) };
+      const current = await driver.authorize(
+        sessionId,
+        'navigate',
+        url + 'document-parent',
+        ctx.signal,
+      );
+      await driver.navigate(current, url + 'document-parent', ctx);
+      await connection.call('browser_wait_for_load', { ready_state: 'complete' }, ctx.signal);
+      const fresh = await driver.authorize(sessionId, 'capture_document', undefined, ctx.signal);
+      const imageRequests = documentImageRequests;
+      const graph = await driver.captureDocument(fresh, ctx);
+      expect(graph.documents).toHaveLength(6);
+      expect(graph.omittedFrames).toBe(0);
+      expect(documentImageRequests).toBe(imageRequests);
+      expect(
+        graph.documents.flatMap((d) => d.resources).filter((r) => r.state === 'captured'),
+      ).toHaveLength(1);
+      const blobs = new LocalBlobStore(path.join(root, 'document-blobs'));
+      const manifest = await persistDocumentGraph(
+        graph,
+        fresh,
+        sessionId,
+        'document-call',
+        'document-fixture',
+        blobs,
+        ctx.signal,
+      );
+      const converted = convertDocumentCapture(manifest);
+      expect(converted.blocks.filter((b) => b.text.includes('Duplicate URL child'))).toHaveLength(
+        2,
+      );
+      expect(converted.blocks.filter((b) => b.text.includes('Nested leaf 😀 中文'))).toHaveLength(
+        2,
+      );
+      expect(converted.blocks.some((b) => b.text.includes('Opaque child'))).toBe(true);
+      expect(converted.blocks.some((b) => b.text.includes('Open shadow text'))).toBe(true);
+      expect(converted.blocks.filter((b) => b.kind === 'table')).toHaveLength(2);
+      expect(converted.blocks[0]!.text).toBe('Before children');
+      expect(converted.blocks.findIndex((b) => b.text === 'After children')).toBeGreaterThan(
+        converted.blocks.findIndex((b) => b.text === 'Opaque child'),
+      );
+      await driver.navigate(fresh, url, ctx);
+      binding = await driver.authorize(sessionId, 'read_page', undefined, ctx.signal);
+    }, 70000);
+    it('transfers a multilingual document in multiple revision/hash-bound chunks', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(30000) };
+      const current = await driver.authorize(
+        sessionId,
+        'navigate',
+        url + 'document-large',
+        ctx.signal,
+      );
+      await driver.navigate(current, url + 'document-large', ctx);
+      await connection.call('browser_wait_for_load', { ready_state: 'complete' }, ctx.signal);
+      const fresh = await driver.authorize(sessionId, 'capture_document', undefined, ctx.signal);
+      const calls = vi.spyOn(connection, 'call');
+      try {
+        const graph = await driver.captureDocument(fresh, ctx);
+        expect(
+          graph.documents[0]!.nodes.find((n) => n.tag === 'text' && n.text?.startsWith('多语言'))
+            ?.text,
+        ).toBe('多语言😀'.repeat(5000));
+        expect(
+          calls.mock.calls.filter(
+            ([name, args]) =>
+              name === 'browser_evaluate' &&
+              String(args.expression).includes('const text=s.text.slice'),
+          ).length,
+        ).toBeGreaterThan(2);
+      } finally {
+        calls.mockRestore();
+        await driver.navigate(fresh, url, ctx);
+        binding = await driver.authorize(sessionId, 'read_page', undefined, ctx.signal);
+      }
+    }, 40000);
+    it('reads a visible cross-origin frame using fixed frame evaluation', async () => {
+      const ctx = { ...context, signal: AbortSignal.timeout(30000) };
+      const current = await driver.authorize(
+        sessionId,
+        'navigate',
+        url + 'embedded-parent',
+        ctx.signal,
+      );
+      await driver.navigate(current, url + 'embedded-parent', ctx);
+      await connection.call('browser_wait_for_load', { ready_state: 'complete' }, ctx.signal);
+      const fresh = await driver.authorize(sessionId, 'get_page_text', undefined, ctx.signal);
+      const capture = await driver.capture(fresh, 'article', undefined, ctx);
+      console.info(
+        JSON.stringify({
+          fixture: capture.extraction,
+          frames: (await connection.call('browser_frame_list', {}, ctx.signal)).structuredContent,
+        }),
+      );
+      expect(
+        capture.blocks.some((b) => b.text.includes('Cross origin article text.')),
+        JSON.stringify({
+          capture,
+          frames: (await connection.call('browser_frame_list', {}, ctx.signal)).structuredContent,
+        }),
+      ).toBe(true);
+    }, 40000);
+    it.skipIf(process.env['ZENDRIVER_PUBLIC_REPRO'] !== '1')(
+      'reproduces the reported rendered document without HTTP fallback',
+      async () => {
+        const target = 'https://twin1-ai-product-deep-dive-and-lessons-4feg.pages.grok.bot/';
+        const ctx = { ...context, signal: AbortSignal.timeout(90000) };
+        const current = await driver.authorize(sessionId, 'navigate', target, ctx.signal);
+        await driver.navigate(current, target, ctx);
+        await connection.call('browser_wait_for_load', { ready_state: 'complete' }, ctx.signal);
+        const fresh = await driver.authorize(sessionId, 'get_page_text', undefined, ctx.signal);
+        const capture = await driver.capture(fresh, 'article', undefined, ctx);
+        console.info(
+          JSON.stringify({
+            diagnostic: {
+              title: capture.title,
+              blocks: capture.blocks.length,
+              extraction: capture.extraction,
+              readiness: capture.readiness,
+            },
+          }),
+        );
+        expect(
+          capture.blocks.some((b) => b.kind === 'paragraph' && b.text.length > 100),
+          JSON.stringify({
+            capture,
+            frames: (await connection.call('browser_frame_list', {}, ctx.signal)).structuredContent,
+          }),
+        ).toBe(true);
+        expect(capture.blocks.length).toBeGreaterThan(10);
+        console.info(
+          JSON.stringify({
+            publicRepro: {
+              blocks: capture.blocks.length,
+              characters: capture.blocks.reduce((n, b) => n + b.text.length, 0),
+              images: capture.blocks.filter((b) => b.image).length,
+              extraction: capture.extraction,
+              truncated: capture.captureTruncated,
+            },
+          }),
+        );
+      },
+      100000,
+    );
     it('keeps evidence in its originating chat when two source drivers share one browser connection', async () => {
       const sideId = randomUUID();
       const sideDriver = new ZendriverBrowserDriver(

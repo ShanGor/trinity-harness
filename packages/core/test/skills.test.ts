@@ -184,7 +184,15 @@ describe('SkillRuntime and model projection', () => {
                       'read_page',
                       'read_observation',
                     ])
-                  : ['read_observation', 'search_observation'],
+                  : [
+                      'read_observation',
+                      'search_observation',
+                      'export_markdown',
+                      'extract_capture',
+                      'read_capture',
+                      'search_capture',
+                      'export_capture',
+                    ],
               },
             },
           });
@@ -251,7 +259,13 @@ describe('SkillRuntime and model projection', () => {
         thresholdBytes: 1,
         store: {
           put: async (key, data, options) => {
-            if (key?.startsWith('model-context/')) return {key, uri: `blob://${key}`, mimeType: options.mimeType, size: data.byteLength};
+            if (key?.startsWith('model-context/'))
+              return {
+                key,
+                uri: `blob://${key}`,
+                mimeType: options.mimeType,
+                size: data.byteLength,
+              };
             throw new Error('skill must not spill');
           },
           get: async () => null,

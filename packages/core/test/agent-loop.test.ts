@@ -9,6 +9,7 @@ import {
   CoreToolRegistry,
   MemorySessionStore,
   bashTool,
+  createResearchTool,
   readFileTool,
   writeFileTool,
 } from '../src/index.js';
@@ -625,4 +626,78 @@ it('persists repeated-read guidance, clears it after new evidence, and keeps exe
     steps: 6,
   });
   expect((await store.load('s')).filter((event) => event.type === 'turn/guidance')).toHaveLength(2);
+});
+
+describe('explanation request completion', () => {
+  it.each([false, true])(
+    'can finish without research notes after optional read/failed note=%s',
+    async (attemptNote) => {
+      const store = new MemorySessionStore();
+      const sandbox = new FakeSandbox();
+      sandbox.files.set('profile.txt', 'Dr Aster studies leadership at Northbridge University.');
+      const tools = new CoreToolRegistry(sandbox);
+      tools.register(readFileTool);
+      tools.register(createResearchTool(store));
+      const inspectRequest = (request: LLMRequest): void => {
+        expect(JSON.stringify(request.messages)).toContain('Northbridge’s Aster');
+        expect(request.system).toContain(
+          'Explaining an earlier statement does not require renewing its research',
+        );
+        expect(request.system).toContain('not a requirement to write a plan');
+        expect(request.tools.find((tool) => tool.name === 'research')?.description).toContain(
+          'Direct answers and short explanations do not require notes',
+        );
+      };
+      const answer = (request: LLMRequest) => {
+        inspectRequest(request);
+        return textChunks(
+          'It refers to Dr Aster, the leadership researcher at Northbridge University.',
+        );
+      };
+      const llm = new FakeLLM(
+        () =>
+          textChunks(
+            'Northbridge’s Aster means Dr Aster, a leadership researcher at Northbridge University.',
+          ),
+        ...(attemptNote
+          ? [
+              (request: LLMRequest) => {
+                inspectRequest(request);
+                return toolCallThenFinish('profile', 'read_file', { path: 'profile.txt' });
+              },
+              () => toolCallThenFinish('bad-note', 'research', { action: 'record' }),
+            ]
+          : []),
+        answer,
+      );
+      const loop = new CoreAgentLoop({
+        llm,
+        model: 'fake/model',
+        store,
+        tools,
+        workspaceRoot: '/ws',
+        verification: true,
+      });
+      await loop.run('s', 'Explain the attribution.', new CollectingSink());
+      const before = (await store.load('s')).length;
+      expect(
+        await loop.run('s', 'What does “Northbridge’s Aster” mean?', new CollectingSink()),
+      ).toMatchObject({ reason: 'completed' });
+      llm.assertExhausted();
+      const events = (await store.load('s')).slice(before);
+      expect(events.filter((event) => event.type === 'tool/call')).toHaveLength(
+        attemptNote ? 2 : 0,
+      );
+      expect(
+        events.some((event) => event.type === 'response/candidate' || event.type === 'task/plan'),
+      ).toBe(false);
+      expect(
+        events.filter((event) => event.type === 'message/assistant' && event.phase === 'final'),
+      ).toHaveLength(1);
+      if (attemptNote)
+        expect(
+          events.filter((event) => event.type === 'tool/result' && event.isError),
+        ).toHaveLength(1);
+    },
+  );
 });

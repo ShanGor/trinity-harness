@@ -206,6 +206,7 @@ ln -s ../run/systemd/resolve/stub-resolv.conf "$rootfs/etc/resolv.conf"
 # Validate binaries against the guest's libraries before making the filesystem.
 chroot "$rootfs" /usr/bin/node --version
 chroot "$rootfs" /usr/local/bin/zendriver-mcp --version
+chroot "$rootfs" /usr/bin/node -e "const Turndown=require('/opt/trinity/packages/core/node_modules/turndown');const gfm=require('/opt/trinity/packages/core/node_modules/turndown-plugin-gfm');const service=new Turndown({headingStyle:'atx'});service.use(gfm.gfm);if(!service.turndown('<h1>Guest conversion</h1>').includes('# Guest conversion'))process.exit(1)"
 chroot "$rootfs" /opt/google/chrome/chrome --version
 if [[ "$desktop" == true ]]; then
   for binary in /usr/bin/Xvfb /usr/bin/x11vnc /usr/bin/openbox /usr/bin/xdotool /usr/bin/xwd /usr/bin/xclip /usr/bin/setpriv /usr/sbin/nft /usr/local/libexec/trinity-vsock-host-proxy; do

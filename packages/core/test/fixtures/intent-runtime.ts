@@ -17,6 +17,7 @@ import {
   PersonalContext,
   createBrowserTool,
   createRecallTool,
+  createResearchTool,
   createTaskTool,
   editFileTool,
   readFileTool,
@@ -172,6 +173,7 @@ export async function intentRuntime(task: {
   ])
     tools.register(tool);
   if (task.pages) {
+    tools.register(createResearchTool(store, blobs));
     let currentUrl = Object.keys(task.pages)[0]!;
     let revision = 0;
     const pages = task.pages;

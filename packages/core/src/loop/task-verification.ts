@@ -1,7 +1,8 @@
-import { effectScopeSchema } from '@trinity-harness/contracts';
+import { effectScopeSchema, browserMarkdownExportSchema } from '@trinity-harness/contracts';
 import type {
   SessionEvent,
   TaskEvidence,
+  TaskEvidenceRejection,
   TaskStatus,
   ToolCall,
   ToolEffect,
@@ -24,6 +25,10 @@ const readTools = new Set([
 const browserReads = new Set([
   'read_page',
   'get_page_text',
+  'capture_document',
+  'extract_capture',
+  'read_capture',
+  'search_capture',
   'read_observation',
   'search_observation',
   'screenshot',
@@ -121,8 +126,24 @@ export function recordedEffect(
   call: Extract<SessionEvent, { type: 'tool/call' }>,
   result?: Extract<SessionEvent, { type: 'tool/result' }>,
 ): ToolEffect {
-  if (result?.effect) return result.effect;
-  if (call.effect) return call.effect;
+  const base = result?.effect ?? call.effect;
+  // Refine only a successful adapter-owned publication, never an unknown effect.
+  // The saved receipt's paths are schema constrained and bound to this capture.
+  const args = call.args as { operation?: unknown; captureId?: unknown } | null;
+  if (
+    call.name === 'browser' &&
+    args?.operation === 'export_markdown' &&
+    result &&
+    !result.isError &&
+    base?.kind === 'mutation' &&
+    base.scope === 'workspace' &&
+    base.evidence === 'observation'
+  ) {
+    const receipt = browserMarkdownExportSchema.safeParse(result.value);
+    if (receipt.success && receipt.data.captureId === args.captureId)
+      return { ...base, resourcePaths: [receipt.data.bundlePath] };
+  }
+  if (base) return base;
   if (readTools.has(call.name) || call.name === 'recall') {
     const control = ['task', 'skill'].includes(call.name);
     return {
@@ -139,10 +160,22 @@ export function recordedEffect(
   if (call.name === 'browser' && browserReads.has(String(operation)))
     return {
       kind: 'read',
-      scope: ['read_observation', 'search_observation'].includes(String(operation))
+      scope: [
+        'read_observation',
+        'search_observation',
+        'extract_capture',
+        'read_capture',
+        'search_capture',
+      ].includes(String(operation))
         ? 'reference'
         : 'browser',
-      evidence: ['read_observation', 'search_observation'].includes(String(operation))
+      evidence: [
+        'read_observation',
+        'search_observation',
+        'extract_capture',
+        'read_capture',
+        'search_capture',
+      ].includes(String(operation))
         ? 'immutable-observation'
         : 'observation',
     };
@@ -179,7 +212,6 @@ function revisionBoundary(
       check &&
       (JSON.stringify(previous.checks.find((item) => item.id === checkId)) !==
         JSON.stringify(check) ||
-        previous.interpretation !== event.interpretation ||
         JSON.stringify(previous.assumptions) !== JSON.stringify(event.assumptions) ||
         JSON.stringify(previous.intent && { ...previous.intent, actionPurpose: undefined }) !==
           JSON.stringify(event.intent && { ...event.intent, actionPurpose: undefined }))
@@ -190,16 +222,22 @@ function revisionBoundary(
   return boundary;
 }
 
-export function taskEvidence(events: readonly SessionEvent[], promptId: string): TaskEvidence[] {
+function projectTaskEvidence(
+  events: readonly SessionEvent[],
+  promptId: string,
+): {
+  evidence: TaskEvidence[];
+  rejections: TaskEvidenceRejection[];
+} {
   const plan = events.findLast(
     (event) => event.type === 'task/plan' && event.promptId === promptId,
   );
   if (plan?.type !== 'task/plan' || plan.evidenceVersion !== 2)
-    return legacyTaskEvidence(events, promptId);
+    return { evidence: legacyTaskEvidence(events, promptId), rejections: [] };
   const start = events.findIndex(
     (event) => event.type === 'message/user' && event.eventId === promptId,
   );
-  if (start < 0) return [];
+  if (start < 0) return { evidence: [], rejections: [] };
   const next = events.findIndex((event, i) => i > start && event.type === 'message/user');
   const limit = next < 0 ? events.length : next;
   const calls = events.flatMap((event, i) =>
@@ -220,10 +258,26 @@ export function taskEvidence(events: readonly SessionEvent[], promptId: string):
     };
   });
   const evidence: TaskEvidence[] = [];
+  const rejections: TaskEvidenceRejection[] = [];
   const revisions = new Map(
     plan.checks.map((check) => [check.id, revisionBoundary(events, promptId, check.id)]),
   );
-  const effects = new Map<ToolEffect['scope'], { end: number; callId: string }[]>();
+  const revisionSeqs = new Map(
+    plan.checks.map((check) => {
+      const boundary = revisions.get(check.id)!;
+      const introduced = events.findIndex(
+        (event) =>
+          event.type === 'task/plan' &&
+          event.promptId === promptId &&
+          event.checks.some((item) => item.id === check.id),
+      );
+      return [check.id, boundary > start ? boundary + 1 : introduced + 1];
+    }),
+  );
+  const effects = new Map<
+    ToolEffect['scope'],
+    { end: number; seq: number; callId: string; uncertain?: boolean; resourcePaths?: string[] }[]
+  >();
   events.forEach((event, index) => {
     if (
       index > start &&
@@ -232,9 +286,10 @@ export function taskEvidence(events: readonly SessionEvent[], promptId: string):
     )
       effects.set(
         'browser',
-        [...(effects.get('browser') ?? []), { end: index, callId: event.eventId }]
-          .sort((a, b) => b.end - a.end)
-          .slice(0, 2),
+        [
+          ...(effects.get('browser') ?? []),
+          { end: index, seq: index + 1, callId: event.eventId },
+        ].sort((a, b) => b.end - a.end),
       );
   });
   const commands = new Set(
@@ -260,14 +315,45 @@ export function taskEvidence(events: readonly SessionEvent[], promptId: string):
         continue;
       effects.set(
         scope,
-        [...(effects.get(scope) ?? []), { end, callId: pair.call.callId }]
-          .sort((a, b) => b.end - a.end)
-          .slice(0, 2),
+        [
+          ...(effects.get(scope) ?? []),
+          {
+            end,
+            seq: pair.resultIndex < 0 ? pair.index + 1 : pair.resultIndex + 1,
+            uncertain:
+              pair.effect.kind === 'unknown' || pair.effect.scope === 'unknown' || !pair.result,
+            callId: pair.call.callId,
+            ...(pair.effect.kind !== 'unknown' && pair.effect.resourcePaths
+              ? { resourcePaths: pair.effect.resourcePaths }
+              : {}),
+          },
+        ].sort((a, b) => b.end - a.end),
       );
     }
   }
   for (const pair of pairs) {
-    if (!pair.result || pair.result.isError) continue;
+    if (!pair.result || pair.result.isError) {
+      for (const check of plan.checks) {
+        const args = pair.call.args as { operation?: unknown; command?: unknown } | null;
+        const relevant =
+          check.kind === 'command'
+            ? pair.call.name === 'bash' && args?.command === check.command
+            : (pair.effect.evidence === 'observation' ||
+                pair.effect.evidence === 'immutable-observation') &&
+              (!check.operation ||
+                (pair.call.name === 'browser' && args?.operation === check.operation));
+        if (relevant)
+          rejections.push({
+            checkId: check.id,
+            checkRevisionSeq: revisionSeqs.get(check.id)!,
+            callId: pair.call.callId,
+            ...(pair.result ? { resultSeq: pair.resultIndex + 1 } : {}),
+            reason: pair.result ? 'failed_result' : 'missing_result',
+            repair: 'inspect_failed_result',
+          });
+      }
+      continue;
+    }
     const args = pair.call.args as { command?: unknown } | null;
     const value = pair.result.value as { exitCode?: unknown } | null;
     const command =
@@ -279,13 +365,45 @@ export function taskEvidence(events: readonly SessionEvent[], promptId: string):
     if (!command && !observation) continue;
     const checkIds = plan.checks
       .filter((check) => {
+        const reject = (
+          reason: TaskEvidenceRejection['reason'],
+          repair: TaskEvidenceRejection['repair'],
+          invalidatingSeq?: number,
+        ): false => {
+          rejections.push({
+            checkId: check.id,
+            callId: pair.call.callId,
+            resultSeq: pair.resultIndex + 1,
+            checkRevisionSeq: revisionSeqs.get(check.id)!,
+            reason,
+            repair,
+            ...(invalidatingSeq ? { invalidatingSeq } : {}),
+          });
+          return false;
+        };
         if (
           command
             ? check.kind !== 'command' || check.command !== command
             : check.kind !== 'observation'
         )
-          return false;
-        if (pair.index <= revisions.get(check.id)!) return false;
+          return reject('wrong_method', 'select_matching_receipt');
+        const operation = (pair.call.args as { operation?: unknown } | null)?.operation;
+        if (check.operation && (pair.call.name !== 'browser' || operation !== check.operation))
+          return reject('wrong_operation', 'select_matching_receipt');
+        if (
+          check.resourcePaths?.length &&
+          !check.resourcePaths.every((path) => pair.effect.resourcePaths?.includes(path))
+        )
+          return reject('wrong_resource', 'select_matching_receipt');
+        if (pair.index <= revisions.get(check.id)!)
+          return reject('changed_check', 'review_check_revision', revisions.get(check.id)! + 1);
+        // A committed rendered capture is an immutable artifact, separate from
+        // the current tab. Later file writes/control changes cannot change it.
+        if (
+          check.operation === 'capture_document' &&
+          (pair.result?.value as { captureId?: unknown } | null)?.captureId
+        )
+          return true;
         const scope =
           check.dependency ??
           (command
@@ -298,13 +416,35 @@ export function taskEvidence(events: readonly SessionEvent[], promptId: string):
           pair.effect.scope !== check.dependency &&
           !(pair.effect.evidence === 'immutable-observation' && check.dependency === 'reference')
         )
-          return false;
+          return reject('wrong_dependency', 'select_matching_receipt');
         const immutable = pair.effect.evidence === 'immutable-observation' && scope === 'reference';
         if (immutable) return true;
+        const resources =
+          check.resourcePaths ??
+          (check.operation === 'export_markdown' ? pair.effect.resourcePaths : undefined);
         const latestEffect = effects
           .get(scope)
-          ?.find((effect) => effect.callId !== pair.call.callId);
-        return !latestEffect || latestEffect.end < pair.index;
+          ?.find(
+            (effect) =>
+              effect.callId !== pair.call.callId &&
+              (!resources?.length ||
+                !effect.resourcePaths?.length ||
+                resources.some((checked) =>
+                  effect.resourcePaths!.some(
+                    (changed) =>
+                      checked === changed ||
+                      checked.startsWith(changed + '/') ||
+                      changed.startsWith(checked + '/'),
+                  ),
+                )),
+          );
+        if (!latestEffect || latestEffect.end < pair.index) return true;
+
+        return reject(
+          latestEffect.uncertain ? 'unknown_effect' : 'later_effect',
+          latestEffect.uncertain ? 'inspect_effect_before_retry' : 'observe_affected_state',
+          latestEffect.seq,
+        );
       })
       .map((check) => check.id);
     if (checkIds.length)
@@ -317,7 +457,67 @@ export function taskEvidence(events: readonly SessionEvent[], promptId: string):
         checkIds,
       });
   }
-  return evidence;
+  return { evidence, rejections };
+}
+
+export function taskEvidence(events: readonly SessionEvent[], promptId: string): TaskEvidence[] {
+  return projectTaskEvidence(events, promptId).evidence;
+}
+
+export function evidenceRejectionDetails(
+  events: readonly SessionEvent[],
+  promptId: string,
+  checkId: string,
+  callId: string,
+): TaskEvidenceRejection | undefined {
+  const projected = projectTaskEvidence(events, promptId).rejections.find(
+    (item) => item.checkId === checkId && item.callId === callId,
+  );
+  if (projected) return projected;
+  const plan = events.findLast(
+    (event) => event.type === 'task/plan' && event.promptId === promptId,
+  );
+  if (plan?.type !== 'task/plan' || !plan.checks.some((check) => check.id === checkId))
+    return undefined;
+  const start = events.findIndex((event) => event.eventId === promptId);
+  const next = events.findIndex((event, i) => i > start && event.type === 'message/user');
+  const call = events.findIndex((event) => event.type === 'tool/call' && event.callId === callId);
+  if (call < 0) return undefined;
+  const result = events.findIndex(
+    (event, i) => i > call && event.type === 'tool/result' && event.callId === callId,
+  );
+  const base = {
+    checkId,
+    callId,
+    checkRevisionSeq:
+      Math.max(
+        revisionBoundary(events, promptId, checkId),
+        events.findIndex(
+          (event) =>
+            event.type === 'task/plan' &&
+            event.promptId === promptId &&
+            event.checks.some((item) => item.id === checkId),
+        ),
+      ) + 1,
+    ...(result >= 0 ? { resultSeq: result + 1 } : {}),
+  };
+  if (call <= start || (next >= 0 && call >= next))
+    return { ...base, reason: 'outside_request', repair: 'use_current_request' };
+  if (result < 0 || (next >= 0 && result >= next))
+    return {
+      ...base,
+      resultSeq: undefined,
+      reason: 'missing_result',
+      repair: 'inspect_failed_result',
+    };
+  if ((events[result] as Extract<SessionEvent, { type: 'tool/result' }>).isError)
+    return { ...base, reason: 'failed_result', repair: 'inspect_failed_result' };
+  if (
+    plan.evidenceVersion !== 2 &&
+    !legacyTaskEvidence(events, promptId).some((item) => item.callId === callId)
+  )
+    return { ...base, reason: 'legacy_boundary', repair: 'observe_affected_state' };
+  return undefined;
 }
 
 export function evidenceRejection(
@@ -347,6 +547,9 @@ export function evidenceRejection(
       (selectedCall.args as { command?: unknown } | null)?.command !== check.command)
   )
     return 'The executed command does not exactly match this check. Run the command in commandRepairs unchanged, then verify its eligible resultSeq. Extra formatting, redirections, filters or diagnostics change the command; a successful different command cannot verify this check.';
+  const detail = evidenceRejectionDetails(events, promptId, checkId, callId);
+  if (detail)
+    return `Evidence rejected: ${detail.reason}; check revision seq ${detail.checkRevisionSeq}, result seq ${detail.resultSeq}${detail.invalidatingSeq ? `, invalidating seq ${detail.invalidatingSeq}` : ''}. Repair: ${detail.repair}. Inspect eligible receipts and the affected state; never repeat mutations merely to refresh evidence.`;
   if (call <= revisionBoundary(events, promptId, checkId))
     return 'The check or its interpretation changed after this observation; collect evidence for the current revision.';
   return 'Evidence does not match the check method/dependency, or a later relevant or unknown effect invalidated it. Inspect current eligible evidence and verify the affected state.';
@@ -390,7 +593,8 @@ export function taskVerification(
 
 /** Model-visible receipts are bounded; validation still searches all eligible evidence. */
 export function taskState(events: readonly SessionEvent[], promptId: string): TaskStatus {
-  const evidence = taskEvidence(events, promptId);
+  const projection = projectTaskEvidence(events, promptId);
+  const evidence = projection.evidence;
   const assessment = taskVerification(events, promptId);
   const plan = events.findLast(
     (event) => event.type === 'task/plan' && event.promptId === promptId,
@@ -445,5 +649,16 @@ export function taskState(events: readonly SessionEvent[], promptId: string): Ta
     evidence: evidence.slice(-32),
     evidenceTruncated: evidence.length > 32,
     ...(commandRepairs.length ? { commandRepairs } : {}),
+    ...(projection.rejections.length
+      ? {
+          rejections: (plan?.type === 'task/plan' ? plan.checks : [])
+            .flatMap((check) => {
+              if (evidence.some((item) => item.checkIds?.includes(check.id))) return [];
+              const rejected = projection.rejections.findLast((item) => item.checkId === check.id);
+              return rejected ? [rejected] : [];
+            })
+            .slice(-32),
+        }
+      : {}),
   };
 }
