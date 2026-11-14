@@ -129,7 +129,54 @@ export const workspaceDirectorySchema = z
   .strict();
 export type WorkspaceDirectory = z.infer<typeof workspaceDirectorySchema>;
 
+export const workspaceDocumentRequestSchema = z.discriminatedUnion('operation', [
+  z
+    .object({
+      operation: z.literal('read'),
+      path: workspacePathSchema,
+      revision: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .optional(),
+    })
+    .strict(),
+  z.object({ operation: z.literal('history'), path: workspacePathSchema }).strict(),
+  z
+    .object({
+      operation: z.literal('save'),
+      path: workspacePathSchema,
+      expectedVersion: z.string().regex(/^[a-f0-9]{64}$/),
+      content: z.string().max(65536),
+    })
+    .strict(),
+]);
+export type WorkspaceDocumentRequest = z.infer<typeof workspaceDocumentRequestSchema>;
+export const workspaceDocumentSchema = z
+  .object({
+    version: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    base64: z
+      .string()
+      .max(7 * 1024 * 1024)
+      .optional(),
+    text: z.string().max(65536).optional(),
+    revisions: z
+      .array(
+        z.object({ version: z.string().regex(/^[a-f0-9]{64}$/), capturedAt: z.string() }).strict(),
+      )
+      .max(100)
+      .optional(),
+  })
+  .strict();
+export type WorkspaceDocument = z.infer<typeof workspaceDocumentSchema>;
+
 export interface SandboxPort {
+  workspaceDocument?(
+    request: WorkspaceDocumentRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceDocument>;
   /** Human-only bounded preview; adapters may use the existing guest argv protocol. */
   previewFile?(path: string, signal?: AbortSignal): Promise<ReadFileResult>;
   listDirectory?(path: string, signal?: AbortSignal): Promise<WorkspaceDirectory>;

@@ -1,8 +1,20 @@
+import { WorkspaceDocumentView } from './workspace-document';
 import { useEffect, useState, type ReactElement } from 'react';
-import { Alert, Breadcrumb, Button, Drawer, Empty, Flex, List, Spin, Typography } from 'antd';
+import {
+  Alert,
+  Breadcrumb,
+  Button,
+  Drawer,
+  Empty,
+  Flex,
+  List,
+  Modal,
+  Spin,
+  Typography,
+} from 'antd';
 import { FileOutlined, FolderOutlined, ReloadOutlined } from '@ant-design/icons';
 import type { AcpClient } from '@trinity-harness/client-acp';
-import type { ReadFileResult, WorkspaceDirectory } from '@trinity-harness/shared';
+import type { WorkspaceDirectory } from '@trinity-harness/shared';
 
 /** Human file viewer. Kept outside the transcript so browsing preserves the composer and stream. */
 export function WorkspaceBrowser({
@@ -14,30 +26,45 @@ export function WorkspaceBrowser({
   sessionId: string;
   workspaceUri?: string | null;
 }): ReactElement {
+  const [dirty, setDirty] = useState(false);
+  const leave = (action: () => void): void => {
+    if (!dirty) {
+      action();
+      return;
+    }
+    Modal.confirm({
+      title: 'Discard unsaved edits?',
+      content: 'Your edits have not been saved as a revision.',
+      okText: 'Discard edits',
+      onOk: () => {
+        setDirty(false);
+        action();
+      },
+    });
+  };
   const [open, setOpen] = useState(false);
   const [path, setPath] = useState('');
   const [directory, setDirectory] = useState<WorkspaceDirectory | null>(null);
   const [file, setFile] = useState<string | null>(null);
-  const [preview, setPreview] = useState<ReadFileResult | null>(null);
+
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [revision, setRevision] = useState(0);
   useEffect(() => {
-    if (!open) return;
+    if (!open || file !== null) {
+      setLoading(false);
+      return;
+    }
     const controller = new AbortController();
     setLoading(true);
     setError('');
     setDirectory(null);
-    setPreview(null);
-    const request =
-      file === null
-        ? client.listWorkspaceDirectory(sessionId, path, controller.signal)
-        : client.readWorkspaceFile(sessionId, file, controller.signal);
+
+    const request = client.listWorkspaceDirectory(sessionId, path, controller.signal);
     void request
       .then((result) => {
         if (controller.signal.aborted) return;
-        if ('entries' in result) setDirectory(result);
-        else setPreview(result);
+        setDirectory(result);
       })
       .catch((failure: unknown) => {
         if (!controller.signal.aborted) setError(String(failure));
@@ -48,8 +75,10 @@ export function WorkspaceBrowser({
     return () => controller.abort();
   }, [client, sessionId, open, path, file, revision]);
   const navigate = (next: string): void => {
-    setPath(next);
-    setFile(null);
+    leave(() => {
+      setPath(next);
+      setFile(null);
+    });
   };
   const segments = path ? path.split('/') : [];
   return (
@@ -60,7 +89,7 @@ export function WorkspaceBrowser({
       <Drawer
         title="Session workspace"
         open={open}
-        onClose={() => setOpen(false)}
+        onClose={() => leave(() => setOpen(false))}
         width="min(900px, 100vw)"
         destroyOnHidden
       >
@@ -94,13 +123,13 @@ export function WorkspaceBrowser({
             />
             <Button
               icon={<ReloadOutlined />}
-              onClick={() => setRevision((value) => value + 1)}
+              onClick={() => leave(() => setRevision((value) => value + 1))}
               aria-label="Refresh workspace"
             />
           </Flex>
           {file !== null && (
             <Flex vertical gap={8}>
-              <Button onClick={() => setFile(null)}>Back to folder</Button>
+              <Button onClick={() => leave(() => setFile(null))}>Back to folder</Button>
               <Typography.Text strong style={{ overflowWrap: 'anywhere' }}>
                 {file}
               </Typography.Text>
@@ -134,7 +163,10 @@ export function WorkspaceBrowser({
                       onClick={() => {
                         const next = path ? `${path}/${entry.name}` : entry.name;
                         if (entry.kind === 'directory') navigate(next);
-                        else setFile(next);
+                        else {
+                          setDirectory(null);
+                          setFile(next);
+                        }
                       }}
                     >
                       {entry.name}
@@ -148,26 +180,14 @@ export function WorkspaceBrowser({
               )}
             </>
           )}
-          {preview && (
-            <>
-              {preview.truncated && (
-                <Alert type="info" message="Preview limited to 64 KiB or 2,000 lines." />
-              )}
-              {preview.content.includes('\0') ? (
-                <Alert type="info" message="This binary file cannot be previewed as text." />
-              ) : (
-                <pre
-                  style={{
-                    margin: 0,
-                    overflow: 'auto',
-                    whiteSpace: 'pre-wrap',
-                    overflowWrap: 'anywhere',
-                  }}
-                >
-                  {preview.content || '(Empty file)'}
-                </pre>
-              )}
-            </>
+          {file !== null && !loading && (
+            <WorkspaceDocumentView
+              key={sessionId + ':' + file + ':' + revision}
+              client={client}
+              sessionId={sessionId}
+              path={file}
+              onDirtyChange={setDirty}
+            />
           )}
         </Flex>
       </Drawer>

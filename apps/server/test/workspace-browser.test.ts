@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, it, vi } from 'vitest';
@@ -84,6 +84,55 @@ it('browses the authorized session root, bounds previews, and rejects escapes an
     }
     expect((await read('directory', 'outside')).statusCode).toBe(503);
     expect((await read('file', 'outside/missing')).statusCode).toBe(503);
+    const doc = async (payload: Record<string, unknown>) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/sessions/${meta.id}/workspace/document`,
+        headers: { authorization: 'Bearer token' },
+        payload,
+      });
+    const document = await doc({ operation: 'read', path: 'notes/hello.txt' });
+    expect(document.statusCode).toBe(200);
+    const version = document.json().version;
+    expect(
+      (
+        await doc({
+          operation: 'save',
+          path: 'notes/hello.txt',
+          expectedVersion: version,
+          content: 'updated',
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await doc({
+          operation: 'save',
+          path: 'notes/hello.txt',
+          expectedVersion: version,
+          content: 'stale',
+        })
+      ).statusCode,
+    ).toBe(409);
+    expect(
+      (await doc({ operation: 'history', path: 'notes/hello.txt' })).json().revisions,
+    ).toHaveLength(2);
+    expect((await doc({ operation: 'read', path: 'model-context/request.json' })).statusCode).toBe(
+      400,
+    );
+    identity = { ...owner, userId: randomUUID() };
+    expect(
+      (
+        await doc({
+          operation: 'save',
+          path: 'notes/hello.txt',
+          expectedVersion: version,
+          content: 'unauthorized',
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(await readFile(path.join(root, 'notes/hello.txt'), 'utf8')).toBe('updated');
+    identity = owner;
     identity = { ...owner, userId: randomUUID() };
     expect((await read('directory')).statusCode).toBe(404);
     identity = { ...owner, tenantId: randomUUID() };

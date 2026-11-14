@@ -1,3 +1,10 @@
+import { workspaceDocumentScript } from './workspace-document-script.js';
+import {
+  workspaceDocumentRequestSchema,
+  workspaceDocumentSchema,
+  type WorkspaceDocumentRequest,
+  type WorkspaceDocument,
+} from '@trinity-harness/contracts';
 import { createHash } from 'node:crypto';
 import { readTextFilePage } from './text-file-page.js';
 import { spawn } from 'node:child_process';
@@ -357,6 +364,30 @@ export class LocalSandbox implements SandboxPort {
     if (canonical !== root && !canonical.startsWith(root + path.sep))
       throw new Error('Path outside workspace');
     return canonical;
+  }
+
+  async workspaceDocument(
+    request: WorkspaceDocumentRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceDocument> {
+    workspaceDocumentRequestSchema.parse(request);
+    const result = await this.execArgv(
+      'node',
+      [
+        '--input-type=module',
+        '-e',
+        workspaceDocumentScript,
+        ...(JSON.stringify(request).match(/[\s\S]{1,4000}/gu) ?? []),
+      ],
+      {
+        maxOutputBytes: 8 * 1024 * 1024,
+        timeoutMs: 30_000,
+        signal,
+      },
+    );
+    if (result.exitCode !== 0 || result.outputOverflow)
+      throw new Error(result.stderr || 'Workspace document unavailable');
+    return workspaceDocumentSchema.parse(JSON.parse(result.stdout));
   }
 
   async listDirectory(relativePath: string, signal?: AbortSignal): Promise<WorkspaceDirectory> {

@@ -1,3 +1,10 @@
+import { workspaceDocumentScript } from './workspace-document-script.js';
+import {
+  workspaceDocumentRequestSchema,
+  workspaceDocumentSchema,
+  type WorkspaceDocumentRequest,
+  type WorkspaceDocument,
+} from '@trinity-harness/contracts';
 import {
   workspacePathSchema,
   workspaceDirectorySchema,
@@ -168,6 +175,30 @@ export class RemoteSandbox implements SandboxPort {
       throw new Error('Workspace entry unavailable');
     return JSON.parse(response.stdout);
   }
+  async workspaceDocument(
+    request: WorkspaceDocumentRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceDocument> {
+    workspaceDocumentRequestSchema.parse(request);
+    const result = await this.execArgv(
+      'node',
+      [
+        '--input-type=module',
+        '-e',
+        workspaceDocumentScript,
+        ...(JSON.stringify(request).match(/[\s\S]{1,4000}/gu) ?? []),
+      ],
+      {
+        maxOutputBytes: 8 * 1024 * 1024,
+        timeoutMs: 30_000,
+        signal,
+      },
+    );
+    if (result.exitCode !== 0 || result.outputOverflow)
+      throw new Error(result.stderr || 'Workspace document unavailable');
+    return workspaceDocumentSchema.parse(JSON.parse(result.stdout));
+  }
+
   async listDirectory(path: string, signal?: AbortSignal): Promise<WorkspaceDirectory> {
     return workspaceDirectorySchema.parse(await this.workspaceView('directory', path, signal));
   }

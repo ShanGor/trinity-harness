@@ -1,3 +1,9 @@
+import {
+  workspaceDocumentSchema,
+  workspaceDocumentRequestSchema,
+  type WorkspaceDocumentRequest,
+  type WorkspaceDocument,
+} from '@trinity-harness/shared';
 import { historyPreferencesSchema, type HistoryPreferences } from '@trinity-harness/shared';
 import {
   personaSchema,
@@ -179,6 +185,27 @@ export class AcpClient {
       await this.readWorkspace(sessionId, 'directory', path, signal),
     );
   }
+  async workspaceDocument(
+    sessionId: string,
+    request: WorkspaceDocumentRequest,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceDocument> {
+    const response = await fetch(
+      `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/workspace/document`,
+      {
+        method: 'POST',
+        headers: { ...this.authHeaders(), 'content-type': 'application/json' },
+        body: JSON.stringify(workspaceDocumentRequestSchema.parse(request)),
+        signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(120_000)]),
+      },
+    );
+    if (!response.ok)
+      throw new Error(
+        'Document unavailable or changed. Reload before saving; your draft is retained.',
+      );
+    return workspaceDocumentSchema.parse(await response.json());
+  }
+
   async readWorkspaceFile(
     sessionId: string,
     path: string,

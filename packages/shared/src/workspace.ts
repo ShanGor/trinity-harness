@@ -27,3 +27,9 @@ export {
   readFileResultSchema,
 } from '@trinity-harness/contracts';
 export type { WorkspaceDirectory, ReadFileResult } from '@trinity-harness/contracts';
+
+export {
+  workspaceDocumentRequestSchema,
+  workspaceDocumentSchema,
+} from '@trinity-harness/contracts';
+export type { WorkspaceDocumentRequest, WorkspaceDocument } from '@trinity-harness/contracts';
