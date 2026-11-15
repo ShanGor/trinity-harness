@@ -205,6 +205,11 @@ async function main(): Promise<void> {
     registry: CoreToolRegistry;
   }
   const assemblies = new Map<string, RootAssembly>();
+  const resolveClockTimezone = async (sessionId: string): Promise<string | undefined> => {
+    const owner = await metas.get(sessionId);
+    if (!owner || owner.closedAt || owner.scope !== 'personal') return undefined;
+    return (await browserUsers.getHistoryPreferences(owner.tenantId, owner.userId))?.timezone;
+  };
   const assemblyFor = (root: string, sessionId: string): RootAssembly => {
     const key = guestRouter ? sessionId : root;
     let assembly = assemblies.get(key);
@@ -303,6 +308,7 @@ async function main(): Promise<void> {
             for (const tool of createLspTools(sessionLsp)) childRegistry.register(tool);
           }
           return new CoreAgentLoop({
+            resolveClockTimezone: () => resolveClockTimezone(parentSessionId),
             llm,
             model: env.MODEL,
             pricing: env.modelPricing,
@@ -367,6 +373,7 @@ async function main(): Promise<void> {
     defaultWorkspaceRoot: env.WORKSPACE_ROOT,
     createLoop: (sessionId, workspaceRoot) =>
       new CoreAgentLoop({
+        resolveClockTimezone: () => resolveClockTimezone(sessionId),
         llm,
         model: env.MODEL,
         pricing: env.modelPricing,

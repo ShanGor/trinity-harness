@@ -130,6 +130,7 @@ export const workspaceDirectorySchema = z
 export type WorkspaceDirectory = z.infer<typeof workspaceDirectorySchema>;
 
 export const workspaceDocumentRequestSchema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('archive'), path: workspacePathSchema }).strict(),
   z
     .object({
       operation: z.literal('read'),

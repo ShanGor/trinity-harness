@@ -2465,7 +2465,7 @@ export async function buildServer(
       const granted = await authorizeSession(sessionId, req.identity, reply);
       if (!granted) return;
       const parsed = workspaceDocumentRequestSchema.safeParse(req.body);
-      if (!parsed.success || !parsed.data.path)
+      if (!parsed.success || (!parsed.data.path && parsed.data.operation !== 'archive'))
         return reply.code(400).send({ error: 'Invalid document request' });
       if (!deps.workspaceSandbox) return reply.code(501).send({ error: 'Workspace unavailable' });
       const controller = new AbortController();
@@ -2488,7 +2488,9 @@ export async function buildServer(
       } catch {
         return reply.code(409).send({
           error:
-            'Document unavailable or changed. Reload before saving; inspect history after an interrupted save.',
+            parsed.data.operation === 'archive'
+              ? 'Folder ZIP unavailable. Folders must contain at most 1,000 entries, 32 levels and 5 MiB of file data; the ZIP must fit within 5 MiB. Private context, symlinks and special files are excluded.'
+              : 'Document unavailable or changed. Reload before saving; inspect history after an interrupted save.',
         });
       } finally {
         req.raw.removeListener('aborted', abort);

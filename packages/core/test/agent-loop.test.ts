@@ -221,6 +221,7 @@ describe('CoreAgentLoop', () => {
     expect(outcome).toEqual({ reason: 'completed', steps: 1 });
     expect(eventTypes(await store.load('s1'))).toEqual([
       'message/user',
+      'model/clock',
       'model/context',
       'model/usage',
       'message/assistant',
@@ -243,7 +244,13 @@ describe('CoreAgentLoop', () => {
       'An unavailable page does not establish a browser-wide outage',
     );
     expect(request!.system).toContain('Do not claim an unvisited source failed');
-    expect(request!.messages).toEqual([{ role: 'user', content: 'hi there' }]);
+    expect(request!.messages).toEqual([
+      { role: 'user', content: 'hi there' },
+      expect.objectContaining({
+        context: 'control',
+        content: expect.stringContaining('[Runtime clock snapshot;'),
+      }),
+    ]);
     expect(request!.tools.map((t) => t.name)).toEqual(['write_file']);
   });
 
@@ -263,10 +270,12 @@ describe('CoreAgentLoop', () => {
     // Event-sourcing: everything replayable from the log, in order (design.md §6.1).
     expect(eventTypes(await store.load('s1'))).toEqual([
       'message/user',
+      'model/clock',
       'model/context',
       'model/usage',
       'tool/call',
       'tool/result',
+      'model/clock',
       'model/context',
       'model/usage',
       'message/assistant',
@@ -278,6 +287,7 @@ describe('CoreAgentLoop', () => {
     const second = llm.requests[1]!;
     expect(second.messages).toEqual([
       { role: 'user', content: 'write 42 to out.txt' },
+      llm.requests[0]!.messages.at(-1),
       {
         role: 'assistant',
         content: '',
@@ -289,6 +299,10 @@ describe('CoreAgentLoop', () => {
         toolCallId: 'c1',
         toolName: 'write_file',
       },
+      expect.objectContaining({
+        context: 'control',
+        content: expect.stringContaining('[Runtime clock snapshot;'),
+      }),
     ]);
 
     // Real-time sink events mirror the log.
@@ -378,6 +392,10 @@ describe('CoreAgentLoop', () => {
         content: 'answer: 4',
       },
       { role: 'user', content: 'and 3+3?' },
+      expect.objectContaining({
+        context: 'control',
+        content: expect.stringContaining('[Runtime clock snapshot;'),
+      }),
     ]);
   });
 
@@ -410,12 +428,14 @@ describe('CoreAgentLoop', () => {
     const log = await store.load('s1');
     expect(eventTypes(log)).toEqual([
       'message/user',
+      'model/clock',
       'model/context',
       'model/usage',
       'message/assistant',
       'task/completion',
       'turn/end',
       'message/user',
+      'model/clock',
       'model/context',
       'model/usage',
       'message/assistant',
@@ -426,6 +446,10 @@ describe('CoreAgentLoop', () => {
       { role: 'user', content: 'one' },
       { role: 'assistant', content: 'first' },
       { role: 'user', content: 'two' },
+      expect.objectContaining({
+        context: 'control',
+        content: expect.stringContaining('[Runtime clock snapshot;'),
+      }),
     ]);
   });
 });

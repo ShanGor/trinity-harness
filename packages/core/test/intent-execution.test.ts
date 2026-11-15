@@ -170,7 +170,10 @@ describe('intent context and recovery', () => {
           (m) => m.role === 'assistant' && m.content.startsWith('Use a small tool loop'),
         ),
       ).toBe(true);
-      expect(request.messages.at(-1)?.content).toBe('translate into Chinese');
+      expect(
+        request.messages.findLast((message) => message.role === 'user' && !message.context)
+          ?.content,
+      ).toBe('translate into Chinese');
       expect(JSON.stringify(request.messages)).not.toContain('UNRELATED HARDWARE');
       return textChunks('使用一个小型工具循环，并保留上下文。');
     });
@@ -192,9 +195,10 @@ describe('intent context and recovery', () => {
     const llm = new FakeLLM((request) => {
       expect(JSON.stringify(request.messages)).toContain('Approach A');
       expect(JSON.stringify(request.messages)).toContain('Approach B');
-      expect(request.messages.at(-1)?.content).toBe(
-        'Compare the first two approaches, ignoring the meeting.',
-      );
+      expect(
+        request.messages.findLast((message) => message.role === 'user' && !message.context)
+          ?.content,
+      ).toBe('Compare the first two approaches, ignoring the meeting.');
       return textChunks('A decouples delivery; B is simpler for synchronous work.');
     });
     expect(
@@ -301,9 +305,10 @@ describe('intent context and recovery', () => {
     const promptSeq = (await f.store.load(f.owner.id)).length;
     const select = vi.spyOn(f.context, 'select');
     const llm = new FakeLLM((request) => {
-      expect(request.messages.at(-1)?.content).toBe(
-        'Compare both designs.\nKeep the budget below 50.',
-      );
+      expect(
+        request.messages.findLast((message) => message.role === 'user' && !message.context)
+          ?.content,
+      ).toBe('Compare both designs.\nKeep the budget below 50.');
       return textChunks('Comparison within the stated budget.');
     });
     await f.loop(llm).run(f.owner.id, 'UNRELATED RETRY TEXT', sink, { promptSeq });
@@ -444,6 +449,10 @@ describe('intent context and recovery', () => {
     const bytes = (await f.blobs.get(context.snapshotUri!))!;
     expect(createHash('sha256').update(bytes).digest('hex')).toBe(context.digest);
     expect(JSON.parse(new TextDecoder().decode(bytes)).messages).toEqual(llm.requests[0]!.messages);
+    const clocks = (await f.store.load(f.owner.id)).filter((event) => event.type === 'model/clock');
+    expect(clocks).toHaveLength(1);
+    expect(clocks[0]!.requestId).toBe(context.requestId);
+    expect(llm.requests[0]!.messages.at(-1)?.content).toContain(clocks[0]!.clock.timestamp);
     const reader = createReadBlobTool(f.blobs);
     f.tools.register(reader);
     for (const uri of [
@@ -477,6 +486,11 @@ describe('intent context and recovery', () => {
       () => toolCallThenFinish('read', 'read_file', { path: 'large.txt' }),
       (request) => {
         expect(request.system).toContain('compact conversation histories');
+        expect(
+          request.messages.some((message) =>
+            message.content.startsWith('[Runtime clock snapshot;'),
+          ),
+        ).toBe(false);
         expect(request.messages).toHaveLength(1);
         expect(request.messages[0]!.content).toContain('Conversation excerpt (part');
         return textChunks(
@@ -628,7 +642,10 @@ describe('intent context and recovery', () => {
       'Source body and its constraints. '.repeat(2000),
     );
     const llm = new FakeLLM((request) => {
-      expect(request.messages.at(-1)?.content).toBe('Critique that design.');
+      expect(
+        request.messages.findLast((message) => message.role === 'user' && !message.context)
+          ?.content,
+      ).toBe('Critique that design.');
       expect(JSON.stringify(request.messages)).toContain('excerpt truncated');
       return textChunks('A critique qualified by the delivered source excerpt.');
     });

@@ -136,6 +136,11 @@ async function main(): Promise<void> {
   }
   const assemblies = new Map<string, RootAssembly>();
   let guestRouter: FirecrackerGuestRouter | undefined;
+  const resolveClockTimezone = async (sessionId: string): Promise<string | undefined> => {
+    const owner = await auth?.metas.get(sessionId);
+    if (!owner || owner.closedAt || owner.scope !== 'personal') return undefined;
+    return (await auth?.users.getHistoryPreferences?.(owner.tenantId, owner.userId))?.timezone;
+  };
   const assemblyFor = (root: string, sessionId: string): RootAssembly => {
     if (env.EXECUTION_DRIVER === 'firecracker' && !guestRouter)
       throw new Error('Guest execution routing unavailable');
@@ -254,6 +259,7 @@ async function main(): Promise<void> {
             if (sessionLsp)
               for (const tool of createLspTools(sessionLsp)) childTools.register(tool);
             return new CoreAgentLoop({
+              resolveClockTimezone: () => resolveClockTimezone(parentSessionId),
               llm,
               model: env.MODEL,
               pricing: env.modelPricing,
@@ -329,6 +335,7 @@ async function main(): Promise<void> {
     workspaceRoot: string,
     sessionId: string,
   ): ConstructorParameters<typeof CoreAgentLoop>[0] => ({
+    resolveClockTimezone: () => resolveClockTimezone(sessionId),
     llm,
     model: env.MODEL,
     pricing: env.modelPricing,

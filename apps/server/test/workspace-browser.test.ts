@@ -94,6 +94,17 @@ it('browses the authorized session root, bounds previews, and rejects escapes an
     const document = await doc({ operation: 'read', path: 'notes/hello.txt' });
     expect(document.statusCode).toBe(200);
     const version = document.json().version;
+    const archive = await doc({ operation: 'archive', path: '' });
+    expect(archive.statusCode).toBe(200);
+    expect(archive.headers['cache-control']).toBe('private, no-store');
+    expect(Buffer.from(archive.json().base64, 'base64').readUInt32LE(0)).toBe(0x04034b50);
+    expect((await doc({ operation: 'archive', path: 'notes' })).statusCode).toBe(200);
+    for (const invalid of ['../escape', 'model-context']) {
+      expect((await doc({ operation: 'archive', path: invalid })).statusCode).toBe(400);
+    }
+    expect((await doc({ operation: 'archive', path: 'outside' })).statusCode).toBe(409);
+    expect((await doc({ operation: 'read', path: '' })).statusCode).toBe(400);
+
     expect(
       (
         await doc({
@@ -121,6 +132,7 @@ it('browses the authorized session root, bounds previews, and rejects escapes an
       400,
     );
     identity = { ...owner, userId: randomUUID() };
+    expect((await doc({ operation: 'archive', path: '' })).statusCode).toBe(404);
     expect(
       (
         await doc({
@@ -138,6 +150,13 @@ it('browses the authorized session root, bounds previews, and rejects escapes an
     identity = { ...owner, tenantId: randomUUID() };
     expect((await read('file', '.hidden')).statusCode).toBe(404);
     identity = owner;
+    const archiveRead = vi.spyOn(sandbox, 'workspaceDocument').mockImplementationOnce(async () => {
+      meta.closedAt = new Date().toISOString();
+      return { base64: 'UEs=' };
+    });
+    expect((await doc({ operation: 'archive', path: '' })).statusCode).toBe(404);
+    archiveRead.mockRestore();
+    delete meta.closedAt;
     const list = vi.spyOn(sandbox, 'listDirectory').mockImplementation(async () => {
       meta.closedAt = new Date().toISOString();
       return { entries: [], truncated: false };

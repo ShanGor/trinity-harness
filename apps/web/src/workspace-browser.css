@@ -1,0 +1,92 @@
+.workspace-drawer .ant-drawer-header {
+  padding: 16px 24px;
+}
+
+.workspace-drawer .ant-drawer-body {
+  padding: 12px 24px 24px;
+}
+
+.workspace-navigation {
+  min-width: 0;
+}
+
+.workspace-breadcrumbs {
+  min-width: 0;
+  flex: 1;
+}
+
+.workspace-breadcrumbs ol {
+  align-items: center;
+}
+
+.workspace-breadcrumbs li {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.workspace-breadcrumbs button {
+  max-width: 100%;
+  height: 28px;
+  padding-inline: 4px;
+}
+
+.workspace-breadcrumbs button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-document-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--ant-color-border-secondary, #eee);
+}
+
+.workspace-document-title {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 8px;
+  font-size: 16px;
+}
+
+.workspace-document-title > .anticon {
+  color: var(--ant-color-text-secondary, #888);
+  flex-shrink: 0;
+}
+
+.workspace-document-actions {
+  flex-shrink: 0;
+}
+
+@media (max-width: 480px) {
+  .workspace-drawer .ant-drawer-body {
+    padding: 12px;
+  }
+
+  .workspace-document-toolbar,
+  .workspace-document-actions {
+    gap: 4px;
+  }
+
+  .workspace-document-actions .ant-segmented-item-label {
+    padding-inline: 7px;
+  }
+}
+
+/* Deep paths scroll within the breadcrumb row rather than growing the header. */
+.workspace-breadcrumbs {
+  overflow-x: auto;
+}
+
+.workspace-breadcrumbs ol {
+  flex-wrap: nowrap;
+}
+
+.workspace-breadcrumbs li {
+  flex-shrink: 0;
+}

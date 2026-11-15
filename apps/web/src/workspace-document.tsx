@@ -1,5 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { Alert, Button, Flex, Select, Spin } from 'antd';
+import { Alert, Button, Flex, Segmented, Select, Spin, Typography } from 'antd';
+import { DownloadOutlined, FileOutlined, HistoryOutlined, ReloadOutlined } from '@ant-design/icons';
+import { WorkspaceMoreMenu } from './workspace-more-menu';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkRehype from 'remark-rehype';
@@ -89,11 +91,15 @@ export function WorkspaceDocumentView({
   sessionId,
   path,
   onDirtyChange,
+  absolutePath,
+  onRefresh,
 }: {
   client: AcpClient;
   sessionId: string;
   path: string;
   onDirtyChange?: (dirty: boolean) => void;
+  absolutePath?: string;
+  onRefresh?: () => void;
 }): ReactElement {
   const operationController = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -191,39 +197,89 @@ export function WorkspaceDocumentView({
   );
   return (
     <Flex vertical gap={12}>
-      <Flex gap={8} wrap>
-        <Button onClick={() => setMode('preview')}>Preview</Button>
-        <Button disabled={document?.text === undefined || busy} onClick={() => setMode('edit')}>
-          Edit
-        </Button>
-        <Button
-          disabled={document?.base64 === undefined && document?.text === undefined}
-          onClick={download}
-        >
-          Download original
-        </Button>
-        <Button
-          disabled={busy}
-          onClick={() =>
-            void perform(async () => {
-              const result = await requestDocument({
-                operation: 'history',
-                path,
-              });
-              setHistory(result.revisions ?? []);
-              setMode('history');
-            })
-          }
-        >
-          Revision history
-        </Button>
-      </Flex>
+      <div className="workspace-document-toolbar">
+        <div className="workspace-document-title">
+          <FileOutlined aria-hidden />
+          <Typography.Text strong ellipsis title={path.split('/').at(-1)}>
+            {path.split('/').at(-1)}
+          </Typography.Text>
+        </div>
+        <Flex className="workspace-document-actions" gap={8} align="center">
+          <Segmented
+            aria-label="File view"
+            value={mode}
+            options={[
+              { label: 'Preview', value: 'preview' },
+              { label: 'Source', value: 'source', disabled: document?.text === undefined },
+            ]}
+            onChange={(value) => setMode(value)}
+          />
+          <Button
+            type={mode === 'edit' ? 'primary' : 'default'}
+            disabled={document?.text === undefined || busy}
+            onClick={() => setMode('edit')}
+          >
+            Edit
+          </Button>
+          <WorkspaceMoreMenu
+            absolutePath={absolutePath}
+            items={[
+              {
+                key: 'download',
+                label: 'Download original',
+                icon: <DownloadOutlined />,
+                disabled: !downloadUrl,
+                onClick: download,
+              },
+              {
+                key: 'history',
+                label: 'Revision history',
+                icon: <HistoryOutlined />,
+                disabled: document?.text === undefined || busy,
+                onClick: () =>
+                  void perform(async () => {
+                    const result = await requestDocument({ operation: 'history', path });
+                    setHistory(result.revisions ?? []);
+                    setMode('history');
+                  }),
+              },
+              ...(onRefresh
+                ? [
+                    {
+                      key: 'refresh',
+                      label: 'Refresh workspace',
+                      icon: <ReloadOutlined />,
+                      onClick: onRefresh,
+                    },
+                  ]
+                : []),
+            ]}
+          />
+        </Flex>
+      </div>
+      {draft !== document?.text && document?.text !== undefined && mode !== 'edit' && (
+        <Alert
+          type="info"
+          message="You have unsaved edits. Return to Edit to save or discard them."
+        />
+      )}
+      {mode === 'source' && document?.text !== undefined && (
+        <Suspense fallback={<Spin />}>
+          <WorkspaceEditor key="source" path={path} value={document.text} readOnly />
+        </Suspense>
+      )}
       {error && <Alert type="error" message={error} />}
       {busy && <Spin />}
       {mode === 'edit' && document?.text !== undefined && (
         <>
           <Suspense fallback={<Spin />}>
-            <WorkspaceEditor path={path} value={draft} onChange={setDraft} readOnly={busy} />
+            <WorkspaceEditor
+              key="edit"
+              path={path}
+              value={draft}
+              onChange={setDraft}
+              readOnly={busy}
+            />
           </Suspense>
           <Button onClick={() => setShowChanges((value) => !value)}>Compare changes</Button>
           {showChanges && (
@@ -328,9 +384,9 @@ export function WorkspaceDocumentView({
               style={{ width: '100%', height: 500, border: 0 }}
             />
           ) : (
-            <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-              {document.text || '(Empty file)'}
-            </pre>
+            <Suspense fallback={<Spin />}>
+              <WorkspaceEditor path={path} value={document.text} readOnly />
+            </Suspense>
           )
         ) : (
           <Alert

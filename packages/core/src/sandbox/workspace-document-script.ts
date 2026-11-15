@@ -1,5 +1,5 @@
-/** Fixed Linux guest program. Directory descriptors fence symlink and ancestor swaps. */
-export const workspaceDocumentScript = String.raw`
+/** Shared fixed descriptor-pinned filesystem helpers for human workspace reads. */
+export const workspaceFileAccessScript = String.raw`
 import { open, mkdir, readdir, rename, unlink } from 'node:fs/promises';
 import { constants as C } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
@@ -28,6 +28,10 @@ async function bytes(parent, name, max) {
     return buffer.subarray(0, size);
   } finally { await h.close(); }
 }
+`;
+
+/** Fixed Linux guest program. Directory descriptors fence symlink and ancestor swaps. */
+export const workspaceDocumentScript = String.raw`${workspaceFileAccessScript}
 let lock;
 let lockPath;
 try {

@@ -181,3 +181,7 @@ typecheck; UI rollout additionally requires the listed browser verification.
 ## Nightly review extension (2026-11-09)
 
 The earlier browser-only timezone and no-digest implementation notes are superseded by design §21.9. An optional scheduled Work review produces a source-linked previous-local-day digest and memory proposals in Updates. It uses the ordinary loop and date-scoped recall; it is never automatically injected into Main context. Persona mutation is rejected for review turns, and their derived outputs are excluded from recall indexing. History timezone can now persist per authenticated account, with browser fallback. Stable context segmentation rollout and real-provider evaluation requirements above remain unchanged.
+
+### Runtime clock suffix (2026-11-15)
+
+Assistant dispatch now appends a replayable runtime clock control block after the conversation, outside the system prefix. `model/clock` commits the UTC instant, validated account timezone, prompt and request IDs. Prior active clocks keep their positions; completed turns omit them under normal history filtering. Each suffix is included in request estimates and private snapshots. Inline/worker and child roots resolve personal-owner timezone metadata; team/missing/unavailable metadata uses explicit UTC. Compaction receives no new clock block. Deterministic prefix/replay tests establish placement, not provider cache hits or a measured reduction in clock-tool calls. Existing segment rollout gates remain unchanged.

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { workspaceArchiveScript } from './workspace-archive-script.js';
 import { workspaceDocumentScript } from './workspace-document-script.js';
 import {
   workspaceDocumentRequestSchema,
@@ -197,7 +198,7 @@ export class RemoteSandbox implements SandboxPort {
         [
           '--input-type=module',
           '-e',
-          workspaceDocumentScript,
+          request.operation === 'archive' ? workspaceArchiveScript : workspaceDocumentScript,
           ...(JSON.stringify(payload).match(/[\s\S]{1,4000}/gu) ?? []),
         ],
         { maxOutputBytes: 10 * 1024 * 1024, timeoutMs: 30_000, signal },

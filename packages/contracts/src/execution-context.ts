@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { historyPreferencesSchema } from './identity.js';
 
 export const effectScopeSchema = z.enum([
   'workspace',
@@ -46,7 +47,21 @@ export const sourceExcerptSchema = z.object({
     .optional(),
 });
 
+export const runtimeClockSchema = z
+  .object({
+    timestamp: z.iso.datetime(),
+    timezone: historyPreferencesSchema.shape.timezone,
+  })
+  .strict();
+export type RuntimeClock = z.infer<typeof runtimeClockSchema>;
+
 export const executionContextEventSchemas = [
+  z.object({
+    type: z.literal('model/clock'),
+    promptId: z.uuid(),
+    requestId: z.uuid(),
+    clock: runtimeClockSchema,
+  }),
   z.object({
     type: z.literal('model/context'),
     promptId: z.uuid(),

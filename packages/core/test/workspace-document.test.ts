@@ -1,4 +1,5 @@
 import { mkdtemp, writeFile, readFile, rm, symlink, mkdir } from 'node:fs/promises';
+import { inflateRawSync, crc32 } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, it } from 'vitest';
@@ -108,8 +109,84 @@ it.each(['local', 'remote'])(
       expect(
         (await sandbox.workspaceDocument({ operation: 'read', path: 'large' })).text,
       ).toHaveLength(65537);
+      await mkdir(path.join(root, 'nested', 'empty'));
+      await writeFile(path.join(root, 'nested', '你好.txt'), 'Unicode content');
+      await writeFile(path.join(root, '.hidden'), 'hidden');
+      const archive = await sandbox.workspaceDocument({ operation: 'archive', path: '' });
+      const entries = unzip(archive.base64!);
+      expect(entries.get('nested/你好.txt')?.toString()).toBe('Unicode content');
+      expect(entries.get('nested/empty/')).toEqual(Buffer.alloc(0));
+      expect(entries.get('binary')).toEqual(Buffer.from([0, 1, 255]));
+      expect(entries.get('.hidden')?.toString()).toBe('hidden');
+      expect(
+        [...entries.keys()].some(
+          (name) => name.includes('model-context') || name.includes('outside') || name === 'link',
+        ),
+      ).toBe(false);
+      const nested = unzip(
+        (await sandbox.workspaceDocument({ operation: 'archive', path: 'nested' })).base64!,
+      );
+      expect([...nested.keys()].sort()).toEqual(['empty/', '你好.txt']);
+      expect(
+        unzip(
+          (await sandbox.workspaceDocument({ operation: 'archive', path: 'nested/empty' })).base64!,
+        ).size,
+      ).toBe(0);
+      for (const invalid of ['../escape', 'model-context', 'nested/outside', 'a.txt']) {
+        await expect(
+          sandbox.workspaceDocument({ operation: 'archive', path: invalid }),
+        ).rejects.toThrow();
+      }
+      await writeFile(path.join(root, 'too-large'), Buffer.alloc(5 * 1024 * 1024 + 1));
+      await expect(sandbox.workspaceDocument({ operation: 'archive', path: '' })).rejects.toThrow();
+      await rm(path.join(root, 'too-large'));
+      // Individually permitted files still obey the combined input bound.
+      await writeFile(path.join(root, 'aggregate'), Buffer.alloc(4 * 1024 * 1024));
+      await expect(sandbox.workspaceDocument({ operation: 'archive', path: '' })).rejects.toThrow();
+      await rm(path.join(root, 'aggregate'));
+      await mkdir(path.join(root, 'deep', ...Array.from({ length: 33 }, () => 'a')), {
+        recursive: true,
+      });
+      await expect(
+        sandbox.workspaceDocument({ operation: 'archive', path: 'deep' }),
+      ).rejects.toThrow('depth limit');
+
+      await Promise.all(
+        Array.from({ length: 1001 }, (_, index) =>
+          writeFile(path.join(root, 'nested', String(index)), ''),
+        ),
+      );
+      await expect(
+        sandbox.workspaceDocument({ operation: 'archive', path: 'nested' }),
+      ).rejects.toThrow('entry limit');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   },
 );
+
+/** Read ZIP central records and inflate their local entries independently of the writer. */
+function unzip(base64: string): Map<string, Buffer> {
+  const zip = Buffer.from(base64, 'base64');
+  const end = zip.length - 22;
+  expect(zip.readUInt32LE(end)).toBe(0x06054b50);
+  let cursor = zip.readUInt32LE(end + 16);
+  const result = new Map<string, Buffer>();
+  for (let i = 0; i < zip.readUInt16LE(end + 10); i++) {
+    expect(zip.readUInt32LE(cursor)).toBe(0x02014b50);
+    expect(zip.readUInt16LE(cursor + 8)).toBe(0x800);
+    const length = zip.readUInt16LE(cursor + 28);
+    const name = zip.subarray(cursor + 46, cursor + 46 + length).toString('utf8');
+    const local = zip.readUInt32LE(cursor + 42);
+    expect(zip.readUInt32LE(local)).toBe(0x04034b50);
+    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+    const compressed = zip.subarray(start, start + zip.readUInt32LE(cursor + 20));
+    const data = zip.readUInt16LE(cursor + 10) === 8 ? inflateRawSync(compressed) : compressed;
+    expect(data.length).toBe(zip.readUInt32LE(cursor + 24));
+    expect(crc32(data)).toBe(zip.readUInt32LE(cursor + 16));
+    result.set(name, data);
+    cursor += 46 + length + zip.readUInt16LE(cursor + 30) + zip.readUInt16LE(cursor + 32);
+  }
+  expect(cursor).toBe(end);
+  return result;
+}

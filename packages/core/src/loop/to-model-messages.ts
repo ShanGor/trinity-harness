@@ -1,3 +1,4 @@
+import { runtimeClockMessage } from './runtime-clock.js';
 import {
   compactionRanges,
   turnMessageProjection,
@@ -238,6 +239,11 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
       messages.push({ role: 'assistant', content: terminalFallbacks.get(i)! });
     if (closed.has(i) && !finals.has(i)) return;
     switch (event.type) {
+      case 'model/clock': {
+        if (start >= 0 && events[start]?.eventId === event.promptId)
+          messages.push(runtimeClockMessage(event.clock));
+        break;
+      }
       case 'turn/guidance': {
         // Put current control guidance at the next decision, after complete tool
         // pairs. It must not disappear behind a long sequence of later results.

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { runtimeClock, runtimeClockMessage } from './runtime-clock.js';
 import { phoneGuidance } from './phone-guidance.js';
 import { personalModelMessages, fitDialogue } from '../personal-assistant/memory.js';
 import type { PersonalContextPort, SessionMetaStore } from '@trinity-harness/contracts';
@@ -27,6 +28,7 @@ import type {
   ToolContextInput,
   TaskExecutionPort,
   TaskBudgetScope,
+  RuntimeClock,
 } from '@trinity-harness/contracts';
 import { BROWSER_LIMITS, turnStepBudgetSchema, windowStart } from '@trinity-harness/contracts';
 import { sumTokenUsage, newId } from '@trinity-harness/shared';
@@ -81,8 +83,10 @@ export interface AgentLoopOptions {
   maxRetries?: number | undefined;
   /** Injected clock/backoff for deterministic recovery tests. */
   wait?: ((ms: number, signal?: AbortSignal) => Promise<void>) | undefined;
-  /** Clock for durable retry scheduling; production uses UTC epoch milliseconds. */
+  /** Clock for retry scheduling and model clock snapshots; production uses UTC epoch milliseconds. */
   now?: (() => number) | undefined;
+  /** Account timezone resolved from authenticated session ownership by the composition root. */
+  resolveClockTimezone?: (() => Promise<string | null | undefined>) | undefined;
   /** Rolling pool size for parallel-class tools (design.md §6.3). */
   maxParallelTools?: number | undefined;
   /**
@@ -369,6 +373,7 @@ export class CoreAgentLoop implements AgentLoop {
       const requestStream = async (
         request: LLMRequest,
         purpose: ModelUsage['purpose'],
+        clock?: RuntimeClock,
       ): Promise<AsyncIterable<StreamChunk>> => {
         const preparationStarted = performance.now();
         if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
@@ -383,6 +388,12 @@ export class CoreAgentLoop implements AgentLoop {
             effectivePurpose,
             purpose === 'compaction' ? 'work' : lane,
           )) ?? newId();
+        if (clock)
+          await store.append(
+            sessionId,
+            [{ ...meta(), type: 'model/clock', promptId, requestId, clock }],
+            appendOpts,
+          );
         if (executionVersion === 2) {
           const record = await modelContextRecord(
             request,
@@ -874,11 +885,19 @@ export class CoreAgentLoop implements AgentLoop {
           ]
             .filter((s) => s !== undefined)
             .join('\n\n');
+          const clock = await runtimeClock(
+            (this.opts.now ?? Date.now)(),
+            this.opts.resolveClockTimezone,
+          );
+          const currentMessages = (): LLMRequest['messages'] => [
+            ...toModelMessages(history),
+            runtimeClockMessage(clock),
+          ];
           const request: LLMRequest = {
             model: this.opts.model,
             cache: stableSegment,
             system,
-            messages: toModelMessages(history),
+            messages: currentMessages(),
             tools: concluding
               ? []
               : verifying
@@ -899,7 +918,7 @@ export class CoreAgentLoop implements AgentLoop {
                 (this.opts.maxContextTokens ?? 200_000) -
                   Math.ceil(
                     estimateRequestTokens({
-                      messages: toModelMessages(history),
+                      messages: currentMessages(),
                       system,
                       tools: concluding ? [] : gate.schemas(),
                     }) * 1.15,
@@ -922,7 +941,7 @@ export class CoreAgentLoop implements AgentLoop {
 
           if (await compact(false, system)) {
             history = await store.load(sessionId);
-            request.messages = toModelMessages(history);
+            request.messages = currentMessages();
           }
           // Optional dialogue yields space to the active request, instructions
           // and tool pairs. Each changed selection remains replayable.
@@ -956,7 +975,7 @@ export class CoreAgentLoop implements AgentLoop {
               appendOpts,
             );
             history = await store.load(sessionId);
-            request.messages = toModelMessages(history);
+            request.messages = currentMessages();
             request.estimatedInputTokens = undefined;
           }
           request.estimatedInputTokens =
@@ -997,7 +1016,7 @@ export class CoreAgentLoop implements AgentLoop {
                 [{ ...meta(), type: 'task/step', promptId }],
                 appendOpts,
               );
-            const chunks = await requestStream(request, 'assistant');
+            const chunks = await requestStream(request, 'assistant', clock);
             for await (const chunk of chunks) {
               throwIfAborted();
               if (chunk.kind === 'text-delta') {

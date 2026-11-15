@@ -150,3 +150,7 @@ Export task diagnostics now include bounded rejection reason/repair codes and ev
 Human workspace editor revisions use the authenticated Sandbox document capability and private durable workspace snapshots; preserve complete-text bounds, optimistic version checks, no-follow descriptor traversal and fail-closed interrupted locks. Captured/proposed snapshots are not a successful-save audit or automatic history of tool writes. See design “Human workspace preview and editor revisions”.
 
 Workspace artifact links open the originating session drawer. Keep full human previews separate from model read excerpts; CodeMirror renders editor viewports while complete UTF-8 file edits are bounded to 5 MiB. Preserve private Sandbox staging and revision/conflict checks for large saves.
+
+Human folder ZIP downloads use the existing authenticated workspace document/Sandbox path. Preserve no-follow descriptor traversal, private `model-context` exclusion, bounded complete archives, cancellation and post-read authorization; never use host filesystem or shell ZIP fallbacks. See design’s folder download follow-up.
+
+Runtime clock metadata belongs at the end of assistant model input, with a committed `model/clock` snapshot and token accounting. Preserve old active snapshots, completed-turn filtering, explicit timezone/UTC fallback and separate compaction inputs; never place a changing clock in the system prefix or treat it as user/scheduling authority. See design’s runtime clock suffix section.
