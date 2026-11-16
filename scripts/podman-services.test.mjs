@@ -11,10 +11,12 @@ const names = [
   'trinity-server',
   'trinity-agent-worker',
   'trinity-audit-consumer',
+  'trinity-control-worker',
   'trinity-gateway',
 ];
 const env = {
   PORT: '3100',
+  SCHEDULING_ENABLED: 'true',
   EXECUTION_DRIVER: 'firecracker',
   BROWSER_DRIVER: 'zendriver',
   BROWSER_RUNTIME_ENDPOINT: 'http://127.0.0.1:3010',
@@ -64,6 +66,7 @@ if (tool === 'podman') {
   if (args[0] === 'container') process.exit(args[2] === process.env.MOCK_MISSING ? 1 : 0);
   if (args[0] === 'inspect') {
     if (args[1] !== '--format') process.stdout.write(fs.readFileSync(process.env.MOCK_CONTAINERS));
+    else if (args[2].includes('Config.Env')) console.log('SCHEDULING_ENABLED=' + (process.env.MOCK_DISABLED ? 'false' : 'true'));
     else console.log(args[2].includes('Running') ? 'true' : (process.env.MOCK_STATUS || 'running'));
   } else if (!['start', 'stop'].includes(args[0])) process.exit(90);
 }
@@ -183,4 +186,21 @@ test('help and invalid arguments do not invoke services', () => {
     assert.equal(result.status, action[0] === '--help' ? 0 : 2);
     assert.equal(result.calls.length, 0);
   }
+});
+
+test('scheduler is required before restart and checked for health on startup', () => {
+  const missing = run(['restart'], { MOCK_MISSING: 'trinity-control-worker' });
+  assert.equal(missing.status, 1);
+  assert.equal(effects(missing, 'stop').length, 0);
+  const started = run(['start']);
+  assert.ok(
+    started.calls.some(
+      (call) => call[0] === 'curl' && call.at(-1) === 'http://127.0.0.1:3020/health',
+    ),
+  );
+});
+test('disabled saved deployments never start a scheduler', () => {
+  const result = run(['start'], { MOCK_DISABLED: '1' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(!effects(result, 'start').some((call) => call.includes('trinity-control-worker')));
 });

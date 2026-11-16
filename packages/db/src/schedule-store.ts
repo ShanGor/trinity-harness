@@ -244,7 +244,7 @@ export class PgScheduleStore implements ScheduleStore {
       when e.payload->>'reason'='completed' then 'completed' else 'failed' end,
       reason='outcome', read_at=null,
       retry_at=case when e.type='turn/end' and e.payload->>'reason'='error' and o.attempts < 3
-        and exists (select 1 from assistant_schedules s where s.id=o.schedule_id and s.definition->>'consolidation'='review')
+        and exists (select 1 from assistant_schedules s where s.id=o.schedule_id and s.definition->>'consolidation' in ('review','memory'))
         and not exists (select 1 from session_events call where call.session_id=o.session_id and call.type='tool/call' and call.payload->>'name' is distinct from 'recall')
         then (e.payload->>'at')::timestamptz + interval '5 minutes' * greatest(1, o.attempts) else null end
       from session_events e where o.status='queued' and e.session_id=o.session_id
@@ -257,16 +257,16 @@ export class PgScheduleStore implements ScheduleStore {
           and(
             eq(assistantSchedules.enabled, true),
             isNotNull(assistantSchedules.nextFireAt),
-            sql`(${assistantSchedules.definition}->>'consolidation' is distinct from 'review' or not exists (
+            sql`(${assistantSchedules.definition}->>'consolidation' is null or not exists (
               select 1 from ${scheduleOccurrences} active where active.schedule_id = ${assistantSchedules.id} and active.status = 'queued'
             ))`,
-            sql`(${assistantSchedules.definition}->>'consolidation' is distinct from 'review' or not exists (
+            sql`(${assistantSchedules.definition}->>'consolidation' is null or not exists (
               select 1 from ${scheduleOccurrences} waiting where waiting.schedule_id = ${assistantSchedules.id}
               and waiting.revision = ${assistantSchedules.revision} and waiting.scheduled_at = ${assistantSchedules.nextFireAt}
               and waiting.status = 'failed' and waiting.retry_at > ${at.toISOString()}
             ))`,
             sql`(${assistantSchedules.nextFireAt} <= ${at.toISOString()} or
-              (${assistantSchedules.definition}->>'consolidation' = 'review' and not ${assistantSchedules.reviewCatchupInitialized}))`,
+              (${assistantSchedules.definition}->>'consolidation' in ('review','memory') and not ${assistantSchedules.reviewCatchupInitialized}))`,
           ),
         )
         .orderBy(assistantSchedules.nextFireAt)
@@ -275,7 +275,7 @@ export class PgScheduleStore implements ScheduleStore {
       for (const schedule of due) {
         signal?.throwIfAborted();
         const definition = scheduleDefinitionSchema.parse(schedule.definition);
-        const review = definition.consolidation === 'review';
+        const review = !!definition.consolidation;
         let scheduledAt = new Date(schedule.nextFireAt!);
         // One-time migration recovery can discover dates skipped by the old scheduler.
         // Resumed revisions deliberately start at their recorded future instant.

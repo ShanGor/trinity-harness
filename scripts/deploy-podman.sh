@@ -29,6 +29,7 @@ for (const key of ['DATABASE_URL', 'REDIS_URL', 'TOKEN_SECRET', 'WORKSPACE_ROOT'
 if (!path.isAbsolute(env.WORKSPACE_ROOT)) throw new Error('WORKSPACE_ROOT must be absolute');
 for (const value of Object.values(env)) if (/[\r\n]/.test(value)) throw new Error('Multiline environment values are unsupported');
 const runtime = runtimeConfig(env, api, web);
+env.SCHEDULING_ENABLED = String(runtime.schedulingEnabled);
 env.BROWSER_RUNTIME_HOST = '127.0.0.1';
 env.BROWSER_RUNTIME_PORT = String(runtime.browserPort);
 fs.writeFileSync(path.join(state, 'runtime.json'), JSON.stringify({...runtime, nodeToken: env.NODE_RUNTIME_TOKEN, browserToken: env.BROWSER_RUNTIME_TOKEN}), {mode: 0o600});
@@ -56,6 +57,11 @@ podman cp "$BUILD_CONTAINER:/repo/apps/web/dist" "$STATE/dist"
 podman rm "$BUILD_CONTAINER" >/dev/null
 podman build --http-proxy=false --network host -t localhost/trinity-gateway -f deploy/podman/Containerfile.gateway "$STATE"
 COMMON=(--network host --userns keep-id --user "$(id -u):$(id -g)" --env-file "$STATE/env" -v "$WORKSPACE:$WORKSPACE")
+# Never run old and new scheduler writers together, including during migration.
+if podman container exists trinity-control-worker; then
+  podman stop --time 60 trinity-control-worker >/dev/null
+  podman rm trinity-control-worker >/dev/null
+fi
 podman run --rm "${COMMON[@]}"  --workdir /repo/packages/db localhost/trinity-app node node_modules/drizzle-kit/bin.cjs migrate
 source "$REPO/scripts/lib/podman-services.sh"
 ensure_podman_node_agent
@@ -67,23 +73,36 @@ if ! podman container exists trinity-browser-runtime && node scripts/podman-runt
   exit 1
 fi
 if podman container exists trinity-browser-runtime; then
-  podman stop trinity-browser-runtime >/dev/null
+  podman stop --time 60 trinity-browser-runtime >/dev/null
   podman rm trinity-browser-runtime >/dev/null
 fi
 podman run -d --name trinity-browser-runtime --restart unless-stopped "${COMMON[@]}" localhost/trinity-app node apps/browser-runtime/node_modules/tsx/dist/cli.mjs apps/browser-runtime/src/main.ts
 # A bounded readiness wait checks auth and request validation, never guest effects.
 curl --retry 30 --retry-connrefused --retry-delay 1 --silent --show-error --output /dev/null "http://127.0.0.1:$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).browserPort' "$STATE/runtime.json")/execute"
 node scripts/podman-runtime.mjs "$STATE/runtime.json" browser
-for service in server agent-worker audit-consumer; do
+# Start the scheduler only after the matching server and agent worker.
+SERVICES=(server agent-worker audit-consumer)
+if [[ "$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).schedulingEnabled' "$STATE/runtime.json")" == true ]]; then
+  SERVICES+=(control-worker)
+fi
+for service in "${SERVICES[@]}"; do
   name="trinity-$service"
-  if podman container exists "$name"; then podman stop "$name" >/dev/null; podman rm "$name" >/dev/null; fi
-  podman run -d --name "$name" --restart unless-stopped "${COMMON[@]}" localhost/trinity-app node "apps/$service/node_modules/tsx/dist/cli.mjs" "apps/$service/src/main.ts"
+  if podman container exists "$name"; then podman stop --time 60 "$name" >/dev/null; podman rm "$name" >/dev/null; fi
+  SERVICE_ENV=()
+  if [[ "$service" == control-worker ]]; then
+    SERVICE_ENV=(-e "PORT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).controlPort' "$STATE/runtime.json")")
+  fi
+  podman run -d --name "$name" --restart unless-stopped "${COMMON[@]}" "${SERVICE_ENV[@]}" localhost/trinity-app node "apps/$service/node_modules/tsx/dist/cli.mjs" "apps/$service/src/main.ts"
 done
-if podman container exists trinity-gateway; then podman stop trinity-gateway >/dev/null; podman rm trinity-gateway >/dev/null; fi
+if podman container exists trinity-gateway; then podman stop --time 60 trinity-gateway >/dev/null; podman rm trinity-gateway >/dev/null; fi
 podman run -d --name trinity-gateway --label "io.trinity.web-port=$WEB_PORT" --restart unless-stopped --network host localhost/trinity-gateway
 curl --retry 30 --retry-connrefused --retry-delay 1 --fail --silent --show-error "http://127.0.0.1:$WEB_PORT/api/health"
 curl --fail --silent --show-error "http://127.0.0.1:$WEB_PORT/" > /dev/null
-for name in trinity-browser-runtime trinity-server trinity-agent-worker trinity-audit-consumer trinity-gateway; do
+if [[ " ${SERVICES[*]} " == *" control-worker "* ]]; then
+  CONTROL_PORT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).controlPort' "$STATE/runtime.json")
+  curl --retry 30 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5 --retry-max-time 60 --fail --silent --show-error "http://127.0.0.1:$CONTROL_PORT/health"
+fi
+for name in trinity-browser-runtime "${SERVICES[@]/#/trinity-}" trinity-gateway; do
   [[ "$(podman inspect --format '{{.State.Running}}' "$name")" == true ]]
 done
 printf '\nTrinity is listening on http://0.0.0.0:%s\n' "$WEB_PORT"

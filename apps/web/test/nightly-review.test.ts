@@ -105,3 +105,48 @@ it('shows catch-up expiry, retry timing and persisted attempt counts in Updates'
   expect(document.body.textContent).toContain('Attempt 2');
   expect(document.body.textContent).toContain('Retry after');
 });
+
+it('offers explicit source-backed consolidation and reports missing enrollment', async () => {
+  const create = vi.spyOn(client, 'createSchedule');
+  await act(async () =>
+    root.render(createElement(ScheduledTasks, { client, sessions: [], onOpen: vi.fn() })),
+  );
+  expect(document.body.textContent).toContain('Nightly memory processing is not enabled');
+  const preset = [...document.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Nightly memory consolidation',
+  )!;
+  await act(async () => preset.click());
+  expect(document.body.textContent).toContain('Enable nightly memory consolidation');
+  expect(document.body.textContent).toContain('Existing facts are preserved');
+  expect(document.body.textContent).toContain('personal declarations are saved verbatim');
+  expect(document.body.textContent).toContain('Requires automatic memory');
+  expect(create).not.toHaveBeenCalled();
+});
+
+it('opens executions from Run history independently of the schedule controls', async () => {
+  const onOpen = vi.fn();
+  vi.mocked(client.getInbox).mockResolvedValue({
+    available: true,
+    items: [
+      {
+        id: 'occurrence',
+        scheduleId: 'schedule',
+        title: 'Completed nightly consolidation',
+        status: 'completed',
+        sessionId: 'run-session',
+        at: '2026-11-15T19:00:00Z',
+        readAt: null,
+      },
+    ],
+  });
+  vi.spyOn(client, 'acknowledgeNotification').mockResolvedValue(undefined);
+  await act(async () =>
+    root.render(createElement(ScheduledTasks, { client, sessions: [], onOpen })),
+  );
+  expect(container.textContent).toContain('Run history');
+  expect(container.textContent).toContain('do not appear in Recent sessions');
+  await act(async () =>
+    [...container.querySelectorAll('button')].find((b) => b.textContent === 'View run')!.click(),
+  );
+  expect(onOpen).toHaveBeenCalledWith('run-session');
+});

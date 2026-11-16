@@ -262,7 +262,9 @@ async function main(): Promise<void> {
     }
     registry.register(createReadBlobTool(blobStore, attachmentReader, store));
     registry.register(createRecallTool({ memory, index: conversationIndex, metas, store }));
-    registry.register(createPersonaTool({ memory, metas, store, users: browserUsers }));
+    registry.register(
+      createPersonaTool({ memory, metas, store, users: browserUsers, index: conversationIndex }),
+    );
     if (sessionLsp) {
       for (const tool of createLspTools(sessionLsp)) {
         registry.register(tool);

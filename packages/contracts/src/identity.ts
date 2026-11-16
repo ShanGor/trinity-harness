@@ -40,6 +40,8 @@ export const sessionMetaSchema = z.object({
   kind: z.enum(['chat', 'work']).optional(),
   sessionRole: z.enum(['main', 'side', 'task']).optional(),
   creationOperationId: z.uuid().optional(),
+  /** Derived from committed schedule triggers; never supplied during session creation. */
+  scheduledRun: z.boolean().optional(),
   taskState: z
     .enum(['draft', 'queued', 'running', 'needs_approval', 'completed', 'failed', 'cancelled'])
     .optional(),
@@ -71,6 +73,7 @@ export const sessionSummarySchema = sessionMetaSchema
     sessionRole: true,
     originSessionId: true,
     taskState: true,
+    scheduledRun: true,
   })
   .extend({ sessionId: z.uuid(), scope: z.enum(['personal', 'team']).default('personal') });
 export type SessionSummary = z.infer<typeof sessionSummarySchema>;

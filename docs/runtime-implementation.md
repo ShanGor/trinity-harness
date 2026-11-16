@@ -186,3 +186,38 @@ The checkout contains a capability-negotiated `rendered-document-v1` pipeline wi
 ### HTML-first Markdown export dependency
 
 `export_markdown(captureId)` materializes rendered frame/composed HTML and captured media through the originating workspace Sandbox, reads the saved HTML back through bounded version-fenced pages, and converts it offline with bundled Turndown/GFM in a cancellable worker. Captured media references point to local `media/` files; unavailable bytes remain explicit without refetch. A semantic observationId cannot substitute for a rendered capture. `export_capture` saves the bundle without conversion. There is no native converter installation or guest ABI dependency. Guest images still need the current application snapshot and patched Zendriver for capture; rebuild/install through maintenance with rollback and a fresh generation.
+
+### Source-backed memory consolidation and single-host scheduling (2026-11-15)
+
+Single-host Podman deployment now enables scheduling by default, starts the matching
+control worker, checks reconciliation health, and includes it in saved-container
+start/stop/restart. Explicit `SCHEDULING_ENABLED=false` remains supported. Deployment
+retires the old scheduler before migration and starts the replacement after readers.
+`CONTROL_WORKER_PORT` defaults to loopback 3020 and must not conflict with API,
+Web, browser or Node Agent ports. No new database migration or guest image is needed.
+
+Nightly consolidation is explicitly enabled per owner using the `memory` preset;
+review mode remains proposals-only. Consolidation appends missing stable personal
+facts from expanded original user sources, honors automatic-memory settings and
+current suppression/exclusion fences, and records source-backed Persona versions.
+Historical corrections/contradictions remain proposals, never replacement writes.
+Both modes produce grouped digests in Updates, stay out of recall indexing, catch
+up at most seven local dates and never retry runs that called Persona. Memory-only
+policies must permit `prompt`, `recall` and `persona`; denied skill catalogs are
+not contacted, so this work does not allocate a guest. Normal execution guards no
+longer disable originating Persona writes; child actors still cannot write.
+
+Nightly review and consolidation source expansion is text-only, explicitly reporting
+`attachmentsOmitted`; a missing historical image/file blob cannot prevent a text
+digest or text-supported memory save. Ordinary recall retains optional original
+media delivery and supports explicit `includeAttachments=false`. Digests must state
+that media was not inspected and must not infer facts from it. Denied skill policies
+skip catalog discovery entirely, so memory-only tasks do not require guest startup.
+Prompt approval previews are bounded before both durable and live delivery.
+
+Nightly automatic writes additionally require a bounded direct English/Chinese
+personal declaration and preserve its exact original wording as one appended bullet.
+Behavioral inferences (including preferred reply language inferred from message
+language), task wording and unsupported declaration forms remain proposals. This
+is conservative source admission, not semantic truth/completeness certification;
+foreground source-backed edits and manual Markdown editing remain available.

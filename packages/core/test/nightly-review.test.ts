@@ -121,3 +121,14 @@ it('bounds catch-up by local calendar dates across DST and year changes', () => 
     ),
   ).toBe(true);
 });
+
+it('authorizes source-backed append-only consolidation without changing review mode', () => {
+  const request = scheduledRequest(
+    { ...base, consolidation: 'memory' },
+    new Date('2026-11-08T19:00:00Z'),
+  );
+  expect(request).toContain('sourceEpisodeId');
+  expect(request).toContain('Only append missing facts');
+  expect(request).toContain('automatic memory is disabled');
+  expect(request).not.toContain('Do not call persona');
+});

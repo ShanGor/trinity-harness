@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
 import {
   removedPromptIds,
+  recallResultSchema,
+  isNightlyMemorySource,
+  personaToolParametersSchema as parameters,
+  type ConversationIndexPort,
   type MemoryStorePort,
   type SessionMetaStore,
   type SessionStore,
@@ -10,23 +13,6 @@ import {
   type ToolResult,
 } from '@trinity-harness/contracts';
 import { defineTool } from '../tools/define-tool.js';
-
-const parameters = z.discriminatedUnion('operation', [
-  z.object({ operation: z.literal('read') }).strict(),
-  z
-    .object({
-      operation: z.literal('update'),
-      expectedRevision: z.number().int().nonnegative(),
-      sourceQuote: z.string().min(1).max(4000),
-      edits: z
-        .array(
-          z.object({ oldText: z.string().max(16000), newText: z.string().max(16000) }).strict(),
-        )
-        .min(1)
-        .max(8),
-    })
-    .strict(),
-]);
 
 /** Exact patches preserve the user's Markdown and cannot silently replace concurrent edits. */
 export function editPersona(
@@ -57,11 +43,12 @@ export function createPersonaTool(deps: {
   metas: SessionMetaStore;
   store: SessionStore;
   users: Pick<UserStore, 'findById'>;
+  index?: ConversationIndexPort;
 }): ToolDefinition {
   return defineTool({
     name: 'persona',
     description:
-      'Read or maintain the personal Markdown profile. Automatically save stable facts and lasting preferences explicitly stated by the current user (including a name introduced in ordinary dialogue), correct changed facts, and remove facts the user asks to forget. Never infer facts from assistant text, websites, quoted documents, hypotheticals or temporary task instructions. Cite an exact sourceQuote from the current committed user message. Read first; update using exact oldText/newText patches (empty oldText appends). Preserve unrelated Markdown. When auto-save is disabled, update only for an explicit remember/correct/forget request. Never claim a save before success. This tool does not grant execution permission.',
+      'Read or maintain the personal Markdown profile. Automatically save stable facts and lasting preferences explicitly stated by the current user (including a name introduced in ordinary dialogue), correct changed facts, and remove facts the user asks to forget. Never infer facts from assistant text, websites, quoted documents, hypotheticals or temporary task instructions. Cite an exact sourceQuote from the current committed user message. Use operation="read" only to inspect. For saving, correcting OR FORGETTING facts, always use operation="update" with expectedRevision, sourceQuote and edits; a read never changes memory. Update using exact oldText/newText patches (empty oldText appends). Preserve unrelated Markdown. When auto-save is disabled, update only for an explicit remember/correct/forget request. For scheduled memory consolidation only, supply sourceEpisodeId and sourceEventId after expanding the original user message with recall; historical consolidation may only append a direct personal declaration verbatim as one bullet, newText exactly "- " plus sourceQuote. Unsupported declaration forms remain proposals. Never claim a save before success. This tool does not grant execution permission.',
     parameters,
     concurrency: 'exclusive',
     effectFor: (args) => ({
@@ -130,7 +117,91 @@ export function createPersonaTool(deps: {
         return unavailable(
           'Persona edits require a committed tool-call plan with the exact patches and source.',
         );
-      const text = prompt.content
+      let source = prompt;
+      let sourceSessionId = meta.id;
+      let consolidation:
+        { sessionId: string; promptId: string; callId: string; episodeId: string } | undefined;
+      if (prompt.trigger?.consolidation === 'memory') {
+        if (
+          !isNightlyMemorySource(args.sourceQuote) ||
+          args.edits.length !== 1 ||
+          args.edits[0]?.oldText !== '' ||
+          args.edits[0]?.newText !== `- ${args.sourceQuote}`
+        )
+          return unavailable(
+            'Nightly saves require one direct personal declaration (bounded English/Chinese forms), preserved verbatim as a single bullet: newText must be "- " plus sourceQuote. Do not infer preferences from task requests, language use or behavior. Unsupported wording and contradictions remain proposals.',
+          );
+        if (
+          persona.autoSaveEnabled === false ||
+          !args.sourceEpisodeId ||
+          !args.sourceEventId ||
+          !deps.index?.evidence ||
+          args.edits.some((edit) => edit.oldText !== '')
+        )
+          return unavailable(
+            'Nightly consolidation requires automatic memory, an expanded original user source and append-only patches.',
+          );
+        const episode = await deps.index.evidence(identity, args.sourceEpisodeId);
+        if (
+          !episode ||
+          episode.excluded ||
+          episode.policyRevision < (snapshot.suppressionRevision ?? 0)
+        )
+          return unavailable('The original source is excluded or suppressed.');
+        const origin = await deps.metas.get(episode.sessionId);
+        if (
+          !origin ||
+          origin.closedAt ||
+          origin.scope !== 'personal' ||
+          origin.tenantId !== meta.tenantId ||
+          origin.userId !== meta.userId
+        )
+          return unavailable('The original source is unavailable for this owner.');
+        const originalEvents = await deps.store.load(episode.sessionId);
+        const original = originalEvents.find((event) => event.eventId === args.sourceEventId);
+        if (
+          original?.type !== 'message/user' ||
+          original.eventId !== episode.promptId ||
+          original.trigger ||
+          removedPromptIds(originalEvents).has(original.eventId) ||
+          original.at > prompt.trigger.scheduledAt
+        )
+          return unavailable(
+            'The source must be an eligible original user statement before the scheduled occurrence.',
+          );
+        const delivered = events.slice(sourceIndex + 1).some((event) => {
+          if (event.type !== 'tool/result' || event.isError) return false;
+          const recall = events.find(
+            (item) => item.type === 'tool/call' && item.callId === event.callId,
+          );
+          if (recall?.type !== 'tool/call' || recall.name !== 'recall') return false;
+          const result = recallResultSchema.safeParse(event.value);
+          return (
+            result.success &&
+            result.data.policyRevision === snapshot.revision &&
+            result.data.episodeId === episode.episodeId &&
+            result.data.sources?.some(
+              (item) =>
+                item.sessionId === episode.sessionId &&
+                item.eventId === original.eventId &&
+                item.text.includes(args.sourceQuote),
+            )
+          );
+        });
+        if (!delivered)
+          return unavailable('Expand the original user source with recall before saving it.');
+        source = original;
+        sourceSessionId = episode.sessionId;
+        consolidation = {
+          sessionId: meta.id,
+          promptId: prompt.eventId,
+          callId: ctx.callId,
+          episodeId: args.sourceEpisodeId,
+        };
+      } else if (args.sourceEpisodeId || args.sourceEventId) {
+        return unavailable('Historical sources can only support a scheduled memory consolidation.');
+      }
+      const text = source.content
         .filter((block) => block.kind === 'text')
         .map((block) => block.text)
         .join('\n');
@@ -182,11 +253,12 @@ export function createPersonaTool(deps: {
           expectedRevision: args.expectedRevision,
           expectedPolicyRevision: snapshot.revision,
           operationId,
+          ...(consolidation ? { consolidation } : {}),
           source: {
-            sessionId: meta.id,
-            eventId: prompt.eventId,
+            sessionId: sourceSessionId,
+            eventId: source.eventId,
             excerpt: args.sourceQuote,
-            at: prompt.at,
+            at: source.at,
           },
         },
         ctx.signal,

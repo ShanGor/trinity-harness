@@ -23,7 +23,7 @@ export function ScheduledTasks({
   const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
-  const [consolidation, setConsolidation] = useState(false);
+  const [consolidation, setConsolidation] = useState<'review' | 'memory' | undefined>();
   const [saving, setSaving] = useState(false);
   const operation = useRef(newId());
   const [form] = Form.useForm<{
@@ -98,7 +98,7 @@ export function ScheduledTasks({
             type="primary"
             onClick={() => {
               operation.current = newId();
-              setConsolidation(false);
+              setConsolidation(undefined);
               setCreating(true);
             }}
           >
@@ -107,7 +107,7 @@ export function ScheduledTasks({
           <Button
             onClick={() => {
               operation.current = newId();
-              setConsolidation(true);
+              setConsolidation('review');
               form.setFieldsValue({
                 title: 'Nightly digest and memory review',
                 request:
@@ -120,7 +120,29 @@ export function ScheduledTasks({
           >
             Nightly memory review
           </Button>
+          <Button
+            onClick={() => {
+              operation.current = newId();
+              setConsolidation('memory');
+              form.setFieldsValue({
+                title: 'Nightly memory consolidation',
+                request:
+                  'Review my personal conversations, group recurring topics and save missing stable personal facts with original user sources.',
+                hour: 3,
+                minute: 0,
+              });
+              setCreating(true);
+            }}
+          >
+            Nightly memory consolidation
+          </Button>
           <Button onClick={() => void load()}>Refresh</Button>
+          {!schedules.some((schedule) => schedule.enabled && schedule.consolidation) && (
+            <Alert
+              type="info"
+              message="Nightly memory processing is not enabled. Enable a nightly review or consolidation schedule to start it."
+            />
+          )}
           <List
             dataSource={schedules}
             locale={{ emptyText: 'No scheduled tasks' }}
@@ -151,10 +173,17 @@ export function ScheduledTasks({
               </List.Item>
             )}
           />
-          <Typography.Title level={3}>Updates</Typography.Title>
+          <Typography.Title level={3}>Run history</Typography.Title>
+          <Typography.Paragraph type="secondary">
+            Each entry is one execution. Pause and Resume above control future runs. Scheduled runs
+            stay here when opened and do not appear in Recent sessions.
+          </Typography.Paragraph>
           <List
             dataSource={inbox}
-            locale={{ emptyText: 'Task updates will appear here' }}
+            locale={{
+              emptyText:
+                'No scheduled runs recorded yet. Completed digests and memory results will appear here.',
+            }}
             renderItem={(item) => (
               <List.Item
                 actions={[
@@ -167,7 +196,7 @@ export function ScheduledTasks({
                             onOpen(item.sessionId!);
                           }}
                         >
-                          Open task
+                          View run
                         </Button>,
                       ]
                     : []),
@@ -193,7 +222,13 @@ export function ScheduledTasks({
         </>
       )}
       <Modal
-        title={consolidation ? 'Enable nightly memory review' : 'Create daily schedule'}
+        title={
+          consolidation === 'memory'
+            ? 'Enable nightly memory consolidation'
+            : consolidation
+              ? 'Enable nightly memory review'
+              : 'Create daily schedule'
+        }
         open={creating}
         confirmLoading={saving}
         onCancel={() => setCreating(false)}
@@ -212,7 +247,7 @@ export function ScheduledTasks({
             setSaving(true);
             try {
               await client.createSchedule({
-                ...(consolidation ? { consolidation: 'review' as const } : {}),
+                ...(consolidation ? { consolidation } : {}),
                 title: values.title,
                 request: values.request,
                 sourceSessionId: values.sourceSessionId,
@@ -240,7 +275,11 @@ export function ScheduledTasks({
           {consolidation && (
             <Alert
               type="info"
-              message="Reviews the previous local calendar day and delivers a digest with topic groups and source-linked memory proposals in Updates. Review proposals in Memory settings before saving. Missed reviews catch up the previous seven local days, oldest first. Failed recall-only reviews get up to three attempts with backoff; cancelled reviews are not retried. No automatic Persona changes."
+              message={
+                consolidation === 'memory'
+                  ? 'Groups the previous day by topic and automatically appends missing stable personal facts to Persona from expanded original user messages. Requires automatic memory to be enabled. Direct English/Chinese personal declarations are saved verbatim; unsupported wording and contradictions remain proposals. Existing facts are preserved. Saved revisions and sources appear in Memory, and the digest appears in Updates. Missed dates catch up within seven days; runs that attempted writes are never automatically retried.'
+                  : 'Reviews the previous local calendar day and delivers a digest with topic groups and source-linked memory proposals in Updates. Review proposals in Memory settings before saving. Missed reviews catch up the previous seven local days, oldest first. Failed recall-only reviews get up to three attempts with backoff; cancelled reviews are not retried. No automatic Persona changes.'
+              }
             />
           )}
           <Form.Item name="title" label="Name" rules={[{ required: true, max: 200 }]}>
@@ -260,7 +299,7 @@ export function ScheduledTasks({
           >
             <Select
               options={sessions
-                .filter((s) => s.kind === 'work' && s.scope === 'personal')
+                .filter((s) => s.kind === 'work' && s.scope === 'personal' && !s.scheduledRun)
                 .map((s) => ({ value: s.sessionId, label: s.title }))}
             />
           </Form.Item>

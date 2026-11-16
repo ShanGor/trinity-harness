@@ -176,6 +176,55 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
     expect((await metas.get(id))!.policy).toBe('read-only');
   });
 
+  it('derives scheduled-run identity from historical triggers after subsequent turns', async () => {
+    const owner = await users.createUser({
+      tenantId,
+      email: email(),
+      passwordHash: 'h',
+      role: 'developer',
+    });
+    const id = crypto.randomUUID();
+    await metas.create({
+      id,
+      tenantId,
+      userId: owner.id,
+      title: 'Nightly run',
+      workspaceUri: '/ws',
+      kind: 'work',
+      sessionRole: 'task',
+    });
+    expect(
+      (await metas.listForIdentity(identityOf(owner))).find((m) => m.id === id)?.scheduledRun,
+    ).toBe(false);
+    const at = new Date().toISOString();
+    await events.append(id, [
+      {
+        type: 'prompt/queued',
+        eventId: crypto.randomUUID(),
+        promptId: crypto.randomUUID(),
+        at,
+        actor: owner.id,
+        tenantId,
+        policy: { onAsk: 'deny', tools: { '*': 'denied' }, allowWorkspaceInternalBash: false },
+        content: [{ kind: 'text', text: 'Review' }],
+        trigger: {
+          kind: 'schedule',
+          scheduleId: crypto.randomUUID(),
+          occurrenceId: crypto.randomUUID(),
+          revision: 1,
+          scheduledAt: at,
+        },
+      },
+    ]);
+    await events.append(id, [
+      { type: 'turn/end', eventId: crypto.randomUUID(), at, reason: 'completed' },
+    ]);
+    expect((await metas.listForIdentity(identityOf(owner))).find((m) => m.id === id)).toMatchObject(
+      { scheduledRun: true, taskState: 'completed' },
+    );
+    expect(await events.load(id)).toHaveLength(2);
+  });
+
   it('sets only an empty title and closes a session while retaining events', async () => {
     const owner = await users.createUser({
       tenantId,

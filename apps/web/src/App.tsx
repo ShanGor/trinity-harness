@@ -1,3 +1,4 @@
+import { recentConversations } from './history-sidebar';
 import { workspaceLinkPath, openWorkspaceDocument } from './workspace-links';
 import { chatDateHeadings } from './chat-dates';
 import { saveHistoryTimezone, useHistoryTimezone } from './history-timezone';
@@ -1047,10 +1048,7 @@ export default function App() {
       if (sessionRef.current === id) setLoadingOlder(false);
     }
   }, [loadingOlder, message]);
-  const recentSessions = useMemo(
-    () => sessions.filter((session) => session.sessionRole !== 'main').slice(0, 12),
-    [sessions],
-  );
+  const recentSessions = useMemo(() => recentConversations(sessions), [sessions]);
   const linkedActiveIds = useMemo(
     () =>
       sessions
@@ -1146,10 +1144,18 @@ export default function App() {
         </div>
       )}
       {isMain &&
-        sessions.some((entry) => entry.kind === 'work' && entry.originSessionId === sessionId) && (
+        sessions.some(
+          (entry) =>
+            entry.kind === 'work' && !entry.scheduledRun && entry.originSessionId === sessionId,
+        ) && (
           <div className="linked-work-cards" aria-label="Linked work">
             {sessions
-              .filter((entry) => entry.kind === 'work' && entry.originSessionId === sessionId)
+              .filter(
+                (entry) =>
+                  entry.kind === 'work' &&
+                  !entry.scheduledRun &&
+                  entry.originSessionId === sessionId,
+              )
               .slice(0, 6)
               .map((entry) => (
                 <Button key={entry.sessionId} onClick={() => switchSession(entry.sessionId)}>
@@ -1562,11 +1568,13 @@ export default function App() {
                   {page === 'conversation'
                     ? isMain
                       ? 'Main chat'
-                      : activeSession?.kind === 'work'
-                        ? 'Work'
-                        : activeSession?.kind === 'chat'
-                          ? 'Chat'
-                          : 'Existing conversation'
+                      : activeSession?.scheduledRun
+                        ? 'Scheduled run'
+                        : activeSession?.kind === 'work'
+                          ? 'Work'
+                          : activeSession?.kind === 'chat'
+                            ? 'Chat'
+                            : 'Existing conversation'
                     : page.charAt(0).toUpperCase() + page.slice(1)}
                 </Typography.Text>
               )}
@@ -1577,12 +1585,21 @@ export default function App() {
               )}
             </div>
             <Flex align="center" gap={8} wrap className="workspace-controls">
+              {activeSession?.scheduledRun && page === 'conversation' && (
+                <Button onClick={() => setPage('scheduled')}>Back to Run history</Button>
+              )}
               {sessionId && (
                 <Button
                   onClick={() => {
                     const source = sessionId;
-                    const brief =
-                      activeSession?.scope === 'team'
+                    const brief = activeSession?.scheduledRun
+                      ? `Discuss the result of scheduled run ${source}:\n\n${
+                          [...items]
+                            .reverse()
+                            .find((item) => item.role === 'assistant' && item.final)
+                            ?.content?.slice(0, 2000) ?? 'Open the linked run for its result.'
+                        }`
+                      : activeSession?.scope === 'team'
                         ? ''
                         : ([...items].reverse().find((item) => item.role === 'user')?.content ??
                           '');
@@ -1591,11 +1608,11 @@ export default function App() {
                       if (user) sessionStorage.setItem(`trinity.draft:${user.id}:new`, brief);
                     }
                     newChat();
-                    setMode('work');
+                    setMode(activeSession?.scheduledRun ? 'chat' : 'work');
                     setDraftOrigin(source);
                   }}
                 >
-                  Create related Work
+                  {activeSession?.scheduledRun ? 'Discuss this result' : 'Create related Work'}
                 </Button>
               )}
               {sessionId &&
@@ -1728,12 +1745,20 @@ export default function App() {
           {page === 'tasks' && (
             <AssistantTasks
               client={client}
-              sessions={sessions.filter((session) => session.kind === 'work')}
+              sessions={sessions.filter(
+                (session) => session.kind === 'work' && !session.scheduledRun,
+              )}
               onOpen={switchSession}
             />
           )}
           {page === 'history' && <AssistantHistory client={client} onOpen={switchSession} />}
-          {page === 'memory' && <AssistantMemory client={client} sessionId={sessionId} />}
+          {page === 'memory' && (
+            <AssistantMemory
+              client={client}
+              sessionId={sessionId}
+              onOpenScheduled={() => setPage('scheduled')}
+            />
+          )}
 
           {page === 'scheduled' && (
             <ScheduledTasks client={client} sessions={sessions} onOpen={switchSession} />

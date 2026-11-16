@@ -146,7 +146,7 @@ export class PgSessionStore implements SessionStore {
               const final = answer ? sessionEventSchema.parse(answer.payload) : null;
               if (
                 user.type === 'message/user' &&
-                user.trigger?.consolidation !== 'review' &&
+                !user.trigger?.consolidation &&
                 final?.type === 'message/assistant' &&
                 final.phase !== 'progress'
               ) {

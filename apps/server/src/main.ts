@@ -209,7 +209,13 @@ async function main(): Promise<void> {
       registry.register(createReadBlobTool(blobStore, attachmentReader, store));
       if (memory && auth)
         registry.register(
-          createPersonaTool({ memory, metas: auth.metas, store, users: auth.users }),
+          createPersonaTool({
+            memory,
+            metas: auth.metas,
+            store,
+            users: auth.users,
+            index: conversationIndex,
+          }),
         );
       if (memory && conversationIndex && auth)
         registry.register(

@@ -9,6 +9,40 @@ export const memorySourceSchema = z.object({
   excerpt: z.string().max(4000),
   at: z.iso.datetime().optional(),
 });
+export const personaToolParametersSchema = z.discriminatedUnion('operation', [
+  z.strictObject(
+    { operation: z.literal('read') },
+    {
+      error:
+        'Read does not save or forget facts. For any edits, set operation to update and supply expectedRevision, sourceQuote and edits.',
+    },
+  ),
+  z
+    .object({
+      operation: z.literal('update'),
+      expectedRevision: z.number().int().nonnegative(),
+      sourceQuote: z.string().min(1).max(4000),
+      sourceEpisodeId: z.uuid().optional(),
+      sourceEventId: z.uuid().optional(),
+      edits: z
+        .array(
+          z.object({ oldText: z.string().max(16000), newText: z.string().max(16000) }).strict(),
+        )
+        .min(1)
+        .max(8),
+    })
+    .strict(),
+]);
+
+/** Conservative nightly source admission; unsupported wording remains a review proposal.
+ * This checks direct declarations, not whether a claim is true or remains current. */
+export function isNightlyMemorySource(text: string): boolean {
+  if (!text.trim() || text.length > 500 || /[\r\n]/u.test(text)) return false;
+  return /^(?:my (?:name|nickname|birthday|birth date|occupation|job|profession|home|hometown|preferred language|pronouns) (?:is|are)\b|I(?: am|’m|'m) (?!asking\b|requesting\b|looking\b|trying\b|going to\b)|I (?:live in|work (?:as|at|in)|prefer|like|dislike|usually|always)\b|remember (?:that )?(?:my |I )|我(?:叫|姓|的(?:名字|姓名|昵称|生日|职业|工作|家乡|母语|偏好|习惯)是|住在|居住在|出生于|喜欢|不喜欢|偏好|习惯|通常|一直|才是真正的)|(?:请)?记住(?:我|我的)|(?:以后|今后|始终|总是).{0,40}(?:回答|回复|称呼))/iu.test(
+    text.trim(),
+  );
+}
+
 export const personaSchema = z.object({
   content: z.string().max(16000),
   autoSaveEnabled: z.boolean().optional(),
@@ -24,6 +58,16 @@ export const personaChangeSchema = z
     operationId: z.uuid(),
     autoSaveEnabled: z.boolean().optional(),
     source: memorySourceSchema.optional(),
+    /** Runtime-only provenance for a source-backed nightly consolidation write. */
+    consolidation: z
+      .object({
+        sessionId: z.uuid(),
+        promptId: z.uuid(),
+        callId: z.string().min(1).max(200),
+        episodeId: z.uuid(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type PersonaChange = z.infer<typeof personaChangeSchema>;
@@ -162,6 +206,7 @@ export const recallReceiptSchema = z.object({
 });
 export type RecallReceipt = z.infer<typeof recallReceiptSchema>;
 export const recallResultSchema = z.object({
+  attachmentsOmitted: z.boolean().optional(),
   policyRevision: z.number().int().nonnegative(),
   episodes: z.array(topicEpisodeSchema).max(10).optional(),
   episodeId: z.string().optional(),

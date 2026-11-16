@@ -6,7 +6,7 @@ source scripts/lib/podman-services.sh
 
 usage() {
   printf 'Usage: %s {start|stop|restart|status}\n' "$0"
-  printf 'Manage the five deployed Podman containers without builds or migrations.\n'
+  printf 'Manage the deployed Podman containers, including the configured scheduler without builds or migrations.\n'
 }
 [[ $# == 1 ]] || { usage >&2; exit 2; }
 case "$1" in
@@ -15,7 +15,21 @@ case "$1" in
   *) usage >&2; exit 2 ;;
 esac
 command -v podman >/dev/null
-NAMES=(trinity-browser-runtime trinity-server trinity-agent-worker trinity-audit-consumer trinity-gateway)
+NAMES=(trinity-browser-runtime trinity-server trinity-agent-worker trinity-audit-consumer trinity-control-worker trinity-gateway)
+
+# Saved deployment configuration, not the checkout .env, determines the service set.
+if podman container exists trinity-server; then
+  SCHEDULING=$(podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' trinity-server | node --input-type=module -e '
+    let input=""; for await (const chunk of process.stdin) input+=chunk;
+    process.stdout.write(String(input.split("\n").includes("SCHEDULING_ENABLED=true")));')
+  if [[ "$SCHEDULING" != true ]]; then
+    NAMES=(trinity-browser-runtime trinity-server trinity-agent-worker trinity-audit-consumer trinity-gateway)
+    # Still stop a leftover scheduler, but never silently start one with disabled readers.
+    if [[ "$ACTION" == stop ]] && podman container exists trinity-control-worker; then
+      NAMES=(trinity-browser-runtime trinity-server trinity-agent-worker trinity-audit-consumer trinity-control-worker trinity-gateway)
+    fi
+  fi
+fi
 
 if [[ "$ACTION" == status ]]; then
   RESULT=0
@@ -77,9 +91,13 @@ podman start trinity-browser-runtime >/dev/null
 BROWSER_ENDPOINT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).browserEndpoint' "$STATE/runtime.json")
 curl --retry 30 --retry-connrefused --retry-delay 1 --connect-timeout 2 --max-time 5 --retry-max-time 60 --silent --show-error --output /dev/null "$BROWSER_ENDPOINT/execute"
 node scripts/podman-runtime.mjs "$STATE/runtime.json" browser
-for name in trinity-server trinity-agent-worker trinity-audit-consumer trinity-gateway; do
+for name in "${NAMES[@]:1}"; do
   podman start "$name" >/dev/null
 done
+if [[ " ${NAMES[*]} " == *" trinity-control-worker "* ]]; then
+  CONTROL_PORT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).controlPort' "$STATE/runtime.json")
+  curl --retry 30 --retry-all-errors --retry-delay 1 --connect-timeout 2 --max-time 5 --retry-max-time 60 --fail --silent --show-error "http://127.0.0.1:$CONTROL_PORT/health"
+fi
 WEB_PORT=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).webPort' "$STATE/runtime.json")
 curl --retry 30 --retry-connrefused --retry-delay 1 --connect-timeout 2 --max-time 5 --retry-max-time 60 --fail --silent --show-error "http://127.0.0.1:$WEB_PORT/api/health"
 curl --connect-timeout 2 --max-time 5 --fail --silent --show-error "http://127.0.0.1:$WEB_PORT/" >/dev/null

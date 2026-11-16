@@ -7,7 +7,7 @@ import type {
   LoopEvent,
   PermissionPolicy,
 } from '@trinity-harness/contracts';
-import { parsePermissionPolicy } from '@trinity-harness/contracts';
+import { parsePermissionPolicy, sessionEventSchema } from '@trinity-harness/contracts';
 import {
   CoreAgentLoop,
   CoreToolRegistry,
@@ -262,4 +262,34 @@ describe('CoreAgentLoop permission gate (M3)', () => {
     expect(log.filter((e) => e.type === 'approval/requested')).toHaveLength(1);
     expect(log.at(-1)?.type).toBe('turn/end');
   });
+});
+
+it('bounds long scheduled prompt approval previews before persistence and delivery', async () => {
+  const store = new MemorySessionStore();
+  const tools = new CoreToolRegistry(new FakeSandbox());
+  const requests: ApprovalRequest[] = [];
+  const loop = new CoreAgentLoop({
+    llm: new FakeLLM(),
+    model: 'fake',
+    tools,
+    store,
+    workspaceRoot: '/workspace',
+    approvals: {
+      request: async (req) => {
+        requests.push(req);
+        return { approvalId: req.approvalId, outcome: 'rejected', decidedBy: 'user' };
+      },
+    },
+  });
+  const outcome = await loop.run(
+    'long-prompt',
+    'review '.repeat(1000),
+    { emit: () => undefined },
+    { policy: { onAsk: 'ask', tools: { prompt: 'ask' }, allowWorkspaceInternalBash: false } },
+  );
+  expect(outcome.reason).toBe('error');
+  expect(requests).toHaveLength(1);
+  expect(requests[0]!.argsPreview.length).toBeLessThanOrEqual(2000);
+  for (const event of await store.load('long-prompt'))
+    expect(sessionEventSchema.safeParse(event).success).toBe(true);
 });

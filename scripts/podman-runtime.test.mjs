@@ -15,11 +15,19 @@ test('uses configured browser port and node endpoint', () => {
     browserEndpoint: 'http://127.0.0.1:3010',
     browserPort: 3010,
     nodeEndpoint: 'http://127.0.0.1:3030',
+    schedulingEnabled: true,
+    controlPort: 3020,
   });
 });
 test('rejects remote endpoints, ambiguous topology and port collisions before effects', () => {
   for (const patch of [
     { EXECUTION_DRIVER: 'local' },
+    { CONTROL_WORKER_PORT: '3100' },
+    { CONTROL_WORKER_PORT: '3010' },
+    { CONTROL_WORKER_PORT: '3030' },
+    { CONTROL_WORKER_PORT: '80' },
+    { CONTROL_WORKER_PORT: 'invalid' },
+    { SCHEDULING_ENABLED: 'yes' },
     { BROWSER_RUNTIME_ENDPOINT: 'http://example.com:3010' },
     { BROWSER_RUNTIME_ENDPOINT: 'http://127.0.0.1:3100' },
     { NODE_RUNTIME_TOKEN: '' },
@@ -45,4 +53,15 @@ test('probe sends only invalid body and requires authenticated validation respon
       probeRuntime('http://127.0.0.1:3010', 'token', '/execute', async () => ({ status })),
     );
   }
+});
+
+test('keeps explicit scheduling disable and configured control port', () => {
+  assert.equal(
+    runtimeConfig({ ...env, SCHEDULING_ENABLED: 'false' }, 3100, 8080).schedulingEnabled,
+    false,
+  );
+  assert.equal(
+    runtimeConfig({ ...env, CONTROL_WORKER_PORT: '3040' }, 3100, 8080).controlPort,
+    3040,
+  );
 });

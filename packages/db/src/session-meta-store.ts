@@ -19,7 +19,10 @@ function policyText(policy: PermissionPolicy | string): string {
 }
 
 function toMeta(
-  row: typeof sessions.$inferSelect & { taskState?: SessionMeta['taskState'] },
+  row: typeof sessions.$inferSelect & {
+    taskState?: SessionMeta['taskState'];
+    scheduledRun?: boolean;
+  },
 ): SessionMeta {
   const meta: SessionMeta = {
     id: row.id,
@@ -36,6 +39,7 @@ function toMeta(
     ...(row.policy !== null ? { policy: row.policy } : {}),
     createdAt: new Date(row.createdAt).toISOString(),
     ...(row.taskState ? { taskState: row.taskState } : {}),
+    ...(row.scheduledRun !== undefined ? { scheduledRun: row.scheduledRun } : {}),
   };
   if (row.closedAt) {
     meta.closedAt = new Date(row.closedAt).toISOString();
@@ -171,6 +175,10 @@ export class PgSessionMetaStore implements SessionMetaStore {
     const rows = await this.db
       .select({
         ...getTableColumns(sessions),
+        scheduledRun: sql<boolean>`exists (select 1 from ${sessionEvents} scheduled
+          where scheduled.session_id = ${sessions.id}
+          and scheduled.type in ('prompt/queued', 'message/user')
+          and scheduled.payload->'trigger'->>'kind' = 'schedule')`,
         taskState: sql<NonNullable<SessionMeta['taskState']>>`case
         when ${latest}->>'type' = 'message/user' then 'queued'
         when ${latest}->>'type' = 'approval/requested' then 'needs_approval'

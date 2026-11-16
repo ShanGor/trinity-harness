@@ -55,7 +55,10 @@ export class SkillRuntime implements SkillRuntimePort {
     const { sessionId, workspaceRoot, prompt, policy, signal, appendOpts } = options;
     signal?.throwIfAborted();
     const decision = policy?.tools.skill ?? policy?.tools['*'] ?? 'allowed';
-    const discovered = await this.catalog.list(workspaceRoot, signal);
+    const discovered =
+      decision === 'denied'
+        ? { skills: [], diagnostics: [] }
+        : await this.catalog.list(workspaceRoot, signal);
     const skills =
       decision !== 'denied' ? discovered.skills.filter((skill) => skill.modelInvocable) : [];
     const instructions = [

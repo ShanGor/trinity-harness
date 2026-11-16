@@ -154,3 +154,25 @@ Workspace artifact links open the originating session drawer. Keep full human pr
 Human folder ZIP downloads use the existing authenticated workspace document/Sandbox path. Preserve no-follow descriptor traversal, private `model-context` exclusion, bounded complete archives, cancellation and post-read authorization; never use host filesystem or shell ZIP fallbacks. See design’s folder download follow-up.
 
 Runtime clock metadata belongs at the end of assistant model input, with a committed `model/clock` snapshot and token accounting. Preserve old active snapshots, completed-turn filtering, explicit timezone/UTC fallback and separate compaction inputs; never place a changing clock in the system prefix or treat it as user/scheduling authority. See design’s runtime clock suffix section.
+
+### Operational memory and nightly consolidation
+
+Normal execution guards are not child identity: originating personal loops retain
+Persona write callbacks while authenticated `subagent:` actors cannot write.
+`consolidation: review` remains proposals-only. Explicit `consolidation: memory`
+may append missing stable facts only from expanded original user evidence under
+auto-save, ownership, removal/exclusion/suppression, revision, occurrence and exact
+call-journal checks. Recheck these in the PostgreSQL transaction; never permit
+historical consolidation to rewrite existing facts or resurrect forgotten sources.
+Keep derived runs out of episodic indexing and never retry a run that called Persona.
+Single-host Podman deploy includes the configured control worker, retires old writers
+before migration, and checks reconciliation health; service-only operations use the
+saved scheduling gate and validate missing dependencies before stopping anything.
+See design §21 and docs/deployment-guide.md for behavior and deployment details.
+
+Nightly writes preserve a bounded directly declared personal statement verbatim as
+one bullet; unsupported forms and behavioral/task-language inferences remain proposals.
+Recheck the same admission and exact-patch rule transactionally. Nightly source
+expansion omits attached media explicitly; missing old blobs must not block text
+review. Ordinary recall retains requested media behavior. Do not contact denied
+skill catalogs or allocate guests for memory-only work.

@@ -208,3 +208,21 @@ Verification: backend suite passes 1,330 tests (27 opt-in tests skipped); worksp
 - [x] Resource-specific read/copy/export eligibility and bounded structured rejection diagnostics implemented and replay-tested. Adapters without known resource metadata retain conservative handling.
 
 Two-repeat synthetic real-model export acceptance passed twice (four trials); this does not close the full live-browser/model/guest export gate. See [acceptance evidence](export-verification-acceptance-2026-11-14.md).
+
+### Operational personal memory and scheduling (2026-11-15)
+
+- [x] Matching local server/worker/control-worker/Web deployed; scheduler included in
+      full deployment and saved-container lifecycle operations, with reconciliation health.
+- [x] Guarded originating Persona save/refresh and child-write denial regressions.
+- [x] Transactional nightly source, owner, setting, revision, removal/exclusion and
+      suppression checks; verbatim bounded direct declarations; proposals for unsupported
+      wording/contradictions; no automatic retry after Persona calls.
+- [x] Explicit text-only nightly reads and denied-skill catalog omission avoid guest
+      allocation/missing historical media dependencies; ordinary recall media retained.
+- [x] Final configured-model isolated save/recall/correct/forget acceptance passed;
+      actual account grouped digest completed, supported profile restored at revision 3,
+      daily 03:00 Asia/Hong_Kong schedule enabled; UI versions/sources inspected.
+- [ ] Broader multilingual/semantic extraction and grouping-quality evaluation.
+      English/Chinese nightly admission is conservative; lexical History labels and
+      bounded model-generated digest groups do not establish semantic clustering or
+      exhaustive source coverage. This local rollout does not establish production isolation.

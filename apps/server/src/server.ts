@@ -1440,6 +1440,7 @@ export async function buildServer(
           kind: m.kind,
           sessionRole: m.sessionRole,
           taskState: m.taskState,
+          scheduledRun: m.scheduledRun,
           originSessionId: m.originSessionId,
           scope: m.scope ?? 'personal',
           ...(m.scopeId !== undefined ? { scopeId: m.scopeId } : {}),
@@ -1637,7 +1638,7 @@ export async function buildServer(
       return reply.code(503).send({ error: 'Durable persona unavailable' });
     if (req.identity.role === 'viewer') return reply.code(403).send({ error: 'read-only' });
     const body = personaChangeSchema
-      .omit({ source: true, expectedPolicyRevision: true })
+      .omit({ source: true, expectedPolicyRevision: true, consolidation: true })
       .safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'invalid persona' });
     try {

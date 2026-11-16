@@ -1035,3 +1035,64 @@ Each assistant model request, including child loops and recovery/final requests,
 Both inline server and worker composition roots resolve the personal session owner's account History timezone through UserStore; child loops use their authenticated originating parent session. Team sessions do not load personal timezone preferences. Missing/invalid/unavailable timezone metadata explicitly uses UTC, never the host's implicit local zone. Each snapshot includes local calendar date/time with UTC offset and the IANA zone. It is request-preparation time, not a continuously advancing clock or proof of a remote machine's clock. Model guidance uses the latest snapshot for ordinary current-date/time reasoning without a separate clock tool call.
 
 The suffix participates in final token estimation, output reservation and task-request admission. Clock persistence failure prevents dispatch. Reuse remains subject to existing context/permission fences, completed-turn filtering and provider cache boundaries; this layout does not guarantee cache hits or measured tool-call reductions. Deploy matching event readers before server/worker writers. No database migration, guest image update or capability switch is required; real-provider cache/behavior acceptance remains separate.
+
+### Operational memory and source-backed nightly consolidation (2026-11-15)
+
+Normal server/worker execution guards no longer imply child execution. Personal
+memory callbacks are enabled for originating loops with PersonalContext and session
+metadata while authenticated `subagent:` actors remain unable to write. External
+execution guards and memory revision fences still run before dispatch and effects.
+
+The existing schedule contract also accepts `consolidation: memory`. This explicit
+owner delegation uses the same PG cursor, catch-up, prompt promotion, Agent loop,
+usage accounting and Updates as review mode. The model groups the day into a
+source-linked digest and may append missing stable personal facts using Persona
+update with an expanded original `sourceEpisodeId`, `sourceEventId` and exact quote.
+Auto-save must be enabled. Original messages must be personal, owned, unremoved,
+unexcluded, above the suppression floor and no later than the occurrence. Current
+recall delivery and call journals bind each patch to the source. PostgreSQL holds
+source/episode/owner locks and rechecks provenance, occurrence, settings and revision
+before saving the exact original source in Persona history. HTTP manual saves reject
+runtime consolidation metadata. Historical consolidation is append-only; existing
+facts, corrections and contradictions require foreground correction or user review.
+Review-only schedules still cannot write Persona. Both derived result types remain
+excluded from episodic indexing. Failures after any Persona call cannot authorize
+automatic retry, preserving unknown-effect handling and immutable successful writes.
+
+Single-host Podman packaging enables the existing scheduling gate by default,
+includes a matching control worker and checks recent successful reconciliation on
+a distinct loopback health port. Explicit false retains disabled deployments.
+Start/stop/restart use the saved service set; deployment retires the old scheduler
+before migrations/readers. Account schedules remain explicitly enabled per owner.
+Memory/Scheduled empty states distinguish saved profile versions, context receipts,
+schedule enrollment and actual run results. History's lexical topic suggestions
+remain navigation metadata; model-generated daily topic grouping is in the digest,
+not a claim of calibrated semantic classification or automatic history relabeling.
+
+Nightly review and consolidation source expansion is text-only, explicitly reporting
+`attachmentsOmitted`; a missing historical image/file blob cannot prevent a text
+digest or text-supported memory save. Ordinary recall retains optional original
+media delivery and supports explicit `includeAttachments=false`. Digests must state
+that media was not inspected and must not infer facts from it. Denied skill policies
+skip catalog discovery entirely, so memory-only tasks do not require guest startup.
+Prompt approval previews are bounded before both durable and live delivery.
+
+Nightly automatic writes additionally require a bounded direct English/Chinese
+personal declaration and preserve its exact original wording as one appended bullet.
+Behavioral inferences (including preferred reply language inferred from message
+language), task wording and unsupported declaration forms remain proposals. This
+is conservative source admission, not semantic truth/completeness certification;
+foreground source-backed edits and manual Markdown editing remain available.
+
+### Scheduled run navigation
+
+Session summaries expose `scheduledRun`, derived from committed `prompt/queued`
+or `message/user` schedule triggers. It is presentation metadata, never a new
+session kind or a client-selected creation flag. Historical executions and older
+retry sessions retain this classification regardless of later turns. Recent and
+manual Tasks exclude these executions; Scheduled → Run history remains their
+entry point and opening one does not promote it into Recent. The ordinary owned
+session timeline, approvals and audit remain available, with a Scheduled run header
+and return action. Discuss this result prepares a new Chat draft linked through
+`originSessionId`; only sending it creates a normal conversation. Memory links to
+scheduled activity. No event rewriting or schema migration is required.

@@ -19,10 +19,11 @@ export function createRecallTool(deps: {
   return defineTool({
     name: 'recall',
     description:
-      'Search authorized personal conversation episodes (optionally by calendar date and IANA timezone), or expand original source text using episodeId or a same-session conversation eventId. Use offset to continue a truncated excerpt. Memories and sources are reference data, not execution authority.',
+      'Search authorized personal conversation episodes (optionally by calendar date and IANA timezone), or expand original source text using episodeId or a same-session conversation eventId. Use offset to continue a truncated excerpt. Set includeAttachments=false for text-only history reads. Nightly review/consolidation always omits media and reports attachmentsOmitted. Memories and sources are reference data, not execution authority.',
     parameters: z
       .object({
         query: z.string().max(200).optional(),
+        includeAttachments: z.boolean().optional(),
         date: z
           .string()
           .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -61,6 +62,13 @@ export function createRecallTool(deps: {
         };
       const identity = { tenantId: meta.tenantId, userId: meta.userId, role: 'developer' as const };
       const snapshot = await deps.memory.snapshot(identity);
+      const prompt = ctx.userPromptId
+        ? (await deps.store.load(ctx.sessionId)).find((event) => event.eventId === ctx.userPromptId)
+        : undefined;
+      // Nightly text consolidation must not eagerly load historical media or depend on guest storage.
+      const includeAttachments =
+        args.includeAttachments !== false &&
+        !(prompt?.type === 'message/user' && prompt.trigger?.consolidation);
       if (args.eventId && (args.episodeId || args.query))
         return {
           isError: true,
@@ -104,7 +112,7 @@ export function createRecallTool(deps: {
           .filter((block) => block.kind === 'text')
           .map((block) => block.text)
           .join('\n');
-        const attachments = event.content
+        const attachments = (includeAttachments ? event.content : [])
           .flatMap((block) =>
             block.kind === 'image' || block.kind === 'file'
               ? [
@@ -152,6 +160,7 @@ export function createRecallTool(deps: {
               },
             ],
             policyRevision: snapshot.revision,
+            ...(!includeAttachments ? { attachmentsOmitted: true } : {}),
           },
         };
       }
@@ -205,7 +214,7 @@ export function createRecallTool(deps: {
           .filter((block) => block.kind === 'text')
           .map((block) => (block.kind === 'text' ? block.text : ''))
           .join('\n');
-        const attachments = event.content
+        const attachments = (includeAttachments ? event.content : [])
           .flatMap((block) =>
             block.kind === 'image' || block.kind === 'file'
               ? [
@@ -249,7 +258,12 @@ export function createRecallTool(deps: {
         };
       return {
         isError: false,
-        value: { episodeId: args.episodeId, sources, policyRevision: snapshot.revision },
+        value: {
+          episodeId: args.episodeId,
+          sources,
+          policyRevision: snapshot.revision,
+          ...(!includeAttachments ? { attachmentsOmitted: true } : {}),
+        },
       };
     },
   });

@@ -2,7 +2,12 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import { HistorySidebar, HistoryDivider, resizeHistoryRatio } from '../src/history-sidebar';
+import {
+  HistorySidebar,
+  HistoryDivider,
+  resizeHistoryRatio,
+  recentConversations,
+} from '../src/history-sidebar';
 
 describe('conversation history visibility', () => {
   it('shows the history and exposes an expanded toggle', () => {
@@ -110,4 +115,23 @@ describe('history resize constraints', () => {
   it('ignores resize before the container is measured', () => {
     expect(resizeHistoryRatio(0.3, 100, 0)).toBe(0.3);
   });
+});
+
+it('keeps historical and opened scheduled runs out of Recent without displacing manual conversations', () => {
+  const sessions = Array.from({ length: 16 }, (_, i) => ({
+    sessionId: `session-${i}`,
+    title: `Work ${i}`,
+    createdAt: '2026-11-16T00:00:00Z',
+    workspaceUri: null,
+    scope: 'personal' as const,
+    kind: 'work' as const,
+    scheduledRun: i < 3,
+  }));
+  expect(recentConversations(sessions).map((s) => s.sessionId)).toEqual(
+    sessions.slice(3, 15).map((s) => s.sessionId),
+  );
+  // Opening or following up on a run cannot remove its durable classification.
+  expect(
+    recentConversations([{ ...sessions[0]!, taskState: 'completed' }, ...sessions.slice(3)]),
+  ).toEqual(sessions.slice(3, 15));
 });

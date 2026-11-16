@@ -96,52 +96,55 @@ function definition(): ScheduleCreate {
 }
 
 describe.skipIf(!reachable)('durable runtime control', () => {
-  it('commits a dated nightly review once and excludes derived digests from recall indexing', async () => {
-    const input = { ...definition(), consolidation: 'review' as const, timezone: 'Asia/Hong_Kong' };
-    const schedule = await schedules.create(owner, input, at);
-    await Promise.all([
-      schedules.tick(new Date('2026-10-24T00:01:00Z')),
-      schedules.tick(new Date('2026-10-24T00:01:00Z')),
-    ]);
-    const notices = (await schedules.inbox(owner)).filter(
-      (item) => item.scheduleId === schedule.id,
-    );
-    expect(notices).toHaveLength(1);
-    const sessionId = notices[0]!.sessionId!;
-    const queued = (await events.load(sessionId)).find((event) => event.type === 'prompt/queued');
-    if (queued?.type !== 'prompt/queued') throw new Error('missing prompt');
-    expect(queued.trigger?.consolidation).toBe('review');
-    expect(JSON.stringify(queued.content)).toContain('Review date: 2026-10-23');
-    await events.append(sessionId, [
-      {
-        type: 'message/user',
-        surfaceOp: 'append',
-        eventId: queued.promptId,
-        at: queued.at,
-        content: queued.content,
-        trigger: queued.trigger,
-      },
-      {
-        type: 'message/assistant',
-        eventId: randomUUID(),
-        at: queued.at,
-        phase: 'final',
-        surfaceOp: 'append',
-        content: [{ kind: 'text', text: 'Derived digest' }],
-      },
-      {
-        type: 'turn/end',
-        eventId: randomUUID(),
-        at: queued.at,
-        promptId: queued.promptId,
-        reason: 'completed',
-      },
-    ]);
-    expect(
-      (await pool.query('select * from conversation_episodes where session_id=$1', [sessionId]))
-        .rows,
-    ).toHaveLength(0);
-  });
+  it.each(['review', 'memory'] as const)(
+    'commits a dated nightly %s once and excludes derived digests from recall indexing',
+    async (consolidation) => {
+      const input = { ...definition(), consolidation, timezone: 'Asia/Hong_Kong' };
+      const schedule = await schedules.create(owner, input, at);
+      await Promise.all([
+        schedules.tick(new Date('2026-10-24T00:01:00Z')),
+        schedules.tick(new Date('2026-10-24T00:01:00Z')),
+      ]);
+      const notices = (await schedules.inbox(owner)).filter(
+        (item) => item.scheduleId === schedule.id,
+      );
+      expect(notices).toHaveLength(1);
+      const sessionId = notices[0]!.sessionId!;
+      const queued = (await events.load(sessionId)).find((event) => event.type === 'prompt/queued');
+      if (queued?.type !== 'prompt/queued') throw new Error('missing prompt');
+      expect(queued.trigger?.consolidation).toBe(consolidation);
+      expect(JSON.stringify(queued.content)).toContain('Review date: 2026-10-23');
+      await events.append(sessionId, [
+        {
+          type: 'message/user',
+          surfaceOp: 'append',
+          eventId: queued.promptId,
+          at: queued.at,
+          content: queued.content,
+          trigger: queued.trigger,
+        },
+        {
+          type: 'message/assistant',
+          eventId: randomUUID(),
+          at: queued.at,
+          phase: 'final',
+          surfaceOp: 'append',
+          content: [{ kind: 'text', text: 'Derived digest' }],
+        },
+        {
+          type: 'turn/end',
+          eventId: randomUUID(),
+          at: queued.at,
+          promptId: queued.promptId,
+          reason: 'completed',
+        },
+      ]);
+      expect(
+        (await pool.query('select * from conversation_episodes where session_id=$1', [sessionId]))
+          .rows,
+      ).toHaveLength(0);
+    },
+  );
   it('atomically creates one queued run, preserves trigger provenance and recovers its outcome after restart', async () => {
     const input = definition();
     const schedule = await schedules.create(owner, input, at);

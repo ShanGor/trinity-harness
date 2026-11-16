@@ -78,7 +78,25 @@ export function runtimeConfig(env, apiPort, webPort) {
   if ([port, Number(apiPort), Number(webPort)].includes(Number(node.port || 80))) {
     throw new Error('Node Agent port conflicts with another service');
   }
-  return { browserEndpoint: endpoint.origin, browserPort: port, nodeEndpoint: node.origin };
+  const schedulingEnabled = env.SCHEDULING_ENABLED !== 'false';
+  if (env.SCHEDULING_ENABLED && !['true', 'false'].includes(env.SCHEDULING_ENABLED))
+    throw new Error('SCHEDULING_ENABLED must be true or false');
+  const controlPort = Number(env.CONTROL_WORKER_PORT || 3020);
+  if (
+    schedulingEnabled &&
+    (!Number.isInteger(controlPort) ||
+      controlPort <= 1024 ||
+      controlPort >= 65536 ||
+      [port, Number(apiPort), Number(webPort), Number(node.port || 80)].includes(controlPort))
+  )
+    throw new Error('Control worker port must be unprivileged and distinct from other services');
+  return {
+    browserEndpoint: endpoint.origin,
+    browserPort: port,
+    nodeEndpoint: node.origin,
+    schedulingEnabled,
+    controlPort,
+  };
 }
 
 /** Invalid bodies test authenticated routing without issuing runtime operations. */

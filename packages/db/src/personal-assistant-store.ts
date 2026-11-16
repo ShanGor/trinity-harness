@@ -8,6 +8,10 @@ import {
   memorySourceSchema,
   sessionEventSchema,
   removedPromptIds,
+  recallResultSchema,
+  scheduleDefinitionSchema,
+  personaToolParametersSchema,
+  isNightlyMemorySource,
   type PersonaHistory,
   type Persona,
   type PersonaChange,
@@ -33,6 +37,8 @@ import {
   episodeChanges,
   sessions,
   sessionEvents,
+  assistantSchedules,
+  scheduleOccurrences,
 } from './schema.js';
 
 type Transaction = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -147,6 +153,10 @@ export class PgMemoryStore implements MemoryStorePort {
       .transaction(async (tx) => {
         if (change.source)
           await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${change.source.sessionId}))`);
+        if (change.consolidation)
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtext(${`episode:${identity.tenantId}:${identity.userId}:${change.consolidation.episodeId}`}))`,
+          );
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtext(${`memory:${identity.tenantId}:${identity.userId}`}))`,
         );
@@ -249,6 +259,168 @@ export class PgMemoryStore implements MemoryStorePort {
             throw Object.assign(new Error('Personal memory source is unavailable.'), {
               code: 'MEMORY_SOURCE_UNAVAILABLE',
             });
+        }
+        if (change.consolidation) {
+          const audit = change.consolidation;
+          const fail: () => never = () => {
+            throw Object.assign(new Error('Nightly memory source or authorization changed.'), {
+              code: 'MEMORY_SOURCE_UNAVAILABLE',
+            });
+          };
+          if (
+            !change.source ||
+            prior?.autoSaveEnabled === false ||
+            !change.content.startsWith(prior?.content ?? '')
+          )
+            fail();
+          const [origin] = await tx
+            .select()
+            .from(sessions)
+            .where(
+              and(
+                eq(sessions.id, audit.sessionId),
+                eq(sessions.tenantId, identity.tenantId),
+                eq(sessions.userId, identity.userId),
+                eq(sessions.scope, 'personal'),
+              ),
+            )
+            .limit(1);
+          if (!origin || origin.closedAt) fail();
+          const logs = (
+            await tx
+              .select({ payload: sessionEvents.payload })
+              .from(sessionEvents)
+              .where(eq(sessionEvents.sessionId, audit.sessionId))
+              .orderBy(sessionEvents.seq)
+          ).map((row) => sessionEventSchema.parse(row.payload));
+          const promptIndex = logs.findIndex((event) => event.eventId === audit.promptId);
+          const prompt = logs[promptIndex];
+          if (
+            prompt?.type !== 'message/user' ||
+            prompt.trigger?.consolidation !== 'memory' ||
+            removedPromptIds(logs).has(prompt.eventId)
+          )
+            fail();
+          if (prompt.type !== 'message/user' || !prompt.trigger) fail();
+          const [run] = await tx
+            .select({
+              definition: assistantSchedules.definition,
+              sessionId: scheduleOccurrences.sessionId,
+            })
+            .from(scheduleOccurrences)
+            .innerJoin(
+              assistantSchedules,
+              eq(assistantSchedules.id, scheduleOccurrences.scheduleId),
+            )
+            .where(
+              and(
+                eq(scheduleOccurrences.id, prompt.trigger.occurrenceId),
+                eq(scheduleOccurrences.userId, identity.userId),
+                eq(scheduleOccurrences.tenantId, identity.tenantId),
+                eq(scheduleOccurrences.promptId, prompt.eventId),
+              ),
+            )
+            .limit(1);
+          if (
+            !run ||
+            run.sessionId !== origin.id ||
+            scheduleDefinitionSchema.parse(run.definition).consolidation !== 'memory'
+          )
+            fail();
+          const [row] = await tx
+            .select()
+            .from(conversationEpisodes)
+            .where(
+              and(
+                eq(conversationEpisodes.tenantId, identity.tenantId),
+                eq(conversationEpisodes.userId, identity.userId),
+                sql`${conversationEpisodes.payload}->>'episodeId' = ${audit.episodeId}`,
+              ),
+            )
+            .limit(1);
+          if (!row) fail();
+          const episode = topicEpisodeSchema.parse(row.payload);
+          const [last] = await tx
+            .select()
+            .from(episodeChanges)
+            .where(
+              and(
+                eq(episodeChanges.tenantId, identity.tenantId),
+                eq(episodeChanges.userId, identity.userId),
+                eq(episodeChanges.episodeId, audit.episodeId),
+              ),
+            )
+            .orderBy(desc(episodeChanges.id))
+            .limit(1);
+          if (
+            episode.excluded ||
+            (last && changeSchema.parse(last.payload).excluded) ||
+            episode.policyRevision < (prior?.suppressionRevision ?? 0) ||
+            episode.sessionId !== change.source!.sessionId ||
+            episode.promptId !== change.source!.eventId ||
+            episode.at > prompt.trigger.scheduledAt
+          )
+            fail();
+          const turn = logs.slice(promptIndex + 1);
+          if (
+            turn.some(
+              (event) =>
+                event.type === 'message/user' ||
+                (event.type === 'turn/end' && event.promptId === prompt.eventId),
+            )
+          )
+            fail();
+          const call = turn.find(
+            (event) => event.type === 'tool/call' && event.callId === audit.callId,
+          );
+          if (call?.type !== 'tool/call' || call.name !== 'persona') fail();
+          const parsed = personaToolParametersSchema.safeParse(call.args);
+          if (!parsed.success || parsed.data.operation !== 'update') fail();
+          const args = parsed.data;
+          if (args.operation !== 'update') fail();
+          if (
+            !change.source ||
+            !isNightlyMemorySource(change.source.excerpt) ||
+            args.edits.length !== 1 ||
+            args.edits[0]?.oldText !== '' ||
+            args.edits[0]?.newText !== `- ${change.source.excerpt}`
+          )
+            fail();
+          if (
+            args.operation !== 'update' ||
+            args.expectedRevision !== change.expectedRevision ||
+            args.sourceQuote !== change.source!.excerpt ||
+            args.sourceEpisodeId !== audit.episodeId ||
+            args.sourceEventId !== change.source!.eventId ||
+            !Array.isArray(args.edits) ||
+            !args.edits.length ||
+            args.edits.some((edit) => edit.oldText !== '' || typeof edit.newText !== 'string')
+          )
+            fail();
+          let expected = prior?.content ?? '';
+          for (const edit of args.edits!)
+            expected += (expected && !expected.endsWith('\n') ? '\n' : '') + edit.newText;
+          if (expected !== change.content) fail();
+          const delivered = turn.some((event) => {
+            if (event.type !== 'tool/result' || event.isError) return false;
+            const read = turn.find(
+              (item) => item.type === 'tool/call' && item.callId === event.callId,
+            );
+            if (read?.type !== 'tool/call' || read.name !== 'recall') return false;
+            const result = recallResultSchema.safeParse(event.value);
+            return (
+              result.success &&
+              result.data.policyRevision === change.expectedPolicyRevision &&
+              result.data.episodeId === audit.episodeId &&
+              result.data.sources?.some(
+                (item) =>
+                  item.sessionId === change.source!.sessionId &&
+                  item.eventId === change.source!.eventId &&
+                  item.text.includes(change.source!.excerpt),
+              )
+            );
+          });
+          if (!delivered) fail();
         }
         signal?.throwIfAborted();
         const updatedAt = this.now().toISOString();

@@ -21,9 +21,11 @@ import type { Persona, PersonaHistory, TopicEpisode, RecallReceipt } from '@trin
 export function AssistantMemory({
   client,
   sessionId,
+  onOpenScheduled,
 }: {
   client: AcpClient;
   sessionId: string | null;
+  onOpenScheduled?: () => void;
 }): ReactElement {
   const { message } = App.useApp();
   const [persona, setPersona] = useState<Persona>({ content: '', revision: 0, updatedAt: null });
@@ -107,6 +109,11 @@ export function AssistantMemory({
   return (
     <section className="assistant-page">
       <Typography.Title level={2}>Memory</Typography.Title>
+      {onOpenScheduled && (
+        <Typography.Paragraph>
+          <Button onClick={onOpenScheduled}>View scheduled memory activity</Button>
+        </Typography.Paragraph>
+      )}
       <Typography.Paragraph type="secondary">
         Edit your personal facts and preferences as Markdown. This Persona is included in your
         personal chats; team tasks receive no personal memory.
@@ -114,6 +121,22 @@ export function AssistantMemory({
       {error && (
         <Alert type="error" message="Persona unavailable or not saved" description={error} />
       )}
+      {loaded && (
+        <Alert
+          type={persona.content ? 'success' : 'info'}
+          message={
+            persona.content
+              ? `Saved personal memory · revision ${persona.revision}`
+              : 'No personal facts are saved yet'
+          }
+          description={
+            persona.content
+              ? `Last saved: ${persona.updatedAt ? new Date(persona.updatedAt).toLocaleString() : 'unavailable'}. Expand versions below to inspect original sources. Memory use in this conversation is recorded separately.`
+              : 'Automatic memory saves stable facts when you state them in a personal conversation. You can also save Markdown here. Enable nightly consolidation in Scheduled tasks to process earlier conversations; review-only schedules produce proposals.'
+          }
+        />
+      )}
+
       <Flex gap="small" align="center" style={{ marginBottom: 16 }}>
         <Switch
           aria-label="Automatic personal memory"

@@ -662,3 +662,69 @@ Implemented shared structured rejection diagnostics, capture-bound export resour
 2026-11-15 workspace syntax/preview follow-up: CodeMirror's filename-based, lazy-loaded language catalog replaces the HTML/Markdown/JS/TS-only selector and adds JSON, YAML, TOML, Python, Java, Rust, Go, CSS and other catalog languages. Text/code previews use the read-only editor with search and language-supported folding; rendered Markdown/HTML and binary previews remain. Explicit Collapse all / Expand all controls are shared with editing. Prettify JSON is an undoable local draft edit, rejects invalid JSON/oversized output and retains number tokens, duplicate keys and escapes. All 299 Web tests pass; repository lint/typecheck and production Web build pass (existing large-chunk warning). A temporary browser fixture verified JSON token colors, formatting, collapse/expand and read-only JSON/YAML/TOML previews; the authenticated workspace route was exercised with a fake client in jsdom, not a live account. No deployment or guest update was performed.
 
 2026-11-15 JSON preview follow-up: Prettify JSON is also available in read-only previews. It formats only the local display, does not call the draft change handler or save the file, and drops the display override when source content/path changes. Editing retains its undoable draft formatting.
+
+### Operational memory and single-host scheduling — 2026-11-15
+
+Fixed originating Persona writes being disabled when normal server/worker execution
+guards were supplied; authenticated child actors remain unable to write. Added an
+explicit nightly `memory` preset through the existing scheduler, source-backed
+Persona tool and PostgreSQL transaction. Historical writes require current expanded
+original user evidence, occurrence/call provenance, ownership/settings/revision and
+removal/exclusion/suppression fences. They append one directly declared bounded
+English/Chinese statement verbatim; unsupported forms, inferred preferences and
+contradictions remain proposals. Review-only mode is unchanged. Both modes produce
+grouped digests and exclude their derived results from conversation indexing.
+Nightly recall is explicitly text-only, so unavailable historical attachment blobs
+cannot break text review. Denied skills no longer discover guest catalogs. Long
+prompt approval previews are bounded. Memory and Scheduled empty states distinguish
+actual saved profiles, enrollment and run evidence.
+
+Single-host deploy now includes the configured control worker, defaults the existing
+scheduling gate on (explicit false remains supported), validates its separate
+loopback health port, retires old scheduler writers before migration and checks
+reconciliation readiness. Saved-container start/stop/restart/status include the
+scheduler when enabled and fail before restart on missing configured services.
+Graceful deployment stops allow 60 seconds. No schema or guest image change.
+
+Validation: 1,765 tests passed (32 opt-in tests skipped); all 15 Node script tests,
+repository lint/typecheck and production Web build passed. Isolated PostgreSQL
+regressions cover source removal/exclusion/settings races, original-source history,
+new-conversation delivery, review/consolidation indexing exclusion and denied skill
+catalog access. Final opt-in configured-model acceptance passed consolidation,
+fresh-conversation recall, correction and forgetting with a missing-media fixture.
+Earlier live trials exposed repeated read-with-edit arguments and an unsupported
+language inference; clearer operation feedback and the verbatim declaration guard
+were added rather than treating deterministic tests as semantic proof.
+
+Deployed the matching six-container local stack and verified control/API/Web health
+and idempotent service startup. Enabled the active owner's daily 03:00
+Asia/Hong_Kong consolidation. The initial text-source run completed with a grouped,
+source-linked digest and explicit coverage/media limits. A valid user-declared fact
+was persisted. An unsupported inferred append from that trial was removed by an
+owner-locked, revision-checked transactional restoration of the preceding supported
+Persona; append-only versions remain, current revision is 3, and the original recall
+floor was preserved because this repaired an invalid inference rather than a user
+forget. Ordinary application correction/forget fences were not relaxed. Browser QA
+verified schedule availability and the three profile versions with original source
+metadata; its temporary credential profile was deleted.
+
+Topic labels in History remain lexical navigation suggestions; daily digest groups
+are model-generated. This does not certify exhaustive historical coverage, calibrated
+semantic clustering, universal natural-language extraction or production isolation.
+
+### Scheduled run navigation separation
+
+Scheduled executions are classified from durable trigger events, including existing
+runs and previous retry attempts. Recent, manual Tasks and related Work lists omit
+them. Scheduled now labels execution records Run history and opens their full
+owned timeline, with a Scheduled run heading and Back to Run history. Discuss this
+result prepares a linked Chat draft; Memory provides a scheduled activity link.
+Verification covers historical classification after later events, Recent capacity,
+and opening a completed execution from Run history.
+
+Validation: 29 focused UI/store tests passed, along with repository lint and
+workspace typecheck. The updated six-container stack deployed with API/control/Web
+readiness. Browser QA verified a completed run opens with its Scheduled run header,
+stays outside Recent, returns to Run history, and prepares a separate Chat draft
+without submitting it. The temporary browser credential profile and task browser
+were removed after validation.

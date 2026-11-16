@@ -2,7 +2,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   browserCdpEndpointSchema,
   sessionEventSchema,
@@ -729,4 +729,21 @@ it('retains loaded skill instructions after completed tool history is removed', 
     'answer',
   ]);
   expect(messages.some((message) => message.role === 'tool')).toBe(false);
+});
+
+it('does not contact a guest skill catalog when policy denies skills', async () => {
+  const catalog = {
+    list: vi.fn(async () => {
+      throw new Error('Guest must not be allocated');
+    }),
+    load: vi.fn(),
+    readResource: vi.fn(),
+  };
+  const store = new MemorySessionStore();
+  await new SkillRuntime(catalog, store).prepare({
+    sessionId: crypto.randomUUID(),
+    workspaceRoot: '/workspace',
+    policy: { onAsk: 'deny', tools: { skill: 'denied' }, allowWorkspaceInternalBash: false },
+  });
+  expect(catalog.list).not.toHaveBeenCalled();
 });

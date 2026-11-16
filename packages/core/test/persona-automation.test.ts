@@ -3,12 +3,16 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import {
   memorySearchTerms,
+  personaToolParametersSchema,
+  isNightlyMemorySource,
   type MemoryStorePort,
   type SessionMetaStore,
   type UserStore,
   type SessionMeta,
   type Persona,
   type PersonaChange,
+  type RunTurnOptions,
+  type TopicEpisode,
 } from '@trinity-harness/contracts';
 import {
   CoreAgentLoop,
@@ -61,10 +65,14 @@ async function fixture(autoSaveEnabled = true) {
       createdAt: at,
     }),
   };
-  const index = { history: async () => ({ episodes: [], nextBefore: null }), revise: vi.fn() };
+  const index = {
+    history: async () => ({ episodes: [], nextBefore: null }),
+    revise: vi.fn(),
+    evidence: vi.fn<(...args: unknown[]) => Promise<TopicEpisode | null>>(async () => null),
+  };
   const context = new PersonalContext(memory, index, store);
   const tools = new CoreToolRegistry(new FakeSandbox());
-  tools.register(createPersonaTool({ memory, metas, store, users }));
+  tools.register(createPersonaTool({ memory, metas, store, users, index }));
   const session = async (scope: 'personal' | 'team' = 'personal'): Promise<SessionMeta> => {
     const meta: SessionMeta = {
       id: randomUUID(),
@@ -90,7 +98,7 @@ async function fixture(autoSaveEnabled = true) {
     ]);
     return meta;
   };
-  const run = async (meta: SessionMeta, prompt: string, llm: FakeLLM) =>
+  const run = async (meta: SessionMeta, prompt: string, llm: FakeLLM, options?: RunTurnOptions) =>
     new CoreAgentLoop({
       llm,
       model: 'fake/model',
@@ -100,7 +108,12 @@ async function fixture(autoSaveEnabled = true) {
       personalContext: context,
       sessionMetas: metas,
       verification: true,
-    }).run(meta.id, prompt, { emit: () => undefined });
+    }).run(
+      meta.id,
+      prompt,
+      { emit: () => undefined },
+      { actor: userId, contextGuard: async () => undefined, ...options },
+    );
   return {
     store,
     memory,
@@ -108,6 +121,7 @@ async function fixture(autoSaveEnabled = true) {
     session,
     run,
     writes,
+    index,
     get persona() {
       return persona;
     },
@@ -440,4 +454,184 @@ it('rejects Persona writes originating from a nightly review even with a call jo
   );
   expect(result.isError).toBe(true);
   expect(f.writes).toHaveLength(0);
+});
+
+it('retains the external execution guard while enabling personal memory on normal turns', async () => {
+  const f = await fixture();
+  const meta = await f.session();
+  const guard = vi.fn(async () => {
+    throw new Error('access revoked');
+  });
+  await f.run(
+    meta,
+    'My name is Alex',
+    new FakeLLM(() =>
+      toolCallThenFinish('blocked', 'persona', {
+        operation: 'update',
+        expectedRevision: 0,
+        sourceQuote: 'My name is Alex',
+        edits: [{ oldText: '', newText: 'Alex' }],
+      }),
+    ),
+    { contextGuard: guard },
+  );
+  expect(guard).toHaveBeenCalled();
+  expect(f.writes).toHaveLength(0);
+});
+
+it('does not grant child actors personal-memory writes even with personal metadata', async () => {
+  const f = await fixture();
+  const meta = await f.session();
+  await f.run(
+    meta,
+    'My name is Alex',
+    new FakeLLM(
+      () =>
+        toolCallThenFinish('child-save', 'persona', {
+          operation: 'update',
+          expectedRevision: 0,
+          sourceQuote: 'My name is Alex',
+          edits: [{ oldText: '', newText: 'Alex' }],
+        }),
+      () => textChunks('Unavailable'),
+    ),
+    { actor: 'subagent:parent' },
+  );
+  expect(f.writes).toHaveLength(0);
+});
+
+it.each(['saved', 'no-read', 'excluded', 'disabled', 'rewrite'] as const)(
+  'nightly consolidation validates original evidence: %s',
+  async (scenario) => {
+    const f = await fixture(scenario !== 'disabled');
+    const original = await f.session();
+    await f.run(original, 'My name is Alex', new FakeLLM(() => textChunks('Hello Alex')));
+    const logs = await f.store.load(original.id);
+    const user = logs.find((event) => event.type === 'message/user')!;
+    const answerIndex = logs.findIndex(
+      (event) => event.type === 'message/assistant' && event.phase === 'final',
+    );
+    const episode: TopicEpisode = {
+      episodeId: user.eventId,
+      promptId: user.eventId,
+      sessionId: original.id,
+      fromSeq: logs.indexOf(user) + 1,
+      toSeq: logs.length,
+      answerSeq: answerIndex + 1,
+      at: user.at,
+      topic: 'Introduction',
+      request: 'My name is Alex',
+      outcome: 'Hello Alex',
+      excluded: scenario === 'excluded',
+      policyRevision: scenario === 'disabled' ? 1 : 0,
+    };
+    f.index.evidence.mockResolvedValue(episode);
+    f.tools.register({
+      name: 'recall',
+      description: 'Original source',
+      parameters: z.object({}),
+      effect: { kind: 'read', scope: 'reference' },
+      execute: async () => ({
+        isError: false,
+        value: {
+          episodeId: episode.episodeId,
+          policyRevision: scenario === 'disabled' ? 1 : 0,
+          sources: [
+            {
+              sessionId: original.id,
+              eventId: user.eventId,
+              seq: episode.fromSeq,
+              at: user.at,
+              from: 0,
+              to: 18,
+              text: 'My name is Alex',
+              totalCharacters: 15,
+              truncated: false,
+            },
+          ],
+        },
+      }),
+    });
+    const review = await f.session();
+    const promptId = randomUUID();
+    await f.store.append(review.id, [
+      {
+        type: 'message/user',
+        surfaceOp: 'append',
+        eventId: promptId,
+        at,
+        content: [{ kind: 'text', text: 'Consolidate earlier personal facts' }],
+        trigger: {
+          kind: 'schedule',
+          consolidation: 'memory',
+          scheduleId: randomUUID(),
+          revision: 1,
+          occurrenceId: randomUUID(),
+          scheduledAt: '2099-01-01T00:00:00.000Z',
+        },
+      },
+    ]);
+    const save = () =>
+      toolCallThenFinish('consolidate', 'persona', {
+        operation: 'update',
+        expectedRevision: scenario === 'disabled' ? 1 : 0,
+        sourceQuote: 'My name is Alex',
+        sourceEpisodeId: episode.episodeId,
+        sourceEventId: user.eventId,
+        edits: [
+          { oldText: scenario === 'rewrite' ? 'existing' : '', newText: '- My name is Alex' },
+        ],
+      });
+    const llm =
+      scenario === 'no-read'
+        ? new FakeLLM(save, () => textChunks('Done'))
+        : new FakeLLM(
+            () => toolCallThenFinish('read-source', 'recall', {}),
+            save,
+            () => textChunks('Done'),
+          );
+    await f.run(review, 'Consolidate earlier personal facts', llm, { promptSeq: 2 });
+    expect(
+      f.writes,
+      JSON.stringify(
+        (await f.store.load(review.id)).filter(
+          (event) => event.type === 'tool/result' || event.type === 'turn/end',
+        ),
+      ),
+    ).toHaveLength(scenario === 'saved' ? 1 : 0);
+    if (scenario === 'saved')
+      expect(f.writes[0]).toMatchObject({
+        source: { sessionId: original.id, eventId: user.eventId, excerpt: 'My name is Alex' },
+        consolidation: { sessionId: review.id, promptId, episodeId: episode.episodeId },
+      });
+  },
+);
+
+it('gives actionable no-effect feedback when a model submits edits as a read', () => {
+  const result = personaToolParametersSchema.safeParse({
+    operation: 'read',
+    expectedRevision: 2,
+    sourceQuote: 'Forget my name',
+    edits: [{ oldText: 'Name', newText: '' }],
+  });
+  expect(result.success).toBe(false);
+  if (!result.success) expect(result.error.issues[0]?.message).toContain('set operation to update');
+});
+
+it('nightly source admission rejects task wording and behavioral inference', () => {
+  for (const text of [
+    'My name is Alex',
+    'I prefer concise answers',
+    '我才是真正的川川',
+    '我习惯用中文交流',
+  ])
+    expect(isNightlyMemorySource(text)).toBe(true);
+  for (const text of [
+    '帮我用浏览器打开这个页面',
+    'Translate this into Chinese',
+    'Most earlier messages were in Chinese',
+    'I am asking you to review this book',
+    'source',
+  ])
+    expect(isNightlyMemorySource(text)).toBe(false);
 });

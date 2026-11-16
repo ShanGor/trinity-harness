@@ -44,6 +44,7 @@ it('edits Markdown, preserves draft after conflict and reloads only explicitly',
     );
     const textarea = container.querySelector('textarea')!;
     expect(textarea.value).toBe(persona.content);
+    expect(container.textContent).toContain('Saved personal memory · revision 1');
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(
         textarea,

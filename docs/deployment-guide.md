@@ -186,7 +186,7 @@ repository root. Use `./scripts/podman-services.sh --help` for usage.
 
 | Task                                             | Command                                    | Behavior                                                                   |
 | ------------------------------------------------ | ------------------------------------------ | -------------------------------------------------------------------------- |
-| Initial deployment or updated code/configuration | `./scripts/deploy-podman.sh`               | Build images, apply migrations and replace all five containers             |
+| Initial deployment or updated code/configuration | `./scripts/deploy-podman.sh`               | Build images, apply migrations and replace all configured containers       |
 | Start an existing deployment                     | `./scripts/podman-services.sh start`       | Start saved containers and check runtime/API/web readiness                 |
 | Stop application services                        | `./scripts/podman-services.sh stop`        | Stop containers in reverse dependency order, retaining them and their data |
 | Restart application services                     | `./scripts/podman-services.sh restart`     | Stop, then start the same containers with readiness checks                 |
@@ -201,7 +201,7 @@ host or guest lifecycle separately; they are not application restart commands.
 
 Service-only commands do not build images, run migrations, pull images or replace
 containers. Start is safe for already-running containers. Start/restart require
-all five containers to exist and validate saved configuration before proceeding;
+all configured containers to exist and validate saved configuration before proceeding;
 if one is missing, use the full deployment command. Stop tolerates missing or
 already-stopped containers. It allows 60 seconds per container for graceful
 shutdown before Podman's forced stop. Stop/restart interrupt active application
@@ -218,20 +218,28 @@ For older containers created before the web-port label was added, the default is
 readiness check only, not the gateway's listening port. Status reports process
 state, not application or guest health.
 
-These controls cover the five application containers only. PostgreSQL and Redis
+These controls cover the configured application containers only. PostgreSQL and Redis
 must already be running under their host supervisors. Start/restart ensure the
 installed Node Agent is active using the same polkit path as deployment, but do
 not restart it. Stop leaves it running. None of these service commands stop,
-restart or upgrade guest VMs or host runtimes. The optional control-worker is not
-part of this five-container packaging; these scripts do not enable scheduling.
+restart or upgrade guest VMs or host runtimes. Scheduling is enabled by default by the single-host deployment script. It starts
+`trinity-control-worker` with matching server/worker configuration, on loopback
+`CONTROL_WORKER_PORT` (default 3020), and requires its `/health` reconciliation
+check to pass. Set the existing `SCHEDULING_ENABLED=false` explicitly to omit it.
+Service-only commands use the saved server gate, require the scheduler when enabled,
+start it after the agent worker and stop it before the worker. Missing configured
+containers fail before restart stops anything. The full deployment stops/removes
+any old scheduler before migrations and before starting matching readers; it never
+runs old and new scheduling writers together. A disabled deployment also retires
+an old scheduler.
 
 ### Build and deployment prerequisites
 
 Run `./scripts/deploy-podman.sh` from this checkout. It builds the frontend,
 packages this checkout's installed Linux dependencies, builds Bifrost Bridge from
-`/home/sam/sources/Bifrost-Bridge`, applies PostgreSQL migrations, and starts five
+`/home/sam/sources/Bifrost-Bridge`, applies PostgreSQL migrations, and starts six
 rootless containers: `trinity-browser-runtime`, `trinity-server`,
-`trinity-agent-worker`, `trinity-audit-consumer`, and `trinity-gateway`.
+`trinity-agent-worker`, `trinity-audit-consumer`, `trinity-control-worker`, and `trinity-gateway`.
 Prerequisites are Podman, Node.js, pnpm with installed checkout dependencies,
 Cargo, curl, systemd, host PostgreSQL/Redis, and a provisioned Firecracker node.
 This single-host command requires `EXECUTION_DRIVER=firecracker` and
@@ -261,7 +269,7 @@ temporary private environment file. This trusted single-host deployment uses hos
 networking and mounts the absolute `WORKSPACE_ROOT` at the same path with the
 invoking user's identity. Bifrost serves the built SPA and routes `/api` and `/acp`
 to the API. The gateway listens on `0.0.0.0:8080`; the API stays on loopback port 3100. Override `WEB_PORT`, `API_PORT`, `ENV_FILE`, or `BIFROST_DIR` in the invocation.
-Re-running replaces the five containers without deleting workspace or database
+Re-running replaces the configured containers without deleting workspace or database
 data. Existing development consumers are independent and may consume the same
 queues; stop those through their original supervisor when retiring development.
 Use `podman logs trinity-browser-runtime` (or the other container names) for
@@ -303,3 +311,39 @@ The presentation extension preserves bounded computed styles and safe SVG shapes
 Browser `export_markdown` requires a committed rendered `captureId`, writes HTML/media/manifest files, then reads saved `content.html` through the session Sandbox and converts offline with bundled Turndown/GFM. Conversion uses a cancellable worker with input/output, memory and time limits. There is no native converter binary to install. `export_capture` saves HTML/media without conversion.
 
 Guest preparation snapshots installed Node dependencies, including Turndown/GFM; the image builder checks JavaScript conversion, and real guest acceptance checks saved HTML reads and conversion. Capture still requires the matching guest application and patched Zendriver. Image replacement requires maintenance/confirmed VM shutdown, rollback preservation and fresh-generation owner-route acceptance.
+
+### Personal memory and nightly consolidation
+
+Personal facts use the source-backed `persona` tool and PostgreSQL revision history.
+Normal execution guards remain active during writes; child actors cannot write.
+Memory shows whether a profile has ever been saved, its last revision and source
+history, and conversation receipts show actual delivered context. An empty profile
+must not be presented as evidence of successful memory.
+
+After deployment, enable **Nightly memory consolidation** in Scheduled tasks with
+an owned personal Work source and account timezone (03:00 is the preset). This
+explicit delegation groups each previous local day's conversations into a digest
+and may append missing stable user facts when automatic memory is enabled.
+Original user evidence must first be expanded using recall. Owner, source removal,
+exclusion, suppression, current memory revisions, originating call and occurrence
+are rechecked before transactional persistence. Existing facts are never rewritten
+by historical consolidation; conflicts remain review proposals. Review-only mode
+continues to prohibit Persona writes. Both modes expose results in Updates, retain
+the seven-local-day catch-up window and never automatically retry runs that called
+Persona. No schema migration or guest image change is required for this increment.
+Enable schedules per owner; deployment does not silently enroll every account.
+
+Nightly review and consolidation source expansion is text-only, explicitly reporting
+`attachmentsOmitted`; a missing historical image/file blob cannot prevent a text
+digest or text-supported memory save. Ordinary recall retains optional original
+media delivery and supports explicit `includeAttachments=false`. Digests must state
+that media was not inspected and must not infer facts from it. Denied skill policies
+skip catalog discovery entirely, so memory-only tasks do not require guest startup.
+Prompt approval previews are bounded before both durable and live delivery.
+
+Nightly automatic writes additionally require a bounded direct English/Chinese
+personal declaration and preserve its exact original wording as one appended bullet.
+Behavioral inferences (including preferred reply language inferred from message
+language), task wording and unsupported declaration forms remain proposals. This
+is conservative source admission, not semantic truth/completeness certification;
+foreground source-backed edits and manual Markdown editing remain available.
