@@ -588,6 +588,8 @@ GET  /acp/stream?sessionId=<id>[&afterSeq=<n>]
 
 Both inline and distributed SSE flush a `: connected` comment after their subscriptions are ready. An empty or audit-only event log must not make initial HTTP connection completion wait for the heartbeat; private audit records need no model-facing wire frame.
 
+The server relays honor Node's writable backpressure with a per-connection pending-frame cap of 256 KiB. Heartbeats are skipped while the response is blocked; if real frames exceed the cap, the server closes that SSE connection and lets the client resume from its last delivered sequence/cursor. Durable events replay from PostgreSQL; transient live deltas may be skipped on a slow or reconnecting client, and the committed event remains authoritative.
+
 **答案：是的，SSE chunk 必须携带顺序 ID——而我们已经免费拥有它。**
 
 事件溯源日志中的 `seq`（见 §7）就是全局单调序号。SSE 直接复用它：

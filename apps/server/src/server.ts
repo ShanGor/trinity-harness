@@ -715,6 +715,82 @@ async function* pcmChunks(
   }
 }
 
+const SSE_PENDING_LIMIT_BYTES = 256 * 1024;
+
+interface SseWriter {
+  write(frame: string, options?: { bestEffort?: boolean }): void;
+  dispose(): void;
+}
+
+/**
+ * Keep slow SSE clients from growing an unbounded ServerResponse buffer. The
+ * response itself provides backpressure; this small queue absorbs short
+ * bursts, then closes the stream so durable event clients can reconnect from
+ * their last delivered sequence.
+ */
+function createSseWriter(raw: FastifyReply['raw'], onSlowConsumer: () => void): SseWriter {
+  let pending: string[] = [];
+  let pendingBytes = 0;
+  let blocked = false;
+  let stopped = false;
+
+  const stop = (slowConsumer = false): void => {
+    if (stopped) return;
+    stopped = true;
+    pending = [];
+    pendingBytes = 0;
+    raw.off('drain', flush);
+    if (slowConsumer) {
+      onSlowConsumer();
+      raw.destroy();
+    }
+  };
+
+  const flush = (): void => {
+    if (stopped) return;
+    if (raw.destroyed || raw.writableEnded) {
+      stop();
+      return;
+    }
+    blocked = false;
+    while (pending.length > 0) {
+      const frame = pending.shift()!;
+      pendingBytes -= Buffer.byteLength(frame);
+      if (!raw.write(frame)) {
+        blocked = true;
+        return;
+      }
+    }
+  };
+
+  raw.on('drain', flush);
+  return {
+    write(frame, options) {
+      if (stopped || raw.destroyed || raw.writableEnded) {
+        stop();
+        return;
+      }
+      if (blocked) {
+        // Heartbeats are only useful when they reach the client. Skip them
+        // while real frames are already waiting for the socket to drain.
+        if (options?.bestEffort) return;
+        const bytes = Buffer.byteLength(frame);
+        if (pendingBytes + bytes > SSE_PENDING_LIMIT_BYTES) {
+          stop(true);
+          return;
+        }
+        pending.push(frame);
+        pendingBytes += bytes;
+        return;
+      }
+      if (!raw.write(frame)) blocked = true;
+    },
+    dispose() {
+      stop();
+    },
+  };
+}
+
 /**
  * HTTP + SSE surface. Composition-root input is fully injected: M1-style
  * inline mode (createLoop) and M2 distributed mode (queue + eventReader +
@@ -3845,21 +3921,39 @@ export async function buildServer(
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
     });
+    let closed = false;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let readerHandle: ReturnType<SessionEventReader['open']> | null = null;
+    const cleanup: Array<() => void> = [];
     const sendLine = (line: string): void => {
-      reply.raw.write(`data: ${line}\n\n`);
+      writer.write(`data: ${line}\n\n`);
     };
     const senders = acpSenders.get(sessionId) ?? new Set();
     senders.add(sendLine);
     acpSenders.set(sessionId, senders);
 
+    function close(): void {
+      if (closed) return;
+      closed = true;
+      if (heartbeat !== undefined) clearInterval(heartbeat);
+      writer.dispose();
+      for (const fn of cleanup) fn();
+      readerHandle?.dispose();
+      senders.delete(sendLine);
+      if (senders.size === 0) acpSenders.delete(sessionId);
+      if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end();
+    }
+    const writer = createSseWriter(reply.raw, close);
+    req.raw.once('close', close);
+    reply.raw.once('close', close);
+
     const afterSeq = query.data.afterSeq ?? 0;
-    let readerHandle: ReturnType<SessionEventReader['open']> | null = null;
-    const cleanup: Array<() => void> = [];
 
     if (deps.eventReader && deps.queue) {
       const reader = deps.eventReader;
       try {
         const firstRetained = await reader.firstRetainedSeq(sessionId);
+        if (closed) return;
         const fillTo = firstRetained !== null ? firstRetained - 1 : undefined;
         const entries = await deps.store.loadRange(sessionId, {
           afterSeq,
@@ -3869,16 +3963,19 @@ export async function buildServer(
           const wire = logEventToServerEvent(sessionId, event);
           if (!wire) continue;
           const line = toAcpLine(sessionId, wire);
-          if (line) reply.raw.write(`id: ${seq}\ndata: ${line}\n\n`);
+          if (line) writer?.write(`id: ${seq}\ndata: ${line}\n\n`);
+          if (closed) return;
         }
+        if (closed) return;
         const cursor = entries.length > 0 ? entries[entries.length - 1]!.seq : afterSeq;
         readerHandle = reader.open(sessionId, cursor, ({ seq, event }) => {
           const wire = logEventToServerEvent(sessionId, event);
           if (!wire) return;
           const line = toAcpLine(sessionId, wire);
-          if (line) reply.raw.write(`id: ${seq}\ndata: ${line}\n\n`);
+          if (line) writer?.write(`id: ${seq}\ndata: ${line}\n\n`);
         });
         await readerHandle.started;
+        if (closed) return;
       } catch (err) {
         sendLine(
           JSON.stringify({
@@ -3907,28 +4004,24 @@ export async function buildServer(
       const line = toAcpLine(sessionId, event);
       if (line) sendLine(line);
     };
-    const liveSet = liveSubs.get(sessionId) ?? new Set();
-    liveSet.add(liveListener);
-    liveSubs.set(sessionId, liveSet);
-    cleanup.push(() => liveSubs.get(sessionId)?.delete(liveListener));
+    if (!closed) {
+      const liveSet = liveSubs.get(sessionId) ?? new Set();
+      liveSet.add(liveListener);
+      liveSubs.set(sessionId, liveSet);
+      cleanup.push(() => liveSubs.get(sessionId)?.delete(liveListener));
+    }
 
     // Human approval requests reach ACP clients through the DURABLE log relay
     // (approval/requested → session/request_permission in toAcpLine); the
     // Pub/Sub hub stays the private request/response channel for the worker.
 
-    const heartbeat = setInterval(() => reply.raw.write(': ping\n\n'), 15_000);
-    const close = (): void => {
-      clearInterval(heartbeat);
-      for (const fn of cleanup) fn();
-      readerHandle?.dispose();
-      senders.delete(sendLine);
-      if (senders.size === 0) acpSenders.delete(sessionId);
-      reply.raw.end();
-    };
-    req.raw.on('close', close);
-    await new Promise<void>((resolve) => {
-      reply.raw.on('close', resolve);
-    });
+    if (!closed) {
+      heartbeat = setInterval(() => writer?.write(': ping\n\n', { bestEffort: true }), 15_000);
+    }
+    if (!closed)
+      await new Promise<void>((resolve) => {
+        reply.raw.once('close', resolve);
+      });
   });
 
   const jsonRpcError = (id: unknown, code: number, message: string): unknown => ({
@@ -4323,12 +4416,29 @@ export async function buildServer(
       'x-accel-buffering': 'no',
     });
 
+    let closed = false;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let readerHandle: ReturnType<SessionEventReader['open']> | null = null;
+    let disposeLive: (() => void) | undefined;
+    function cleanup(): void {
+      if (closed) return;
+      closed = true;
+      if (heartbeat !== undefined) clearInterval(heartbeat);
+      writer.dispose();
+      disposeLive?.();
+      readerHandle?.dispose();
+      if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end();
+    }
+    const writer = createSseWriter(reply.raw, cleanup);
+    req.raw.once('close', cleanup);
+    reply.raw.once('close', cleanup);
+
     const send = (event: ServerEvent): void => {
-      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      writer.write(`data: ${JSON.stringify(event)}\n\n`);
     };
     const sendWithId = (seq: number, event: ServerEvent): void => {
       // SSE `id:` = session_events.seq (three-layer alignment, §11.3).
-      reply.raw.write(`id: ${seq}\ndata: ${JSON.stringify(event)}\n\n`);
+      writer.write(`id: ${seq}\ndata: ${JSON.stringify(event)}\n\n`);
     };
 
     const query = eventsQuerySchema.safeParse(req.query);
@@ -4340,14 +4450,12 @@ export async function buildServer(
           ? headerSeq
           : 0;
 
-    let readerHandle: ReturnType<SessionEventReader['open']> | null = null;
-    const cleanupRefs: { dispose?: () => void } = {};
-
-    if (deps.eventReader && deps.queue) {
+    if (!closed && deps.eventReader && deps.queue) {
       // Distributed mode: PG gap-fill up to the retained window, then live.
       const reader = deps.eventReader;
       try {
         const firstRetained = await reader.firstRetainedSeq(sessionId);
+        if (closed) return;
         const fillTo = firstRetained !== null ? firstRetained - 1 : undefined;
         const entries = await deps.store.loadRange(sessionId, {
           afterSeq,
@@ -4356,7 +4464,9 @@ export async function buildServer(
         for (const { seq, event } of entries) {
           const wire = logEventToServerEvent(sessionId, event);
           if (wire) sendWithId(seq, serverEventSchema.parse(wire));
+          if (closed) return;
         }
+        if (closed) return;
         const cursor = entries.length > 0 ? entries[entries.length - 1]!.seq : afterSeq;
         readerHandle = reader.open(sessionId, cursor, ({ seq, event }) => {
           const wire = logEventToServerEvent(sessionId, event);
@@ -4372,23 +4482,23 @@ export async function buildServer(
       }
 
       // Ephemeral live deltas (Pub/Sub fan-out registered at build time).
-      if (deps.liveEvents) {
+      if (!closed && deps.liveEvents) {
         const liveListener = (event: ServerEvent): void => send(event);
         const set = liveSubs.get(sessionId) ?? new Set();
         set.add(liveListener);
         liveSubs.set(sessionId, set);
-        cleanupRefs.dispose = () => {
+        disposeLive = () => {
           liveSubs.get(sessionId)?.delete(liveListener);
         };
       }
       // Audit-only log entries need not produce wire frames. Flush readiness
       // after both durable and live subscriptions are installed.
-      reply.raw.write(': connected\n\n');
-    } else {
-      reply.raw.write(': connected\n\n');
+      if (closed) return;
+      writer?.write(': connected\n\n');
+    } else if (!closed) {
+      writer?.write(': connected\n\n');
       // Inline execution uses the same durable replay cursor as workers.
       let cursor = afterSeq;
-      let closed = false;
       let pending = Promise.resolve();
       const relay = (live?: ServerEvent, failure?: ServerEvent): void => {
         pending = pending
@@ -4412,11 +4522,11 @@ export async function buildServer(
             // Runner failures may have no durable terminal event. Reset inherited
             // EventSource IDs so the client does not discard this notification.
             if (failure && !errorDelivered && !closed)
-              reply.raw.write(`id:\ndata: ${JSON.stringify(failure)}\n\n`);
+              writer?.write(`id:\ndata: ${JSON.stringify(failure)}\n\n`);
           })
           .catch((err: unknown) => {
             if (!closed)
-              reply.raw.write(
+              writer?.write(
                 `id:\ndata: ${JSON.stringify({
                   type: 'error',
                   sessionId,
@@ -4436,25 +4546,20 @@ export async function buildServer(
       listeners.add(listener);
       subscribers.set(sessionId, listeners);
       relay();
-      cleanupRefs.dispose = () => {
-        closed = true;
+      disposeLive = () => {
         subscribers.get(sessionId)?.delete(listener);
       };
     }
 
     // Heartbeat so clients can distinguish "idle" from "dead" (design.md §11.3).
-    const heartbeat = setInterval(() => reply.raw.write(': ping\n\n'), 15_000);
-    const cleanup = (): void => {
-      clearInterval(heartbeat);
-      cleanupRefs.dispose?.();
-      readerHandle?.dispose();
-      reply.raw.end();
-    };
-    req.raw.on('close', cleanup);
+    if (!closed) {
+      heartbeat = setInterval(() => writer?.write(': ping\n\n', { bestEffort: true }), 15_000);
+    }
 
-    await new Promise<void>((resolve) => {
-      reply.raw.on('close', resolve);
-    });
+    if (!closed)
+      await new Promise<void>((resolve) => {
+        reply.raw.once('close', resolve);
+      });
   });
 
   await app.ready();
