@@ -73,6 +73,12 @@ Failed/cancelled streams retain usage received before termination; requests that
 
 The existing `model_usage` table remains the tenant token-quota projection. Session accounting is durable in `session_events`, requires no database migration, and survives compaction because the accounting projection reads the complete event log. Auxiliary model calls are included in tenant token quotas; subagent records are forwarded to the parent log without recording the same tokens twice in the quota table.
 
+## Planned tenant configuration and fallback attribution (2026-11-17)
+
+[Design §5.4](design.md#54-tenant-llm-configuration-and-routing-2026-11-17-target-design) and the [implementation plan](improvement-plan-2026-11-17.md) propose web-managed connections, deployments and routing profiles. This is not delivered by the existing accounting implementation. Keep the fixed `config/models.yaml` as the sole price source initially; the administration UI does not edit rates. A deployment must reference its explicit catalog key/version, independently of its protocol/upstream model ID, so distinct endpoints or billing arrangements are not conflated.
+
+Every actual attempt, including retries, fallback, compaction and child calls, must retain actual connection/deployment/model attribution and its selected rate snapshot. Historical events without new identifiers remain readable and must not be assigned invented deployment identities. A model change requires new admission estimates and cost reservations within the existing shared ceilings; unknown required rates block cost-bounded dispatch. Missing provider usage remains unknown even when the failed request returned no output. Configuration rollback never reprices history. Synthetic connection tests must enforce tenant quotas and record available consumption separately from conversation totals. Schema additions for the proposed configuration/attribution feature follow the ordinary migration workflow; the no-migration statement above describes current accounting only.
+
 ## Cache-aware Main context
 
 The optional stable Main context path (`CONTEXT_SEGMENTS_ENABLED`) changes input

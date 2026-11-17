@@ -6,6 +6,8 @@ Revision: Chat is a fully capable ad-hoc task with an automatic workspace; Task 
 
 This document records the approved product direction and supporting architecture. The implementation now includes durable session kinds, Main chat, independent conversations/work, history and scoped memory. `docs/design.md` §11.5/§21 describes the runtime and persistence changes. Detailed research and future capabilities below remain design guidance where §13 identifies a narrower initial implementation.
 
+2026-11-17 requirements revision: §14 defines the agreed Admin / Expert / Member roles and web-managed LLM configuration. These are target requirements, not delivered behavior. Implementation sequencing and acceptance are in [the improvement plan](improvement-plan-2026-11-17.md); current roles remain `admin/developer/viewer` until the migration is implemented.
+
 ## 1. Recommended product model
 
 Trinity opens into **Main chat**, an ongoing personal conversation with the assistant. It remains the same conversation across days. Topic episodes organize its history, dates provide an alternate browsing view, and scoped durable memory retains relevant facts and decisions without resetting the conversation.
@@ -540,3 +542,57 @@ Additions no longer suppress unrelated old history; destructive edits retain a c
 ### Nightly review update (2026-11-09)
 
 Design §21.9 supersedes the earlier no-digest/browser-only timezone notes: optional Nightly memory review runs through existing schedules and delivers topic-grouped daily digests and source-backed memory proposals in Updates. Review outputs do not enter ordinary recall indexing and cannot write Persona; acceptance uses Memory settings. Account timezone persistence and loaded-page topic filters/counts are implemented. This is a review workflow, not automatic background Persona rewriting. Semantic classifier/embedding services and broad memory-quality evaluation remain undelivered.
+
+## 14. Roles and web-managed LLM configuration (2026-11-17 requirements)
+
+### 14.1 Product roles
+
+The primary hierarchy is **Admin > Expert > Member**. Member is the user-facing name for the agreed Normal tier. Admin inherits Expert controls; Expert inherits Member capabilities. Preserve Viewer as a separate restricted read-only role for existing accounts and deployments needing it. Role inheritance concerns permitted operations, not access to other users' data. Preserve existing session ownership, team membership, tenant scope and specifically authorized administrative access; Expert gains no additional access to private conversations or workspaces.
+
+| Capability                                                                      | Member | Expert | Admin | Viewer       |
+| ------------------------------------------------------------------------------- | ------ | ------ | ----- | ------------ |
+| Run Main, Chat and Work with configured tools and ordinary approvals            | Yes    | Yes    | Yes   | No           |
+| Select an approved model profile for an accessible writable session             | Yes    | Yes    | Yes   | No           |
+| Use the profile's approved automatic fallback                                   | Yes    | Yes    | Yes   | No execution |
+| Tune reasoning/output settings within administrator limits                      | No     | Yes    | Yes   | No           |
+| Set session-specific fallback order or pin an approved deployment where allowed | No     | Yes    | Yes   | No           |
+| Manage provider endpoints, credentials and model deployments                    | No     | No     | Yes   | No           |
+| Publish profiles, tenant defaults, permitted destinations and emergency routing | No     | No     | Yes   | No           |
+| Manage tenant users, roles, quotas and configuration audit                      | No     | No     | Yes   | No           |
+| See actual model/fallback information in an already accessible conversation     | Yes    | Yes    | Yes   | Yes          |
+| Retrieve a stored provider secret                                               | No     | No     | No    | No           |
+
+Member receives a complete assistant experience. Expert adds controls over the user's authorized sessions, not stronger tool grants, higher quotas, arbitrary endpoints or credential access. Advanced controls live in an expandable panel; ordinary users should not need to understand provider protocols. Role changes must be enforced by the server and background execution, including already queued work. Revoking Expert invalidates Expert-only overrides before the next model request; show the required reset rather than silently retaining privileged settings. No role bypasses tool approvals, sensitive-file gates, data exclusions or tenant boundaries.
+
+New ordinary users default to Member. Migrate existing Developer accounts to Member, Admin to Admin and Viewer to Viewer; no automatic Expert promotion or Viewer upgrade. Preserve team `owner/member` roles independently of account roles. The migration must account for old authentication tokens and every server, worker, scheduler and Node Agent reader before emitting new role values.
+
+### 14.2 Configuration and operator experience
+
+An Admin can manage LLM configuration from Account → Administration → AI configuration without editing `.env`, rebuilding images or restarting application services for ordinary connection/model/routing changes. Deploying a new SDK adapter or changing infrastructure secrets can still require an operator release. Configuration is tenant-scoped; tenant Admin is not a platform-wide operator.
+
+Separate three concepts:
+
+- **Provider connection:** named endpoint, supported protocol adapter, write-only credential reference and administrative availability. Multiple connections may use the same protocol/model through different vendors or accounts.
+- **Model deployment:** a model ID on one connection, declared context/output limits, supported inputs/tools, provider-specific settings and reference to the fixed pricing catalog. Protocol compatibility alone does not prove capability or model identity.
+- **Routing profile:** a named primary deployment, ordered approved backups, mode (manual, automatic or pinned), parameter bounds and permitted data destinations. Members choose profiles; Experts may override within the profile's bounds.
+
+Provide Connections, Routing and Activity views. Show draft versus published configuration, revision conflicts, timestamped test results and separate administrative/observed health states. Connection tests use bounded synthetic input and report which capabilities were tested; they never use private conversation content. Explain that tests incur provider requests and may cost money. Missing health data is Unknown, never Healthy.
+
+Publishing and emergency switching show the affected profiles, any model/destination change and the next-request application boundary. An Admin can switch an affected profile to a preconfigured backup quickly, then restore it explicitly. A default-profile change affects newly bound sessions; editing a bound profile affects its future eligible requests. Pinned sessions keep their explicit selection unless an Admin disables that deployment, in which case they stop with an actionable explanation. Opening settings must preserve composer drafts, focus, history references and active streams.
+
+### 14.3 Fallback and transparency
+
+Automatic fallback uses only administrator-approved compatible destinations. Before dispatch, check tools, attachments, context/output size, provider-specific history, data-location restrictions, current authorization and task/tenant budgets. Never drop input, tools or constraints merely to fit a backup. An unavailable compatible backup produces a clear failure. Approval of cross-provider data transfer belongs to profile configuration; the application must not invent new destinations during an outage.
+
+First automatic-fallback scope is failed model requests with no output, including no reasoning or tool-call output. Preserve bounded same-deployment continuation for partial streams; changing models after partial output remains deferred. Never replay tool actions, execute incomplete calls or restart a completed task to repair an outage. Cancellation, policy denial and safety refusal do not trigger fallback.
+
+Users see a concise routing notice when a fallback changes the executing deployment, with details available in execution history. Preserve one assistant response per prompt. Record the actual connection/model and available usage for every attempt without exposing keys, private endpoint details or raw provider errors. Historical usage and prices remain immutable; unknown cost remains explicitly unavailable.
+
+### 14.4 Acceptance outcomes
+
+1. A Member completes normal Chat/Work and selects an approved profile, but cannot alter shared configuration through either UI or direct API calls.
+2. An Expert adjusts permitted settings for an authorized session; exceeding bounds, changing another user's session or supplying an unapproved destination is rejected.
+3. An Admin tests and publishes a backup, previews impact and switches routing without service restart. Existing streams/tools continue; the next eligible model request uses the published revision.
+4. An outage before model output can use an approved compatible backup under the same budgets. Partial streams, cancellation and unknown tool effects never cause automatic cross-model replay.
+5. Concurrent edits, cross-tenant IDs, revoked roles, stale tokens and unavailable authorization/secret stores fail closed. Viewer remains read-only after migration.
+6. Reconnect/restart preserves routing decisions, retry counters and usage attribution; a disabled credential or deployment cannot be resurrected by rollback or stale environment settings.

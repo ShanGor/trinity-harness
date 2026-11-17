@@ -4,6 +4,21 @@
 > Walk top to bottom before declaring a release ready; record evidence
 > (command output / screenshot) next to each item.
 
+## Account roles and LLM configuration (planned)
+
+Requirements/design preparation only; no implementation or deployment is certified. Follow [the 2026-11-17 plan](improvement-plan-2026-11-17.md).
+
+- [ ] Deploy compatible role/event/configuration readers across server, worker, scheduler, Node Agent and clients before target writers. Retire old writers; review/apply migrations and verify Developer→Member, Viewer retention, explicit Expert assignment, last-Admin protection and bounded token refresh/current-role checks.
+- [ ] Verify tenant/session access and capability matrix through direct API and background execution, including downgraded roles, stale tokens and invalid Expert overrides. No role bypasses tool approvals or grants additional private-data scope implicitly.
+- [ ] Configure production envelope encryption/secret manager, rotation/revocation and private backup/retention policy. Verify write-only secrets never appear in responses, browser persistence, events, model artifacts, telemetry, guest environments or raw SDK errors.
+- [ ] Enforce operator endpoint policy through validation, DNS/connect and redirects for both inference and synthetic tests; test private/control/metadata rejection and explicitly allowed internal gateways.
+- [ ] Exercise CAS/idempotent draft/publication/source activation, durable audit recovery, revoked-reference rollback, missed Redis invalidation and authoritative per-request refresh across multiple workers. Once activated, database/key-service failure must not fall back to `.env`.
+- [ ] Reconcile legacy session models and verify default versus bound-profile/pinned semantics, current availability/revocation and purpose-specific compaction/child routing. Verify manual emergency switching without restart or interruption/repetition of tools.
+- [ ] Verify pre-dispatch route receipt, per-attempt deployment/pricing attribution, quota reservations, unknown usage and cost-bounded rejection for missing prices. Synthetic tests are metered separately from conversation totals.
+- [ ] Before enabling automatic profiles, pass no-output eligibility, partial-stream/refusal/cancellation exclusions, provider timing, shared retry/fallback budgets, crash/torn-tail replay and no-effect-repetition regressions. Shared circuit/probe and automatic failback acceptance remain separate later gates.
+- [ ] Complete jsdom/fake ACP and agent-browser UI acceptance for role controls, advanced limits, revision conflicts, secret fields, mobile layouts and preserved composer/focus/history/streams. Run implementation tests/lint/typecheck; record opt-in provider and controlled multi-worker outage results separately.
+- [ ] Rehearse configuration rollback as a new validated revision and application rollback with compatible binaries; record backups and role/token/source transition boundaries. Do not restore revoked credentials or run old binaries after new roles/configuration activation.
+
 ## HTML-first Markdown export rollout
 
 - [x] Materialize rendered HTML/media through Sandbox, then read saved HTML and convert with bundled Turndown/GFM. Captured media uses local paths with original URL/hash provenance. Cancellation, source revocation and conversion failures retain HTML without partial Markdown or recapture.

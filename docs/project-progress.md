@@ -5,6 +5,13 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Account roles and LLM configuration — 2026-11-17
+
+- [x] Revised product requirements and target architecture for Admin > Expert > Member (Normal), retaining restricted Viewer, tenant-scoped web-managed provider connections/deployments/profiles and bounded outage fallback. Added [implementation plan](improvement-plan-2026-11-17.md) with role/token/source migration, secret/network policy, publication/replay semantics and phased acceptance.
+- [ ] Implement canonical roles/capabilities and migrate Developer to Member without granting Expert or upgrading Viewer. Align token/current-role checks, server/worker/scheduler/Node Agent readers and bounded session overrides.
+- [ ] Implement encrypted write-only credential management, reviewed endpoint policy, versioned publication/audit and shared runtime resolution; deliver manual backup switching before no-output automatic fallback and shared circuit breaking.
+- [ ] Complete deterministic, distributed and explicitly opted-in real-provider/browser acceptance plus the [release gates](production-checklist.md#account-roles-and-llm-configuration-planned). Current runtime remains environment-configured with `admin/developer/viewer`; this documentation change performed no code changes, migrations or deployment.
+
 ### Runtime clock suffix — 2026-11-15
 
 - [x] Added a labeled UTC/local-time/IANA-zone control block at the end of every assistant request, including child and recovery/final requests. Inline and worker roots read the authenticated personal owner's account timezone; team, absent, invalid or unavailable metadata uses explicit UTC. Compaction keeps its separate purpose-specific input.

@@ -47,6 +47,7 @@ The linked documents contain detailed invariants, deployment steps and acceptanc
 | Firecracker, guest routing, host networking and releases    | [deploy/firecracker/README.md](deploy/firecracker/README.md), design §21.4                                                                                                                                |
 | Runtime delivery, VM lifecycle and scheduling               | [runtime-implementation.md](docs/runtime-implementation.md), [personal-assistant-runtime-architecture.md](docs/personal-assistant-runtime-architecture.md) (proposal; not a delivery/isolation guarantee) |
 | Usage and pricing                                           | [usage-accounting.md](docs/usage-accounting.md), design §17                                                                                                                                               |
+| Account roles, LLM configuration and outage routing         | [refactor-as-personal-assistant.md](docs/refactor-as-personal-assistant.md) §14, [improvement-plan-2026-11-17.md](docs/improvement-plan-2026-11-17.md), design §5.4/§12.1                                 |
 | Deployment, event delivery and latency diagnostics          | [deployment-guide.md](docs/deployment-guide.md), design §21.5                                                                                                                                             |
 
 ### Intent and execution
@@ -80,6 +81,8 @@ The linked documents contain detailed invariants, deployment steps and acceptanc
 - VM power state does not prove tool readiness. Fake/local fixtures and development images do not establish public search readiness or production isolation; retain separate opt-in real guest/jailer/network acceptance gates. Install/cache Noto CJK fonts where Chrome runs; guest font updates require a rootfs rebuild and fresh generation.
 
 ### UI, delivery and accounting
+
+- Role/configuration changes follow design §5.4/§12.1: Admin > Expert > Member is the target operation hierarchy, with restricted Viewer preserved. Migrate Developer to Member without automatic Expert promotion; account roles never bypass session/data/approval fences. Keep credentials write-only and tenant-scoped, routing decisions replayable and fallback within the existing durable recovery/budgets; never replay tool effects. After database configuration activation, unavailable configuration/secret state fails closed rather than using stale environment settings. Record delivery status and release evidence in the progress/checklist documents.
 
 - User-facing model text follows the current request's language from the first acknowledgment through progress and final output, unless the user explicitly asks for another language. English tool/source/runtime text does not change that language; TTS preserves the generated reply rather than silently translating it.
 
