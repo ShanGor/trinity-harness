@@ -1098,3 +1098,23 @@ session timeline, approvals and audit remain available, with a Scheduled run hea
 and return action. Discuss this result prepares a new Chat draft linked through
 `originSessionId`; only sending it creates a normal conversation. Memory links to
 scheduled activity. No event rewriting or schema migration is required.
+
+### In-flight Steering (2026-11-17)
+
+Active Main/Chat/Work tasks accept explicit supplements through the authenticated
+message route or ACP `trinity.steering` metadata. Additive `steering/accepted` and
+`steering/applied` events retain original content and task identity. The existing
+PG append lock arbitrates admission against atomic final-answer/completion/end
+commit; pending input prevents successful completion. The Loop consumes at complete
+tool boundaries, preserves budgets and reconsiders stale model candidates before
+executing their calls. Plan review/reaffirmation follows applied input; unchanged
+dependency-valid evidence survives. Context receipts retain bounded source-backed
+supplements, and recall expansion uses the original task's policy fences.
+
+Main retains its separate later-request queue; side Chat/Work gain Steering, not a
+new follow-up queue. Stop stays independent. Running tools are not rolled back or
+backgrounded; internal tool/child guards can fence subsequent work but do not
+propagate a revised delegated objective. Terminal conflicts preserve the draft.
+No migration, new module, service or capability switch is required. Deploy readers
+before writers. Source implementation, contract examples, limits and remaining
+acceptance gates are specified in [Steering analysis](in-flight-steering-gap-analysis.md#9-implementation-specification-and-delivered-scope).

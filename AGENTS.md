@@ -176,3 +176,16 @@ Recheck the same admission and exact-patch rule transactionally. Nightly source
 expansion omits attached media explicitly; missing old blobs must not block text
 review. Ordinary recall retains requested media behavior. Do not contact denied
 skill catalogs or allocate guests for memory-only work.
+
+### In-flight Steering
+
+Keep active-task supplements as append-only `steering/accepted` / `steering/applied`
+events bound to the original prompt, distinct from ordinary user turns and the
+Main follow-up queue. Admission and successful final-answer/completion/end commit
+arbitrate under the same PG append lock. Consume only at complete tool boundaries;
+preserve budgets, cancellation, source provenance, plan review and dependency-valid
+evidence. Pending input must not authorize an old approved effect at a later guard.
+Applied content must survive replay/compaction; completed and interrupted context
+uses bounded original source excerpts. Do not repurpose phone `PromptDelivery`,
+retry uncertain effects, or imply immediate interruption of running tools. See
+[Steering specification](docs/in-flight-steering-gap-analysis.md#9-implementation-specification-and-delivered-scope).

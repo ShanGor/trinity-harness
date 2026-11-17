@@ -33,7 +33,9 @@ export class PublishingSessionStore implements SessionStore {
     const range = await this.inner.append(sessionId, events, opts);
     if (events.length > 0) {
       const entries =
-        events[0]?.type === 'session/created' || events[0]?.type === 'activity/reference'
+        events[0]?.type === 'session/created' ||
+        events[0]?.type === 'activity/reference' ||
+        events[0]?.type === 'steering/accepted'
           ? await this.inner.loadRange(sessionId, { afterSeq: range.from - 1, toSeq: range.to })
           : events.map((event, i) => ({ seq: range.from + i, event }));
       try {

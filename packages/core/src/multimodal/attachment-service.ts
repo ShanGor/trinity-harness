@@ -261,7 +261,9 @@ export function hasAttachmentReference(
   return history.some(
     (event) =>
       (event.type === 'session/attachment' && event.uri === uri) ||
-      ((event.type === 'message/user' || event.type === 'prompt/queued') &&
+      ((event.type === 'message/user' ||
+        event.type === 'prompt/queued' ||
+        event.type === 'steering/accepted') &&
         event.content.some(
           (block) => (block.kind === 'file' || block.kind === 'image') && block.uri === uri,
         )),

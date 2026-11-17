@@ -97,6 +97,7 @@ export function createRecallTool(deps: {
           !event ||
           (sourcePrompt && removedPromptIds(events).has(sourcePrompt.eventId)) ||
           (event.type !== 'message/user' &&
+            event.type !== 'steering/accepted' &&
             !(event.type === 'message/assistant' && finals.has(sourceIndex))) ||
           episode?.excluded ||
           (snapshot.hasSuppression && (!episode || !allowed(episode)))

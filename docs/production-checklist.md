@@ -226,3 +226,12 @@ Two-repeat synthetic real-model export acceptance passed twice (four trials); th
       English/Chinese nightly admission is conservative; lexical History labels and
       bounded model-generated digest groups do not establish semantic clustering or
       exhaustive source coverage. This local rollout does not establish production isolation.
+
+### Active-task Steering rollout
+
+- [ ] Deploy readers supporting `steering/accepted`, `steering/applied` and bounded supplemental context receipts before updated server/worker writers and Web.
+- [ ] Exercise real-model correction, incidental-question continuation, approval waits and exhausted budgets with an active task.
+- [ ] Exercise multi-worker recovery after admission/application and completion races; confirm one final result and no repeated uncertain effects.
+- [ ] Verify Main queue vs Steering, side Chat/Work supplements, reconnect/pagination, attachments and Stop on desktop/mobile. No migration or guest image update is required.
+
+See the [Steering specification](in-flight-steering-gap-analysis.md#9-implementation-specification-and-delivered-scope) for source scope and limitations.

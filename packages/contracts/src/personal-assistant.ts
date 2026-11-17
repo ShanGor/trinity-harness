@@ -169,6 +169,7 @@ export const recallReceiptSchema = z.object({
         promptId: z.uuid(),
         request: sourceExcerptSchema,
         answer: sourceExcerptSchema,
+        supplements: z.array(sourceExcerptSchema).max(32).optional(),
       }),
     )
     .max(64)
@@ -198,6 +199,7 @@ export const recallReceiptSchema = z.object({
         fromSeq: z.number().int().positive(),
         toSeq: z.number().int().positive(),
         request: z.string().max(4000),
+        supplements: z.array(sourceExcerptSchema).max(32).optional(),
         reason: z.enum(['error', 'aborted', 'interrupted']),
       }),
     )

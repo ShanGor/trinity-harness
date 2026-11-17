@@ -10,6 +10,7 @@ import type {
   SessionMeta,
   SavedMemory,
   SessionStore,
+  SessionEvent,
 } from '@trinity-harness/contracts';
 
 import {
@@ -62,6 +63,38 @@ export function explicitMemoryChanges(text: string): ExplicitChange[] {
 function stableId(value: string): string {
   const hex = createHash('sha256').update(value).digest('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+/** Keep exact supplement source anchors within a shared bounded text allowance. */
+function supplementSources(
+  events: readonly SessionEvent[],
+  promptId: string,
+  limit: number,
+): NonNullable<NonNullable<RecallReceipt['dialogue']>[number]['supplements']> {
+  let remaining = Math.max(0, limit);
+  return events
+    .map((event, index) => ({ event, index }))
+    .toReversed()
+    .flatMap(({ event, index }) => {
+      if (event.type !== 'steering/accepted' || event.promptId !== promptId || remaining <= 0)
+        return [];
+      const text = event.content
+        .flatMap((block) => (block.kind === 'text' ? [block.text] : []))
+        .join('\n');
+      const excerpt = text.slice(0, Math.min(1000, remaining));
+      remaining -= excerpt.length;
+      return [
+        {
+          eventId: event.eventId,
+          seq: index + 1,
+          from: 0,
+          to: excerpt.length,
+          totalCharacters: text.length,
+          text: excerpt,
+        },
+      ];
+    })
+    .toReversed();
 }
 
 export class PersonalContext implements PersonalContextPort {
@@ -350,16 +383,39 @@ export class PersonalContext implements PersonalContextPort {
         });
         if (attachments.length) request.attachments = attachments.slice(0, 32);
         dialogueOmitted ||= attachments.length > 32;
+        const supplements = supplementSources(
+          events,
+          user.eventId,
+          Math.min(
+            4000,
+            Math.max(0, (segmentConfiguration ? capacity : remaining) - request.text.length) / 3,
+          ),
+        );
+        dialogueOmitted ||=
+          supplements.some((source) => source.to < source.totalCharacters) ||
+          events.filter(
+            (event) => event.type === 'steering/accepted' && event.promptId === user.eventId,
+          ).length > supplements.length;
+        const supplementCharacters = supplements.reduce(
+          (sum, source) => sum + source.text.length,
+          0,
+        );
         const response = excerpt(
           answer,
           answerIndex + 1,
           answerText,
-          (segmentConfiguration ? 64_000 : remaining) - request.text.length,
+          (segmentConfiguration ? 64_000 : remaining) - request.text.length - supplementCharacters,
         );
         dialogueOmitted ||=
           request.to < request.totalCharacters || response.to < response.totalCharacters;
-        if (!segmentConfiguration) remaining -= request.text.length + response.text.length;
-        dialogue.unshift({ promptId: user.eventId, request, answer: response });
+        if (!segmentConfiguration)
+          remaining -= request.text.length + response.text.length + supplementCharacters;
+        dialogue.unshift({
+          promptId: user.eventId,
+          request,
+          answer: response,
+          ...(supplements.length ? { supplements } : {}),
+        });
       }
     }
     if (segmentConfiguration && this.store) {
@@ -432,6 +488,7 @@ export class PersonalContext implements PersonalContextPort {
           fromSeq: start + 1,
           toSeq: end,
           request: request.slice(0, 4000),
+          supplements: supplementSources(events, user.eventId, 4000),
           reason:
             terminal?.type === 'turn/end' && terminal.reason === 'aborted'
               ? 'aborted'
@@ -485,10 +542,20 @@ export function fitDialogue(receipt: RecallReceipt, characterLimit: number): Rec
     request.text = request.text.slice(0, Math.min(request.text.length, Math.floor(remaining / 4)));
     request.to = request.from + request.text.length;
     remaining -= request.text.length;
+    const supplements = (exchange.supplements ?? []).map((source) => {
+      const text = source.text.slice(0, remaining);
+      remaining -= text.length;
+      return { ...source, text, to: source.from + text.length };
+    });
     answer.text = answer.text.slice(0, remaining);
     answer.to = answer.from + answer.text.length;
     remaining -= answer.text.length;
-    dialogue.unshift({ ...exchange, request, answer });
+    dialogue.unshift({
+      ...exchange,
+      request,
+      answer,
+      ...(exchange.supplements ? { supplements } : {}),
+    });
   }
   return { ...receipt, dialogue, omitted: true };
 }

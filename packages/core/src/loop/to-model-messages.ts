@@ -229,6 +229,7 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
     }
     if (
       i !== latestUser &&
+      event.type !== 'steering/applied' &&
       activeIdx >= 0 &&
       seq >= ranges[activeIdx]!.fromSeq &&
       seq <= ranges[activeIdx]!.toSeq
@@ -237,7 +238,7 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
     }
     if (terminalFallbacks.has(i))
       messages.push({ role: 'assistant', content: terminalFallbacks.get(i)! });
-    if (closed.has(i) && !finals.has(i)) return;
+    if (closed.has(i) && !finals.has(i) && event.type !== 'steering/applied') return;
     switch (event.type) {
       case 'model/clock': {
         if (start >= 0 && events[start]?.eventId === event.promptId)
@@ -247,6 +248,23 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
       case 'turn/guidance': {
         // Put current control guidance at the next decision, after complete tool
         // pairs. It must not disappear behind a long sequence of later results.
+        break;
+      }
+      case 'steering/applied': {
+        for (const input of events) {
+          if (
+            input.type !== 'steering/accepted' ||
+            input.promptId !== event.promptId ||
+            !event.inputIds.includes(input.inputId)
+          )
+            continue;
+          const media = mediaBlocksFromContent(input.content);
+          messages.push({
+            role: 'user',
+            content: `[Supplement to active task ${event.promptId}; input ${input.inputId}. Preserve the original objective unless explicitly replaced. Answer incidental questions and continue. Reconsider affected plans/checks before effects or completion; this is not approval.]\n${textFromContent(input.content)}`,
+            ...(media ? { blocks: media } : {}),
+          });
+        }
         break;
       }
       case 'message/user': {
@@ -491,6 +509,9 @@ export function personalModelMessages(
           role: index === 0 ? 'user' : 'assistant',
           content:
             source.text +
+            (index === 0 && exchange.supplements?.length
+              ? `\n[User supplements to this request]\n${exchange.supplements.map((input) => `${input.text}\n[Supplement source eventId=${input.eventId}, seq=${input.seq}, characters ${input.from}-${input.to}/${input.totalCharacters}]`).join('\n')}`
+              : '') +
             citations +
             (source.attachments?.length
               ? `\n[Original attachment metadata; use recall eventId to inspect original media or authorized workspace tools.]\n${JSON.stringify(source.attachments)}`

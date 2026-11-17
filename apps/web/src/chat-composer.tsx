@@ -1,6 +1,6 @@
-import { isLargePaste } from '@trinity-harness/shared';
+import { isLargePaste, newId } from '@trinity-harness/shared';
 import { memo, useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
-import { App as AntdApp, Button, Flex } from 'antd';
+import { App as AntdApp, Button, Flex, Select } from 'antd';
 import { AudioOutlined, PhoneOutlined, StopOutlined } from '@ant-design/icons';
 import { Sender } from '@ant-design/x';
 import { PretextTextArea } from './pretext-textarea';
@@ -23,6 +23,7 @@ export const ChatComposer = memo(function ChatComposer({
   busy,
   draftKey = 'new',
   canQueue = false,
+  canSteer = false,
   draftStore,
   draftOwner,
   placeholder = 'Ask anything…',
@@ -37,6 +38,7 @@ export const ChatComposer = memo(function ChatComposer({
   busy: boolean;
   draftKey?: string;
   canQueue?: boolean;
+  canSteer?: boolean;
   draftStore?: Map<string, string>;
   draftOwner?: string;
   placeholder?: string;
@@ -50,12 +52,18 @@ export const ChatComposer = memo(function ChatComposer({
   voiceTranscribe?: (blob: Blob) => Promise<string>;
   onStartVoiceCall?: () => void;
   voiceCallDisabled?: boolean;
-  onSubmit: (text: string) => void | Promise<boolean | void>;
+  onSubmit: (
+    text: string,
+    inputMode?: 'steer' | 'queue',
+    inputId?: string,
+  ) => void | Promise<boolean | void>;
   onStagePaste?: (text: string) => boolean;
   onCancel: () => void;
 }): ReactElement {
   const [input, setInput] = useState('');
+  const [inputMode, setInputMode] = useState<'steer' | 'queue'>('steer');
   const submitting = useRef(false);
+  const pendingInput = useRef<{ key: string; text: string; id: string } | null>(null);
   const previousResetVersion = useRef(resetVersion);
   const drafts = useRef(draftStore ?? new Map<string, string>());
   const currentKey = useRef(draftKey);
@@ -214,9 +222,10 @@ export const ChatComposer = memo(function ChatComposer({
   }, [voiceTranscribe, isTranscribing, message, stopVoiceRecording]);
 
   return (
-    <Flex gap={8} align="center">
+    <Flex gap={8} align="center" wrap="wrap">
       <div
         className="chat-composer-sender"
+        style={{ flex: '1 1 240px', minWidth: 0 }}
         onPasteCapture={(event) => {
           if (!onStagePaste || !(event.target instanceof HTMLTextAreaElement)) return;
           const text = event.clipboardData.getData('text/plain');
@@ -243,12 +252,25 @@ export const ChatComposer = memo(function ChatComposer({
             setInput(value);
           }}
           onSubmit={(text) => {
-            if ((busy && !canQueue) || submitting.current) return;
+            if ((busy && !canQueue && !canSteer) || submitting.current) return;
             submitting.current = true;
             const key = draftKey;
-            void Promise.resolve(onSubmit(text))
+            if (
+              !pendingInput.current ||
+              pendingInput.current.key !== key ||
+              pendingInput.current.text !== text
+            )
+              pendingInput.current = { key, text, id: newId() };
+            void Promise.resolve(
+              onSubmit(
+                text,
+                busy ? (canSteer ? inputMode : 'queue') : undefined,
+                pendingInput.current.id,
+              ),
+            )
               .then((accepted) => {
                 if (accepted === false) return;
+                pendingInput.current = null;
                 if (drafts.current.get(key) === text) {
                   drafts.current.delete(key);
                   if (draftOwner) sessionStorage.removeItem(`trinity.draft:${draftOwner}:${key}`);
@@ -260,10 +282,26 @@ export const ChatComposer = memo(function ChatComposer({
               });
           }}
           onCancel={onCancel}
-          loading={busy && !canQueue}
+          loading={busy && !canQueue && !canSteer}
           placeholder={placeholder}
         />
       </div>
+      {busy && canSteer && (
+        <Button danger icon={<StopOutlined />} aria-label="Stop active task" onClick={onCancel}>
+          Stop
+        </Button>
+      )}
+      {busy && canSteer && (
+        <Select
+          aria-label="Running task input"
+          value={canQueue ? inputMode : 'steer'}
+          onChange={setInputMode}
+          options={[
+            { value: 'steer', label: 'Supplement current task' },
+            ...(canQueue ? [{ value: 'queue', label: 'Queue for later' }] : []),
+          ]}
+        />
+      )}
       {onStartVoiceCall && (
         <Button
           className="composer-call-button"

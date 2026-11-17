@@ -60,7 +60,13 @@ export function createTaskTool(store: SessionStore): ToolDefinition {
         if (
           intent &&
           (intent.sourceEventIds.some(
-            (id) => !events.some((event) => event.type === 'message/user' && event.eventId === id),
+            (id) =>
+              !events.some(
+                (event) =>
+                  (event.type === 'message/user' ||
+                    (event.type === 'steering/accepted' && event.promptId === promptId)) &&
+                  event.eventId === id,
+              ),
           ) ||
             !intent.sourceEventIds.includes(promptId))
         )
@@ -114,6 +120,9 @@ export function createTaskTool(store: SessionStore): ToolDefinition {
         // Repeated identical plans must not invalidate existing evidence.
         if (
           !prior ||
+          events.findLastIndex(
+            (event) => event.type === 'steering/applied' && event.promptId === promptId,
+          ) > events.indexOf(prior) ||
           JSON.stringify({
             checks: prior.checks,
             interpretation: prior.interpretation,

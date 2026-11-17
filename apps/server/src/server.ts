@@ -1,3 +1,4 @@
+import { steeringInputSchema } from '@trinity-harness/contracts';
 import { workspaceDocumentRequestSchema, workspaceDocumentSchema } from '@trinity-harness/shared';
 import { historyPreferencesSchema } from '@trinity-harness/contracts';
 import {
@@ -155,6 +156,7 @@ const createSessionSchema = z.object({
 });
 
 const postMessageSchema = z.object({
+  steering: steeringInputSchema.optional(),
   text: z.string().min(1).max(100_000),
   revision: messageRevisionSchema.optional(),
   delivery: promptDeliverySchema.optional(),
@@ -455,6 +457,14 @@ export function toServerEvent(sessionId: string, event: LoopEvent): ServerEvent 
         sessionId,
         status: event.reason === 'aborted' ? 'aborted' : 'completed',
       };
+    case 'steering/applied':
+      return {
+        type: 'session/steering',
+        sessionId,
+        promptId: event.promptId,
+        inputIds: event.inputIds,
+        state: 'applied',
+      };
     case 'context/compacted':
       return {
         type: 'session/turn_status',
@@ -567,6 +577,23 @@ export function logEventToServerEvent(sessionId: string, event: SessionEvent): S
       };
     case 'memory/selection':
       return { type: 'session/memory_selection', sessionId, receipt: event.receipt };
+    case 'steering/accepted':
+      return {
+        type: 'session/steering',
+        sessionId,
+        promptId: event.promptId,
+        inputId: event.inputId,
+        state: 'waiting',
+        text: blocksToText(event.content),
+      };
+    case 'steering/applied':
+      return {
+        type: 'session/steering',
+        sessionId,
+        promptId: event.promptId,
+        inputIds: event.inputIds,
+        state: 'applied',
+      };
     case 'prompt/queued':
       return {
         type: 'session/prompt_queue',
@@ -2357,6 +2384,46 @@ export async function buildServer(
       result: 'ok',
     });
 
+    if (body.data.steering) {
+      if (revision || body.data.delivery)
+        return reply
+          .code(400)
+          .send({ error: 'Steering cannot revise a message or change presentation.' });
+      const { inputId, promptId: targetPromptId } = body.data.steering;
+      try {
+        const admitted = await deps.store.append(
+          sessionId,
+          [
+            {
+              type: 'steering/accepted',
+              eventId: inputId,
+              inputId,
+              promptId: targetPromptId,
+              at: new Date().toISOString(),
+              actor: identity?.userId ?? 'anonymous',
+              content,
+            },
+          ],
+          { actor: identity?.userId ?? 'anonymous' },
+        );
+        const committed = (
+          await deps.store.loadRange(sessionId, { afterSeq: admitted.from - 1, toSeq: admitted.to })
+        )[0];
+        if (committed) broadcast(sessionId, logEventToServerEvent(sessionId, committed.event)!);
+        return reply.code(202).send({ accepted: true, promptId: targetPromptId });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          'code' in error &&
+          ['STEERING_TASK_ENDED', 'STEERING_LIMIT', 'STEERING_CONFLICT'].includes(
+            String(error.code),
+          )
+        )
+          return reply.code(409).send({ error: error.message });
+        throw error;
+      }
+    }
+
     if (granted.meta?.sessionRole === 'main' && deps.sessionRuns) {
       const accepted = await enqueueMain(
         granted.meta,
@@ -3746,6 +3813,7 @@ export async function buildServer(
             },
           },
         };
+      case 'session/steering':
       case 'session/prompt_queue':
         return {
           method: 'session/update',
@@ -3753,7 +3821,10 @@ export async function buildServer(
             sessionId,
             update: {
               sessionUpdate: 'session_info_update',
-              _meta: { 'trinity.promptQueue': event },
+              _meta:
+                event.type === 'session/steering'
+                  ? { 'trinity.steering': event }
+                  : { 'trinity.promptQueue': event },
             },
           },
         };
@@ -4281,6 +4352,55 @@ export async function buildServer(
             return reply.send(
               jsonRpcError(id, -32602, 'Credentials cannot be stored in personal memory.'),
             );
+          const metadata = z
+            .object({ 'trinity.steering': steeringInputSchema.optional() })
+            .passthrough()
+            .safeParse(params['_meta'] ?? {});
+          if (!metadata.success)
+            return reply.send(jsonRpcError(id, -32602, 'Invalid steering metadata'));
+          const steering = metadata.data['trinity.steering'];
+          if (steering) {
+            try {
+              const admitted = await deps.store.append(
+                granted.sessionId,
+                [
+                  {
+                    type: 'steering/accepted',
+                    eventId: steering.inputId,
+                    inputId: steering.inputId,
+                    promptId: steering.promptId,
+                    at: new Date().toISOString(),
+                    actor: identity?.userId ?? 'anonymous',
+                    content: content ?? [{ kind: 'text', text }],
+                  },
+                ],
+                { actor: identity?.userId ?? 'anonymous' },
+              );
+              const committed = (
+                await deps.store.loadRange(granted.sessionId, {
+                  afterSeq: admitted.from - 1,
+                  toSeq: admitted.to,
+                })
+              )[0];
+              if (committed)
+                broadcast(
+                  granted.sessionId,
+                  logEventToServerEvent(granted.sessionId, committed.event)!,
+                );
+              return result({
+                stopReason: 'end_turn',
+                _meta: { 'trinity.steeringAccepted': steering.inputId },
+              });
+            } catch (error) {
+              if (
+                error instanceof Error &&
+                'code' in error &&
+                String(error.code).startsWith('STEERING_')
+              )
+                return reply.send(jsonRpcError(id, -32602, error.message));
+              throw error;
+            }
+          }
           if (granted.meta?.sessionRole === 'main') {
             if (!identity || !deps.sessionRuns)
               return reply.send(jsonRpcError(id, -32603, 'Main chat queue unavailable'));

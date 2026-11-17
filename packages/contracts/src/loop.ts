@@ -11,6 +11,7 @@ import type { AnswerCitation } from './citations.js';
 
 /** Real-time events emitted by the Agent Loop while a turn runs (design.md §6). */
 export type LoopEvent =
+  | { type: 'steering/applied'; promptId: string; inputIds: string[] }
   | { type: 'model/usage'; usage: ModelUsage }
   | { type: 'turn/start'; turn: number }
   | { type: 'text-delta'; text: string }

@@ -1,3 +1,4 @@
+import { pendingSteering, type SessionEvent } from '@trinity-harness/contracts';
 import { createHash } from 'node:crypto';
 import { runtimeClock, runtimeClockMessage } from './runtime-clock.js';
 import { phoneGuidance } from './phone-guidance.js';
@@ -254,6 +255,7 @@ export class CoreAgentLoop implements AgentLoop {
       const committedPrompt = (await store.load(sessionId))[promptSeq - 1]!;
       const promptId = committedPrompt.eventId;
       ctx.userPromptId = promptId;
+      let terminalCommitted = false;
       let personalMemoryChange: { before: number; after: number } | undefined;
       if (this.opts.personalContext && this.opts.sessionMetas && !actor?.startsWith('subagent:'))
         ctx.personalMemoryChanged = (before, after): void => {
@@ -686,6 +688,66 @@ export class CoreAgentLoop implements AgentLoop {
             break;
           }
           await waitForRetry();
+          await runOpts?.contextGuard?.();
+          const supplements = pendingSteering(await store.load(sessionId), promptId);
+          if (supplements.length) {
+            for (const input of supplements) {
+              const call: ToolCall = {
+                id: `steering-${input.inputId}`,
+                name: 'prompt',
+                args: input.content,
+              };
+              const decision = gate.decide(call);
+              if (
+                decision === 'denied' ||
+                (decision === 'ask' &&
+                  (await this.gateCall(
+                    sessionId,
+                    call,
+                    'Apply this user supplement to the active task: ' + preview(input.content),
+                    sink,
+                    appendOpts,
+                    signal,
+                  )) !== 'allowed')
+              )
+                throw new Error('User supplement was not authorized by the session prompt policy.');
+            }
+            await store.append(
+              sessionId,
+              [
+                {
+                  ...meta(),
+                  type: 'steering/applied',
+                  promptId,
+                  inputIds: supplements.map((input) => input.inputId),
+                },
+              ],
+              appendOpts,
+            );
+            sink.emit({
+              type: 'steering/applied',
+              promptId,
+              inputIds: supplements.map((input) => input.inputId),
+            });
+          }
+          const appliedHistory = await store.load(sessionId);
+          const appliedIds = new Set(
+            appliedHistory.flatMap((event) =>
+              event.type === 'steering/applied' && event.promptId === promptId
+                ? event.inputIds
+                : [],
+            ),
+          );
+          ctx.userRequest = [
+            promptPreview,
+            ...appliedHistory.flatMap((event) =>
+              event.type === 'steering/accepted' && appliedIds.has(event.inputId)
+                ? [
+                    `[User supplement ${event.inputId}]\n${event.content.flatMap((block) => (block.kind === 'text' ? [block.text] : [])).join('\n')}`,
+                  ]
+                : [],
+            ),
+          ].join('\n');
           steps += 1;
           await ctx.contextGuard?.();
           if (
@@ -1107,6 +1169,8 @@ export class CoreAgentLoop implements AgentLoop {
 
           if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
 
+          if (pendingSteering(await store.load(sessionId), promptId).length) continue;
+
           const truncated = finish === 'length';
           const needsVerification =
             verificationEnabled &&
@@ -1218,34 +1282,78 @@ export class CoreAgentLoop implements AgentLoop {
                     signal,
                   )
                 : undefined;
-            await store.append(
-              sessionId,
-              [
-                {
-                  ...meta(),
-                  type: 'message/assistant',
-                  surfaceOp: 'append',
-                  phase,
-                  ...(truncated ? { continuation: true } : {}),
-                  ...(citationList?.length ? { citationList } : {}),
-                  content: [
-                    ...(reasoningText.length > 0
-                      ? [
-                          {
-                            kind: 'reasoning' as const,
-                            text: reasoningText,
-                            ...(reasoningSignature !== undefined
-                              ? { signature: reasoningSignature }
-                              : {}),
-                          },
-                        ]
-                      : []),
-                    ...(text.length > 0 ? [{ kind: 'text' as const, text }] : []),
-                  ],
-                },
-              ],
-              appendOpts,
-            );
+            const completionEvents: SessionEvent[] = [];
+            if (phase === 'final' && reason === 'completed' && executionVersion === 2) {
+              const current = await store.load(sessionId);
+              const plan = current.findLast(
+                (event) => event.type === 'task/plan' && event.promptId === promptId,
+              );
+              const outcomeIndex = current.findLastIndex(
+                (event) => event.type === 'task/outcome' && event.promptId === promptId,
+              );
+              const outcome = current[outcomeIndex];
+              completionEvents.push({
+                ...meta(),
+                type: 'task/completion',
+                promptId,
+                checksStatus: taskVerification(current, promptId).status,
+                executionReason: reason,
+                ...(outcome?.type === 'task/outcome' &&
+                outcome.planId === plan?.eventId &&
+                !hasTaskEffects([committedPrompt, ...current.slice(outcomeIndex + 1)], promptId)
+                  ? { outcomeId: outcome.eventId }
+                  : {}),
+              });
+            }
+            const finalRange = await store
+              .append(
+                sessionId,
+                [
+                  {
+                    ...meta(),
+                    type: 'message/assistant',
+                    surfaceOp: 'append',
+                    phase,
+                    ...(truncated ? { continuation: true } : {}),
+                    ...(citationList?.length ? { citationList } : {}),
+                    content: [
+                      ...(reasoningText.length > 0
+                        ? [
+                            {
+                              kind: 'reasoning' as const,
+                              text: reasoningText,
+                              ...(reasoningSignature !== undefined
+                                ? { signature: reasoningSignature }
+                                : {}),
+                            },
+                          ]
+                        : []),
+                      ...(text.length > 0 ? [{ kind: 'text' as const, text }] : []),
+                    ],
+                  },
+                  ...completionEvents,
+                  ...(phase === 'final' && reason === 'completed'
+                    ? [
+                        {
+                          ...meta(),
+                          type: 'turn/end' as const,
+                          promptId,
+                          reason: 'completed' as const,
+                        },
+                      ]
+                    : []),
+                ],
+                appendOpts,
+              )
+              .catch((error) => {
+                if (error instanceof Error && 'code' in error && error.code === 'STEERING_PENDING')
+                  return null;
+                throw error;
+              });
+            if (phase === 'final' && reason === 'completed') {
+              terminalCommitted = finalRange !== null;
+              if (!terminalCommitted) continue;
+            }
             if (text.length > 0) {
               sink.emit({
                 type: 'message/assistant',
@@ -1274,6 +1382,11 @@ export class CoreAgentLoop implements AgentLoop {
             continue;
           }
           if (toolCalls.length === 0) {
+            if (!terminalCommitted && reason === 'completed') {
+              if (pendingSteering(await store.load(sessionId), promptId).length) continue;
+              reason = 'error';
+              detail = 'The model returned no final answer.';
+            }
             break; // model is done — turn complete
           }
 
@@ -1430,7 +1543,13 @@ export class CoreAgentLoop implements AgentLoop {
                 (effect.kind === 'mutation' || effect.kind === 'unknown') &&
                 call.name !== 'persona' &&
                 !(await store.load(sessionId)).some(
-                  (event) => event.type === 'task/plan' && event.promptId === promptId,
+                  (event, index, events) =>
+                    event.type === 'task/plan' &&
+                    event.promptId === promptId &&
+                    index >
+                      events.findLastIndex(
+                        (item) => item.type === 'steering/applied' && item.promptId === promptId,
+                      ),
                 )
               ) {
                 presolved.set(call.id, {
@@ -1582,6 +1701,11 @@ export class CoreAgentLoop implements AgentLoop {
         }
       }
 
+      if (terminalCommitted) {
+        sink.emit({ type: 'turn/end', reason: 'completed' });
+        return { reason: 'completed', steps };
+      }
+
       if (verificationEnabled || taskBudget) {
         const events = await store.load(sessionId);
         const assessment = taskVerification(events, promptId);
@@ -1642,19 +1766,20 @@ export class CoreAgentLoop implements AgentLoop {
           appendOpts,
         );
       }
-      await store.append(
-        sessionId,
-        [
-          {
-            ...meta(),
-            type: 'turn/end',
-            promptId,
-            reason,
-            ...(detail !== undefined ? { detail } : {}),
-          },
-        ],
-        appendOpts,
-      );
+      if (!terminalCommitted)
+        await store.append(
+          sessionId,
+          [
+            {
+              ...meta(),
+              type: 'turn/end',
+              promptId,
+              reason,
+              ...(detail !== undefined ? { detail } : {}),
+            },
+          ],
+          appendOpts,
+        );
       sink.emit({ type: 'turn/end', reason, ...(detail !== undefined ? { detail } : {}) });
 
       return { reason, steps };
@@ -1899,7 +2024,33 @@ export class CoreAgentLoop implements AgentLoop {
     const startedAt = Date.now();
     try {
       await ctx.contextGuard?.();
-      const result = await tools.execute(call, ctx);
+      if (
+        ctx.userPromptId &&
+        pendingSteering(await this.opts.store.load(ctx.sessionId), ctx.userPromptId).length
+      )
+        return {
+          isError: true,
+          value: {
+            code: 'STEERING_PENDING',
+            effect: 'none',
+            message:
+              'User supplements arrived. This call was not executed; reconsider it on the next model step.',
+          },
+        };
+      const result = await tools.execute(call, {
+        ...ctx,
+        contextGuard: async () => {
+          await ctx.contextGuard?.();
+          if (
+            ctx.userPromptId &&
+            pendingSteering(await this.opts.store.load(ctx.sessionId), ctx.userPromptId).length
+          )
+            throw Object.assign(
+              new Error('User supplements arrived; reconsider this operation before executing it.'),
+              { code: 'STEERING_PENDING' },
+            );
+        },
+      });
       toolCounter.add(1, {
         'trinity.tool': call.name,
         'trinity.tool_status': result.isError ? 'error' : 'ok',

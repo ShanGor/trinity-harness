@@ -247,7 +247,24 @@ export const discardedPromptEventSchema = z.object({
   reason: z.literal('cancelled'),
 });
 
+export const steeringAcceptedEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('steering/accepted'),
+  inputId: z.uuid(),
+  promptId: z.uuid(),
+  actor: z.string().min(1).max(200),
+  content: z.array(contentBlockSchema).min(1).max(10),
+});
+export const steeringAppliedEventSchema = z.object({
+  ...baseFields,
+  type: z.literal('steering/applied'),
+  promptId: z.uuid(),
+  inputIds: z.array(z.uuid()).min(1).max(32),
+});
+
 export const sessionEventSchema = z.discriminatedUnion('type', [
+  steeringAcceptedEventSchema,
+  steeringAppliedEventSchema,
   z.object({
     ...baseFields,
     type: z.literal('browser/control_changed'),

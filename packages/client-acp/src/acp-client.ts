@@ -1,3 +1,4 @@
+import { steeringInputSchema, type SteeringInput } from '@trinity-harness/shared';
 import {
   workspaceDocumentSchema,
   workspaceDocumentRequestSchema,
@@ -552,18 +553,25 @@ export class AcpClient {
     text: string,
     attachments?: { uri: string; mimeType: string }[],
     delivery?: PromptDelivery,
+    steering?: SteeringInput,
   ): Promise<string | undefined> {
     const res = await fetch(`${this.baseUrl}/api/sessions/${sessionId}/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify({
         text,
+        ...(steering ? { steering: steeringInputSchema.parse(steering) } : {}),
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
         ...(delivery ? { delivery: promptDeliverySchema.parse(delivery) } : {}),
       }),
     });
     if (res.status !== 202) {
-      throw new Error(`sendPrompt failed: ${res.status}`);
+      const body: unknown = await res.json();
+      const failure =
+        body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
+          ? body.error
+          : `sendPrompt failed: ${res.status}`;
+      throw new Error(failure);
     }
     return promptAcceptedSchema.parse(await res.json()).promptId;
   }

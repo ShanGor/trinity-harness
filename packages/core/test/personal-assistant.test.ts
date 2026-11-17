@@ -714,3 +714,87 @@ it('loads Markdown Persona across personal sessions, excludes team scope and fen
   });
   expect((await context.select(owner, randomUUID(), '你好')).persona?.content).toBe('');
 });
+
+it('keeps recent supplement sources in bounded completed dialogue and honors parent removal', async () => {
+  const store = new MemorySessionStore();
+  const owner = meta();
+  const original = randomUUID();
+  const followup = randomUUID();
+  await store.append(owner.id, [
+    {
+      eventId: original,
+      at,
+      type: 'message/user',
+      surfaceOp: 'append',
+      content: [{ kind: 'text', text: 'Compare A and B' }],
+    },
+    { eventId: randomUUID(), at, type: 'turn/start', promptId: original },
+  ]);
+  const inputIds: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    const inputId = randomUUID();
+    inputIds.push(inputId);
+    await store.append(owner.id, [
+      {
+        eventId: inputId,
+        inputId,
+        at,
+        type: 'steering/accepted',
+        promptId: original,
+        actor: owner.userId,
+        content: [{ kind: 'text', text: `Correction ${i}: ${'detail '.repeat(200)}` }],
+      },
+    ]);
+  }
+  await store.append(owner.id, [
+    { eventId: randomUUID(), at, type: 'steering/applied', promptId: original, inputIds },
+  ]);
+  await store.append(owner.id, [
+    {
+      eventId: randomUUID(),
+      at,
+      type: 'message/assistant',
+      surfaceOp: 'append',
+      phase: 'final',
+      content: [{ kind: 'text', text: 'Compared with corrections' }],
+    },
+    { eventId: randomUUID(), at, type: 'turn/end', promptId: original, reason: 'completed' },
+    {
+      eventId: followup,
+      at,
+      type: 'message/user',
+      surfaceOp: 'append',
+      content: [{ kind: 'text', text: 'Explain the result' }],
+    },
+  ]);
+  const context = new PersonalContext(
+    {
+      snapshot: async () => ({ revision: 1, items: [], hasSuppression: false }),
+    } as unknown as MemoryStorePort,
+    {
+      history: async () => ({ episodes: [], nextBefore: null }),
+      evidence: async () => null,
+    } as unknown as ConversationIndexPort,
+    store,
+  );
+  const receipt = await context.select(owner, followup, 'Explain the result');
+  const sources = receipt.dialogue?.[0]?.supplements ?? [];
+  expect(sources.at(-1)?.eventId).toBe(inputIds.at(-1));
+  expect(sources.map((source) => source.seq)).toEqual(
+    sources.map((source) => source.seq).toSorted((a, b) => a - b),
+  );
+  expect(sources.reduce((sum, source) => sum + source.text.length, 0)).toBeLessThanOrEqual(4000);
+  expect(receipt.omitted).toBe(true);
+  expect(JSON.stringify(personalModelMessages(await store.load(owner.id), receipt))).toContain(
+    'Correction 7',
+  );
+  await store.append(owner.id, [
+    { eventId: randomUUID(), at, type: 'message/removed', promptId: original, role: 'user' },
+  ]);
+  await expect(context.validate(owner, receipt)).rejects.toMatchObject({
+    code: 'MEMORY_CONTEXT_CHANGED',
+  });
+  expect(JSON.stringify(personalModelMessages(await store.load(owner.id), receipt))).not.toContain(
+    'Correction 7',
+  );
+});

@@ -624,3 +624,30 @@ describe('revisable agent plans', () => {
     llm.assertExhausted();
   });
 });
+
+it('requires supplement plan review and lets unchanged checks retain their valid receipt', async () => {
+  const { store, execute, read } = await setup();
+  await execute('plan', { operation: 'plan', checks: [check] });
+  await read('receipt');
+  await execute('verify', { operation: 'verify', id: check.id, callId: 'receipt' });
+  expect(taskVerification(await store.load('s'), prompt.eventId).status).toBe('verified');
+  await store.append('s', [{ ...meta(), type: 'turn/start', promptId: prompt.eventId }]);
+  const inputId = crypto.randomUUID();
+  await store.append('s', [
+    {
+      ...meta(),
+      type: 'steering/accepted',
+      inputId,
+      promptId: prompt.eventId,
+      actor: 'user',
+      content: [{ kind: 'text', text: 'Also explain the diagnosis in the answer.' }],
+    },
+  ]);
+  await store.append('s', [
+    { ...meta(), type: 'steering/applied', promptId: prompt.eventId, inputIds: [inputId] },
+  ]);
+  expect(taskVerification(await store.load('s'), prompt.eventId).status).toBe('incomplete');
+  await execute('reaffirm', { operation: 'plan', checks: [check] });
+  expect(taskVerification(await store.load('s'), prompt.eventId).status).toBe('verified');
+  expect((await store.load('s')).filter((event) => event.type === 'tool/result')).toHaveLength(1);
+});

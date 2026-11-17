@@ -5,7 +5,11 @@ type Segment = NonNullable<RecallReceipt['segment']>;
 
 function size(dialogue: Dialogue): number {
   return dialogue.reduce(
-    (sum, turn) => sum + turn.request.text.length + turn.answer.text.length,
+    (sum, turn) =>
+      sum +
+      turn.request.text.length +
+      turn.answer.text.length +
+      (turn.supplements ?? []).reduce((total, source) => total + source.text.length, 0),
     0,
   );
 }
@@ -26,9 +30,15 @@ function seed(candidates: Dialogue, capacity: number): Dialogue {
         const answer = { ...turn.answer };
         request.text = request.text.slice(0, Math.floor(capacity / 4));
         request.to = request.from + request.text.length;
-        answer.text = answer.text.slice(0, capacity - request.text.length);
+        let room = Math.max(0, capacity - request.text.length);
+        const supplements = (turn.supplements ?? []).map((source) => {
+          const text = source.text.slice(0, room);
+          room -= text.length;
+          return { ...source, text, to: source.from + text.length };
+        });
+        answer.text = answer.text.slice(0, room);
         answer.to = answer.from + answer.text.length;
-        selected.push({ ...turn, request, answer });
+        selected.push({ ...turn, request, answer, supplements });
       }
       break;
     }
@@ -56,7 +66,8 @@ export function selectContextSegment(
                 return (
                   !source ||
                   source.request.eventId !== turn.request.eventId ||
-                  source.answer.eventId !== turn.answer.eventId
+                  source.answer.eventId !== turn.answer.eventId ||
+                  JSON.stringify(source.supplements) !== JSON.stringify(turn.supplements)
                 );
               })
             ? 'source'

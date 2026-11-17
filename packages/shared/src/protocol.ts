@@ -91,6 +91,15 @@ export const promptAcceptedSchema = z.object({
 
 export const serverEventSchema = z.discriminatedUnion('type', [
   z.object({
+    type: z.literal('session/steering'),
+    sessionId: z.string(),
+    promptId: z.uuid(),
+    inputId: z.uuid().optional(),
+    inputIds: z.array(z.uuid()).max(32).optional(),
+    state: z.enum(['waiting', 'applied']),
+    text: z.string().optional(),
+  }),
+  z.object({
     type: z.literal('message/removed'),
     sessionId: z.string(),
     promptId: z.uuid(),

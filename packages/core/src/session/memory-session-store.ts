@@ -4,7 +4,7 @@ import type {
   SessionEvent,
   SessionStore,
 } from '@trinity-harness/contracts';
-import { projectMessages } from '@trinity-harness/contracts';
+import { assertSteeringAppend, projectMessages } from '@trinity-harness/contracts';
 
 /**
  * M1 in-memory SessionStore (docs/design.md §18 M1: 内存版会话). Single-process
@@ -25,6 +25,22 @@ export class MemorySessionStore implements SessionStore {
       throw Object.assign(new Error('Conversation changed; refresh and retry.'), {
         code: 'SESSION_CONFLICT',
       });
+    const accepted =
+      events.length === 1 && events[0]?.type === 'steering/accepted' ? events[0] : undefined;
+    const duplicate = accepted
+      ? log.findIndex(
+          (event) => event.type === 'steering/accepted' && event.inputId === accepted.inputId,
+        )
+      : -1;
+    if (duplicate >= 0) {
+      if (
+        JSON.stringify({ ...log[duplicate], at: '', eventId: '' }) !==
+        JSON.stringify({ ...accepted, at: '', eventId: '' })
+      )
+        throw Object.assign(new Error('Input ID already used.'), { code: 'STEERING_CONFLICT' });
+      return { from: duplicate + 1, to: duplicate + 1 };
+    }
+    assertSteeringAppend(log, events);
     log.push(...events);
     this.logs.set(sessionId, log);
     return { from: log.length - events.length + 1, to: log.length };

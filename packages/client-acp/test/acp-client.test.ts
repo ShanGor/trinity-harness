@@ -691,6 +691,27 @@ describe('AcpClient', () => {
     }
   });
 
+  it('sends stable steering metadata separately from phone delivery and preserves conflict details', async () => {
+    const original = globalThis.fetch;
+    const steering = { inputId: crypto.randomUUID(), promptId: crypto.randomUUID() };
+    const calls: unknown[] = [];
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      calls.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ error: 'The target task is no longer active.' }), {
+        status: 409,
+      });
+    });
+    try {
+      const client = new AcpClient({ baseUrl: 'http://x' });
+      await expect(client.sendPrompt('s', 'Use C', undefined, undefined, steering)).rejects.toThrow(
+        'The target task is no longer active.',
+      );
+      expect(calls).toEqual([{ text: 'Use C', steering }]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it('creates sessions, sends prompts and fetches history', async () => {
     const { impl } = fakeFetch({
       'POST http://x/api/sessions': () =>

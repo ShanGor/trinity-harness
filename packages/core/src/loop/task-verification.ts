@@ -567,6 +567,16 @@ export function taskVerification(
       status: 'unverified',
       pending: ['Declare the requirements and verification checks using task plan.'],
     };
+  const lastSupplement = events.findLastIndex(
+    (event) => event.type === 'steering/applied' && event.promptId === promptId,
+  );
+  if (lastSupplement > events.indexOf(plan))
+    return {
+      status: 'incomplete',
+      pending: [
+        'Review the user supplements and revise or reaffirm the task plan before completion.',
+      ],
+    };
   const evidence = taskEvidence(events, promptId);
   const pending = plan.checks
     .filter(

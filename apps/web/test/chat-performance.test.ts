@@ -804,7 +804,7 @@ describe('chat typing and streaming performance', () => {
       update: { kind: 'agent_message_chunk', text: 'stale working' },
     });
     fake.cancelTurn.mockResolvedValueOnce({ ok: true, alreadyStopped: true });
-    await click(container.querySelector('.ant-sender-actions-btn'));
+    await click(container.querySelector('[aria-label="Stop active task"]'));
     expect(fake.cancelTurn).toHaveBeenCalledWith('s0');
     expect(container.querySelector('.response-streaming')).toBeNull();
     expect(container.querySelector('.md')).toBeNull();
@@ -1126,11 +1126,11 @@ describe('chat typing and streaming performance', () => {
     expect(textarea.value).toBe('Another draft');
   });
 
-  it('connects the sender cancel action to the active turn', async () => {
+  it('keeps Stop available beside steering input for the active turn', async () => {
     const textarea = container.querySelector('textarea')!;
     await type(textarea, 'Run a task');
     await click(container.querySelector('.ant-sender-actions-btn'));
-    await click(container.querySelector('.ant-sender-actions-btn'));
+    await click(container.querySelector('[aria-label="Stop active task"]'));
     expect(fake.cancelTurn).toHaveBeenCalledWith('new-session');
   });
 });

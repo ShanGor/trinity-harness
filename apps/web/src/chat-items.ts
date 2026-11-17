@@ -34,6 +34,7 @@ export type AttachmentView = {
 };
 
 export type ChatItem = {
+  supplements?: { inputId: string; text: string; state: 'waiting' | 'applied' | 'ended' }[];
   messageId?: string;
   at?: string;
   key: string;
@@ -243,10 +244,13 @@ export function mergeToolUpdate(
     title: existing?.title || update.title || update.toolCallId,
     status: update.status,
     content: update.content ?? existing?.content,
-    startedAt: existing?.startedAt ?? (update.status === 'in_progress' ? Date.parse(at) : undefined),
+    startedAt:
+      existing?.startedAt ?? (update.status === 'in_progress' ? Date.parse(at) : undefined),
     durationMs:
       update.status === 'completed' || update.status === 'failed'
-        ? existing?.startedAt !== undefined ? Math.max(0, Date.parse(at) - existing.startedAt) : existing?.durationMs
+        ? existing?.startedAt !== undefined
+          ? Math.max(0, Date.parse(at) - existing.startedAt)
+          : existing?.durationMs
         : existing?.durationMs,
   };
   item = {
@@ -384,6 +388,41 @@ export function mergeRecallSelection(
 
 /** Same ACP projection for bounded pages and the independent detail pane. */
 export function applyTimelineEvent(items: ChatItem[], event: ServerEvent): ChatItem[] {
+  if (event.type === 'session/steering')
+    return items.map((item) => {
+      if (item.role !== 'user' || item.messageId !== event.promptId) return item;
+      const inputs = item.supplements ?? [];
+      return {
+        ...item,
+        supplements:
+          event.state === 'waiting' && event.inputId
+            ? inputs.some((input) => input.inputId === event.inputId)
+              ? inputs
+              : [
+                  ...inputs,
+                  { inputId: event.inputId, text: event.text ?? '', state: 'waiting' as const },
+                ]
+            : inputs.map((input) =>
+                event.inputIds?.includes(input.inputId)
+                  ? { ...input, state: 'applied' as const }
+                  : input,
+              ),
+      };
+    });
+  if (
+    event.type === 'error' ||
+    (event.type === 'session/turn_status' && ['completed', 'aborted'].includes(event.status))
+  )
+    items = items.map((item) =>
+      item.supplements?.some((input) => input.state === 'waiting')
+        ? {
+            ...item,
+            supplements: item.supplements.map((input) =>
+              input.state === 'waiting' ? { ...input, state: 'ended' as const } : input,
+            ),
+          }
+        : item,
+    );
   if (event.type === 'message/removed') return removeChatMessage(items, event.promptId, event.role);
   if (event.type === 'session/memory_selection') return mergeRecallSelection(items, event.receipt);
   if (event.type === 'message/committed')

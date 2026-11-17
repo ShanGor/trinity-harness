@@ -1,3 +1,5 @@
+import { loadTimelineWithPrompt } from './conversation-history';
+import { newId } from '@trinity-harness/shared';
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react';
 import { App, Button, Flex, Typography } from 'antd';
 import type { AcpClient, SessionSummary } from '@trinity-harness/client-acp';
@@ -67,8 +69,7 @@ export function SideConversation({
       )
         setApproval(null);
     };
-    void client
-      .getTimeline(session.sessionId)
+    void loadTimelineWithPrompt(client, session.sessionId, undefined, () => !active)
       .then((page) => {
         if (!active) return;
         for (const value of page.events) event(value);
@@ -173,15 +174,28 @@ export function SideConversation({
         draftStore={draftStore}
         draftKey={session.sessionId}
         busy={busy}
+        canSteer={true}
         resetVersion={0}
         onCancel={() => void client.cancelTurn(session.sessionId)}
-        onSubmit={async (text) => {
+        onSubmit={async (text, _inputMode, inputId) => {
           try {
+            const promptId = [...items]
+              .reverse()
+              .find((item) => item.role === 'user' && !item.removed)?.messageId;
+            if (busy && !promptId) {
+              message.error('Waiting for the active task identity.');
+              return false;
+            }
+            await client.sendPrompt(
+              session.sessionId,
+              text,
+              undefined,
+              undefined,
+              busy && promptId ? { inputId: inputId ?? newId(), promptId } : undefined,
+            );
             setBusy(true);
-            await client.sendPrompt(session.sessionId, text);
             return true;
           } catch (error) {
-            setBusy(false);
             message.error(String(error));
             return false;
           }

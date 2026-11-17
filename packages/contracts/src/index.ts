@@ -34,3 +34,5 @@ export * from './attachments.js';
 
 export * from './browser-document.js';
 export * from './browser-document-presentation.js';
+
+export * from './steering.js';

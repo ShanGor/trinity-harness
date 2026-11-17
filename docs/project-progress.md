@@ -728,3 +728,19 @@ readiness. Browser QA verified a completed run opens with its Scheduled run head
 stays outside Recent, returns to Run history, and prepares a separate Chat draft
 without submitting it. The temporary browser credential profile and task browser
 were removed after validation.
+
+### 2026-11-17 — Active-task Steering
+
+Source implementation adds durable supplement admission/application, safe Loop
+boundaries, atomic final completion arbitration and explicit composer controls.
+Main retains its later-request queue; side Chat/Work can supplement current work.
+Plan reaffirmation and source-backed context/recall retain task continuity. No
+migration or guest change is required. Verification and scope are documented in
+[in-flight Steering](in-flight-steering-gap-analysis.md#9-implementation-specification-and-delivered-scope).
+Deployment and real-provider/worker-crash acceptance remain separate.
+
+Steering verification: full `pnpm test` passed 1,782 tests (32 skipped), including
+local PostgreSQL arbitration; lint, typecheck and production Web build passed.
+An isolated composer preview verified desktop/mobile layout, supplement/queue
+selection and separate Stop through agent-browser; it was removed afterward.
+This does not establish deployed end-to-end or real-provider acceptance.

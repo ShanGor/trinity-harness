@@ -217,4 +217,56 @@ describe.skipIf(!reachable)('PgSessionStore (integration)', () => {
     expect(deleteError).not.toBeNull();
     expect(pgMessage(deleteError)).toMatch(/append-only/i);
   });
+  it('arbitrates concurrent steering admission and completion under the PG append lock', async () => {
+    const sessionId = crypto.randomUUID();
+    const prompt = userMessage('Compare A and B');
+    await store.append(sessionId, [
+      prompt,
+      { type: 'turn/start', eventId: crypto.randomUUID(), at: now(), promptId: prompt.eventId },
+    ]);
+    const inputId = crypto.randomUUID();
+    const input: SessionEvent = {
+      type: 'steering/accepted',
+      eventId: inputId,
+      inputId,
+      promptId: prompt.eventId,
+      at: now(),
+      actor: 'tester',
+      content: [text('Use C instead')],
+    };
+    const terminal: SessionEvent = {
+      type: 'turn/end',
+      eventId: crypto.randomUUID(),
+      at: now(),
+      promptId: prompt.eventId,
+      reason: 'completed',
+    };
+    const results = await Promise.allSettled([
+      store.append(sessionId, [input]),
+      store.append(sessionId, [terminal]),
+    ]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.find((result) => result.status === 'rejected');
+    expect(rejected?.status === 'rejected' && rejected.reason.code).toMatch(
+      /^STEERING_(PENDING|TASK_ENDED)$/,
+    );
+    const history = await store.load(sessionId);
+    if (history.some((event) => event.type === 'steering/accepted')) {
+      await store.append(sessionId, [
+        {
+          type: 'steering/applied',
+          eventId: crypto.randomUUID(),
+          at: now(),
+          promptId: prompt.eventId,
+          inputIds: [inputId],
+        },
+      ]);
+      await store.append(sessionId, [terminal]);
+      const original = await store.append(sessionId, [input]);
+      expect(original).toEqual({ from: 3, to: 3 });
+    }
+    expect((await store.load(sessionId)).filter((event) => event.type === 'turn/end')).toHaveLength(
+      1,
+    );
+  });
 });

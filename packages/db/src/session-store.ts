@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import type { SessionEvent } from '@trinity-harness/contracts';
 import {
+  assertSteeringAppend,
   projectMessages,
   sessionEventSchema,
   topicEpisodeSchema,
@@ -94,6 +95,37 @@ export class PgSessionStore implements SessionStore {
         if (prior) return { from: Number(prior.seq), to: Number(prior.seq) };
       }
 
+      if (
+        events.some(
+          (event) =>
+            event.type === 'steering/accepted' ||
+            (event.type === 'turn/end' && event.reason === 'completed'),
+        )
+      ) {
+        const rows = await tx
+          .select()
+          .from(sessionEvents)
+          .where(eq(sessionEvents.sessionId, sessionId))
+          .orderBy(asc(sessionEvents.seq));
+        const history = rows.map((row) => sessionEventSchema.parse(row.payload));
+        const accepted =
+          events.length === 1 && events[0]?.type === 'steering/accepted' ? events[0] : undefined;
+        const duplicate = accepted
+          ? history.findIndex(
+              (event) => event.type === 'steering/accepted' && event.inputId === accepted.inputId,
+            )
+          : -1;
+        if (duplicate >= 0) {
+          if (
+            canonicalJson({ ...history[duplicate], at: '', eventId: '' }) !==
+            canonicalJson({ ...accepted, at: '', eventId: '' })
+          )
+            throw Object.assign(new Error('Input ID already used.'), { code: 'STEERING_CONFLICT' });
+          return { from: Number(rows[duplicate]!.seq), to: Number(rows[duplicate]!.seq) };
+        }
+        assertSteeringAppend(history, events);
+      }
+
       let seq = last ? last.seq + 1n : 1n;
       let prevHash = last?.prevHash ?? GENESIS_HASH;
       const from = seq;
@@ -166,7 +198,26 @@ export class PgSessionStore implements SessionStore {
                   )
                   .orderBy(desc(conversationEpisodes.id))
                   .limit(12);
-                const request = text(user.content).slice(0, 4000);
+                const supplementRows = await tx
+                  .select()
+                  .from(sessionEvents)
+                  .where(
+                    and(
+                      eq(sessionEvents.sessionId, sessionId),
+                      eq(sessionEvents.type, 'steering/accepted'),
+                      sql`${sessionEvents.payload}->>'promptId' = ${user.eventId}`,
+                    ),
+                  )
+                  .orderBy(asc(sessionEvents.seq));
+                const supplements = supplementRows
+                  .map((row) => sessionEventSchema.parse(row.payload))
+                  .flatMap((event) =>
+                    event.type === 'steering/accepted' ? [text(event.content)] : [],
+                  )
+                  .join('\n');
+                const request = supplements
+                  ? `${text(user.content).slice(0, 2000)}\n[User supplements]\n${supplements.slice(-1900)}`
+                  : text(user.content).slice(0, 4000);
                 const [selection] = await tx
                   .select()
                   .from(sessionEvents)

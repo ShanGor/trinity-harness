@@ -316,6 +316,10 @@ export default function App() {
         }
         return;
       }
+      if (event.type === 'session/steering') {
+        setItems((items) => applyTimelineEvent(items, event));
+        return;
+      }
       if (event.type === 'session/memory_selection') {
         setItems((prev) => mergeRecallSelection(prev, event.receipt));
         return;
@@ -348,7 +352,9 @@ export default function App() {
         if (!replay) message.error(event.message);
         setBusy(false);
         setApproval(null);
-        setItems((items) => settleAssistantItems(items, 'error', event.message));
+        setItems((items) =>
+          settleAssistantItems(applyTimelineEvent(items, event), 'error', event.message),
+        );
         if (sessionRef.current) voiceCallTerminalRef.current?.(sessionRef.current);
         return;
       }
@@ -419,6 +425,7 @@ export default function App() {
         return;
       }
       if (event.type === 'session/turn_status') {
+        setItems((items) => applyTimelineEvent(items, event));
         if (event.status === 'running' || event.status === 'awaiting_approval') {
           setBusy(true);
           const awaitingApproval = event.status === 'awaiting_approval';
@@ -845,15 +852,69 @@ export default function App() {
   );
 
   const onSubmit = useCallback(
-    async (text: string, onPromptId?: (promptId: string) => void, delivery?: PromptDelivery) => {
+    async (
+      text: string,
+      onPromptId?: (promptId: string) => void,
+      delivery?: PromptDelivery,
+      inputMode?: 'steer' | 'queue',
+      inputId?: string,
+    ) => {
       // A phone utterance must not submit or clear files staged with the text draft.
       const submittedAttachments = delivery ? [] : staged;
       const trimmed = text.trim();
       if (
         (!trimmed && submittedAttachments.length === 0) ||
-        (busy && sessionRef.current !== mainSessionId)
+        (busy && sessionRef.current !== mainSessionId && inputMode !== 'steer')
       )
         return false;
+      if (busy && inputMode === 'steer' && sessionRef.current) {
+        const targetSession = sessionRef.current;
+        const promptId = [...currentView.current.items]
+          .reverse()
+          .find((item) => item.role === 'user' && !item.removed)?.messageId;
+        if (!promptId) {
+          message.error('Waiting for the active task identity.');
+          return false;
+        }
+        try {
+          const attachments = [];
+          for (const attachment of submittedAttachments) {
+            const file = localFiles.current.get(attachment.uri);
+            const uploaded = file
+              ? await client.uploadAttachment(
+                  targetSession,
+                  file,
+                  file.type,
+                  file.name,
+                  attachment.operationId,
+                  attachment.origin,
+                )
+              : attachment;
+            attachments.push({
+              uri: uploaded.uri,
+              mimeType: uploaded.mimeType ?? 'application/octet-stream',
+            });
+          }
+          await client.sendPrompt(
+            targetSession,
+            trimmed || '[see attachments]',
+            attachments,
+            undefined,
+            { inputId: inputId ?? newId(), promptId },
+          );
+          setStaged((current) =>
+            current.filter((item) => !submittedAttachments.some((sent) => sent.uri === item.uri)),
+          );
+          for (const attachment of submittedAttachments) {
+            URL.revokeObjectURL(attachment.uri);
+            localFiles.current.delete(attachment.uri);
+          }
+          return true;
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : String(error));
+          return false;
+        }
+      }
       if (sessionRef.current === mainSessionId && mainSessionId) {
         try {
           const attachments = [];
@@ -1353,6 +1414,7 @@ export default function App() {
                 draftStore={composerDrafts.current}
                 draftKey={sessionId ?? 'new'}
                 canQueue={isMain}
+                canSteer={!!sessionId}
                 busy={busy}
                 placeholder={mode === 'chat' ? 'Ask anything…' : 'Describe a task…'}
                 resetVersion={draftResetVersion}
@@ -1364,7 +1426,9 @@ export default function App() {
                 onStagePaste={(text) =>
                   onStageFile(new File([text], 'pasted-text.txt', { type: 'text/plain' }), 'paste')
                 }
-                onSubmit={onSubmit}
+                onSubmit={(text, inputMode, inputId) =>
+                  onSubmit(text, undefined, undefined, inputMode, inputId)
+                }
                 onCancel={onCancelTurn}
               />
             </div>
@@ -2016,6 +2080,18 @@ const ChatMessageContent = memo(function ChatMessageContent({
         <span>You</span>
         <MessageTimestamp at={item.at} />
       </div>
+      {item.supplements?.map((input) => (
+        <div key={input.inputId} role="status">
+          <Typography.Text type="secondary">
+            {input.state === 'waiting'
+              ? 'Waiting for current operation'
+              : input.state === 'applied'
+                ? 'Included in current task'
+                : 'Task ended before inclusion'}
+          </Typography.Text>
+          <div>{input.text}</div>
+        </div>
+      ))}
       {item.content.length > 0 && (
         <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 8 }}>
           {item.content}

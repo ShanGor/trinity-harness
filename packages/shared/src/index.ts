@@ -89,3 +89,5 @@ export {
 export { attachmentUploadErrorSchema } from '@trinity-harness/contracts';
 
 export { historyPreferencesSchema, type HistoryPreferences } from '@trinity-harness/contracts';
+
+export { steeringInputSchema, type SteeringInput } from '@trinity-harness/contracts';
