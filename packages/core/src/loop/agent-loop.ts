@@ -1,3 +1,4 @@
+import { independentFallbackFailure, providerFailureStatus } from './model-retry.js';
 import { pendingSteering, type SessionEvent } from '@trinity-harness/contracts';
 import { createHash } from 'node:crypto';
 import { runtimeClock, runtimeClockMessage } from './runtime-clock.js';
@@ -6,6 +7,10 @@ import { personalModelMessages, fitDialogue } from '../personal-assistant/memory
 import type { PersonalContextPort, SessionMetaStore } from '@trinity-harness/contracts';
 import type { SkillRuntimePort } from '@trinity-harness/contracts';
 import type {
+  Identity,
+  LlmSessionSettings,
+  LlmRoutingPort,
+  LlmResolvedRoute,
   AgentLoop,
   ApprovalRequester,
   ApprovalStore,
@@ -69,6 +74,9 @@ export interface AgentLoopOptions {
   stableContextSegments?: boolean | undefined;
   sessionMetas?: SessionMetaStore | undefined;
   llm: LLMPort;
+  routing?: LlmRoutingPort | undefined;
+  routingSessionId?: string | undefined;
+  routingJournal?: { store: SessionStore; sessionId: string; promptId: string } | undefined;
   /** e.g. "anthropic/claude-sonnet-4-20250514". */
   model: string;
   systemPrompt?: string | undefined;
@@ -177,6 +185,10 @@ export class CoreAgentLoop implements AgentLoop {
     let signal = runOpts?.signal;
     let taskBudget: TaskBudgetScope | undefined = runOpts?.taskBudget;
     const { store, llm } = this.opts;
+    let activeModel = this.opts.model;
+    let activeContextTokens = this.opts.maxContextTokens ?? 200_000;
+    let activeOutputTokens = this.opts.maxOutputTokens ?? 8192;
+    let managedLimits: { contextTokens: number; outputTokens: number } | undefined;
     const creation = (await store.loadRange(sessionId, { afterSeq: 0, toSeq: 1 }))[0]?.event;
     const isChat = creation?.type === 'session/created' && creation.kind === 'chat';
     const verificationEnabled = this.opts.verification;
@@ -186,6 +198,7 @@ export class CoreAgentLoop implements AgentLoop {
     const appendOpts = actor !== undefined ? { actor } : undefined;
     const ctx: ToolContextInput = {
       sessionId,
+      authenticatedActor: runOpts?.authenticatedActor ?? actor,
       workspaceRoot: this.opts.workspaceRoot,
       signal,
       tenantId,
@@ -196,7 +209,10 @@ export class CoreAgentLoop implements AgentLoop {
     const turnSpan = tracer.startSpan('trinity.turn', {
       attributes: {
         'trinity.session_id': sessionId,
-        'trinity.model': this.opts.model,
+        'trinity.model':
+          this.opts.routing && !(this.opts.pricing && Object.hasOwn(this.opts.pricing, activeModel))
+            ? 'unpriced'
+            : activeModel,
         ...(tenantId !== undefined ? { 'trinity.tenant_id': tenantId } : {}),
       },
     });
@@ -341,11 +357,13 @@ export class CoreAgentLoop implements AgentLoop {
         samples: TokenUsage[],
         requestId = newId(),
         durationMs?: number,
+        route?: LlmResolvedRoute,
       ): Promise<void> => {
         const tokens = normalizeTokenUsage(sumTokenUsage(samples));
         const entry: ModelUsage = {
           requestId,
           promptId,
+          ...(route ? { route: route.receipt } : {}),
           model,
           purpose: runOpts?.taskBudget ? 'subagent' : purpose,
           ...(durationMs !== undefined ? { durationMs } : {}),
@@ -357,8 +375,10 @@ export class CoreAgentLoop implements AgentLoop {
         const inputTokens = tokens.inputTokens ?? 0;
         const outputTokens = tokens.outputTokens ?? 0;
         const tokenAttrs = {
-          'trinity.model': model,
-          ...(tenantId !== undefined ? { 'trinity.tenant_id': tenantId } : {}),
+          'trinity.model':
+            route && !(this.opts.pricing && Object.hasOwn(this.opts.pricing, model))
+              ? 'unpriced'
+              : model,
         };
         tokenCounter.add(inputTokens, { ...tokenAttrs, 'trinity.token_kind': 'input' });
         tokenCounter.add(outputTokens, { ...tokenAttrs, 'trinity.token_kind': 'output' });
@@ -371,6 +391,16 @@ export class CoreAgentLoop implements AgentLoop {
         }
       };
 
+      let lastRoute:
+        | {
+            route: LlmResolvedRoute;
+            identity: Identity;
+            settings: LlmSessionSettings;
+            request: LLMRequest;
+            logicalRequestId: string;
+            output: boolean;
+          }
+        | undefined;
       let lane: 'work' | 'verification' | 'final' = 'work';
       const requestStream = async (
         request: LLMRequest,
@@ -383,6 +413,78 @@ export class CoreAgentLoop implements AgentLoop {
         if (signal?.aborted) signal.throwIfAborted();
         const denied = this.opts.usage && tenantId ? await this.checkQuota(tenantId) : null;
         if (denied) throw new Error(denied);
+        let route: LlmResolvedRoute | undefined;
+        let logicalRequestId = newId();
+        let routeOutput = false;
+        const routingIdentity = ctx.authenticatedActor;
+        const routingSession =
+          this.opts.routing && routingIdentity
+            ? await this.opts.routing.session(
+                this.opts.routingSessionId ?? sessionId,
+                routingIdentity,
+              )
+            : null;
+        if (this.opts.routing && !routingIdentity)
+          throw new Error('Authenticated routing identity unavailable');
+        if (routingSession) {
+          const events = await store.load(sessionId);
+          const routes = events.filter(
+            (event) =>
+              event.type === 'model/route' &&
+              event.promptId === promptId &&
+              event.purpose === purpose,
+          );
+          const latest = routes.at(-1);
+          const outcomes = events.filter(
+            (event) => event.type === 'model/route_result' && event.promptId === promptId,
+          );
+          const lastResult =
+            latest?.type === 'model/route'
+              ? outcomes.find(
+                  (event) =>
+                    event.type === 'model/route_result' && event.requestId === latest.requestId,
+                )
+              : undefined;
+          if (latest?.type === 'model/route' && !lastResult)
+            throw new Error(
+              'Previous provider dispatch has an uncertain outcome; submit an explicit retry after reviewing the conversation',
+            );
+          if (
+            latest?.type === 'model/route' &&
+            lastResult?.type === 'model/route_result' &&
+            !lastResult.success
+          )
+            logicalRequestId = latest.logicalRequestId;
+          const attempted = outcomes
+            .filter(
+              (event) =>
+                event.type === 'model/route_result' && event.logicalRequestId === logicalRequestId,
+            )
+            .map((event) => {
+              if (event.type !== 'model/route_result') throw new Error('Invalid route outcome');
+              return {
+                deploymentId: event.deploymentId,
+                connectionId: event.connectionId,
+                output: event.output,
+                retryAt: event.retry?.retryAt,
+                permanent: event.permanent,
+              };
+            });
+          route = await this.opts.routing!.resolve(
+            routingSession.identity,
+            routingSession.settings,
+            request,
+            attempted,
+            latest?.type === 'model/route' ? latest.receipt.deploymentId : undefined,
+          );
+          lastRoute = { route, ...routingSession, request, logicalRequestId, output: false };
+          request = {
+            ...request,
+            model: route.receipt.pricingKey,
+            maxOutputTokens: route.receipt.maxOutputTokens,
+            estimatedInputTokens: undefined,
+          };
+        }
         const effectivePurpose = runOpts?.taskBudget ? 'subagent' : purpose;
         const requestId =
           (await taskBudget?.admit(
@@ -390,6 +492,27 @@ export class CoreAgentLoop implements AgentLoop {
             effectivePurpose,
             purpose === 'compaction' ? 'work' : lane,
           )) ?? newId();
+        const appendRoute = async (
+          event: Extract<SessionEvent, { type: 'model/route' | 'model/route_result' }>,
+        ): Promise<void> => {
+          await store.append(sessionId, [event], appendOpts);
+          if (this.opts.routingJournal)
+            await this.opts.routingJournal.store.append(
+              this.opts.routingJournal.sessionId,
+              [{ ...event, promptId: this.opts.routingJournal.promptId }],
+              appendOpts,
+            );
+        };
+        if (route)
+          await appendRoute({
+            ...meta(),
+            type: 'model/route',
+            promptId,
+            requestId,
+            logicalRequestId,
+            purpose,
+            receipt: route.receipt,
+          });
         if (clock)
           await store.append(
             sessionId,
@@ -412,7 +535,10 @@ export class CoreAgentLoop implements AgentLoop {
         throwIfAborted();
         const modelStarted = performance.now();
         const attributes = {
-          'trinity.model': request.model,
+          'trinity.model':
+            route && !(this.opts.pricing && Object.hasOwn(this.opts.pricing, request.model))
+              ? 'unpriced'
+              : request.model,
           'trinity.llm.purpose': effectivePurpose,
         };
         modelLatency.record(modelStarted - preparationStarted, {
@@ -425,24 +551,75 @@ export class CoreAgentLoop implements AgentLoop {
           modelLatency.record(elapsed, { ...attributes, 'trinity.llm.phase': phase });
           modelSpan.setAttribute(`trinity.llm.${phase}_ms`, elapsed);
         };
+        const recordRouteResult = async (success: boolean, failure?: unknown): Promise<void> => {
+          if (route)
+            await appendRoute({
+              ...meta(),
+              type: 'model/route_result',
+              promptId,
+              requestId,
+              logicalRequestId,
+              deploymentId: route.receipt.deploymentId,
+              connectionId: route.receipt.connectionId,
+              output: routeOutput,
+              success,
+              ...(!success && failure
+                ? {
+                    permanent: independentFallbackFailure(failure),
+                    retry: modelRetry(failure, 1, (this.opts.now ?? Date.now)()),
+                  }
+                : {}),
+            });
+        };
+        let dispatchStarted = false;
+        const recordRouteHealth = async (success: boolean, failure?: unknown): Promise<void> => {
+          if (!dispatchStarted) return;
+          if (
+            route &&
+            routingSession &&
+            (success ||
+              (failure &&
+                (classifyModelFailure(failure) === 'retry' || independentFallbackFailure(failure))))
+          )
+            await this.opts.routing!.observe(
+              routingSession.identity,
+              requestId,
+              route,
+              success ? 'success' : independentFallbackFailure(failure) ? 'permanent' : 'transient',
+              !success && classifyModelFailure(failure) === 'retry'
+                ? {
+                    until: modelRetry(failure, 1, (this.opts.now ?? Date.now)()).retryAt,
+                    scope: providerFailureStatus(failure) === 429 ? 'connection' : 'deployment',
+                  }
+                : undefined,
+            );
+        };
         let stream: AsyncIterable<StreamChunk>;
         try {
-          stream = await llm.stream(request);
+          if (route && routingSession)
+            await this.opts.routing!.admit(routingSession.identity, route);
+          dispatchStarted = true;
+          stream = await llm.stream(request, route);
         } catch (err) {
+          await recordRouteResult(false, err);
           recordLatency('duration');
           modelSpan.setStatus({ code: 2 });
           modelSpan.end();
           await recordUsage(
             request.model,
             purpose,
-            [],
+            dispatchStarted ? [] : [{ inputTokens: 0, outputTokens: 0 }],
             requestId,
             performance.now() - modelStarted,
+            route,
           );
+          await recordRouteHealth(false, err);
           throw err;
         }
         const samples: TokenUsage[] = [];
         let firstOutput = false;
+        let routeSuccess = false;
+        let routeFailure: unknown;
         let firstText = false;
         return (async function* () {
           try {
@@ -460,13 +637,25 @@ export class CoreAgentLoop implements AgentLoop {
                 firstText = true;
                 recordLatency('first_text');
               }
+              if (
+                chunk.kind === 'text-delta' ||
+                chunk.kind === 'reasoning-delta' ||
+                chunk.kind === 'tool-call'
+              ) {
+                routeOutput = true;
+                if (lastRoute) lastRoute.output = true;
+              }
+              if (chunk.kind === 'finish' && chunk.reason !== 'error') routeSuccess = true;
               if (chunk.kind === 'usage') samples.push(chunk);
               yield chunk;
             }
           } catch (err) {
+            routeFailure = err;
+            routeSuccess = false;
             modelSpan.setStatus({ code: 2 });
             throw err;
           } finally {
+            await recordRouteResult(routeSuccess, routeFailure);
             recordLatency('duration');
             modelSpan.end();
             await recordUsage(
@@ -475,7 +664,9 @@ export class CoreAgentLoop implements AgentLoop {
               samples,
               requestId,
               performance.now() - modelStarted,
+              route,
             );
+            await recordRouteHealth(routeSuccess, routeFailure);
           }
         })();
       };
@@ -493,11 +684,52 @@ export class CoreAgentLoop implements AgentLoop {
               event.type === 'task/recovery' && event.promptId === promptId && event.kind === kind,
           ).length;
         if (attempts >= limit || steps >= stepLimit) return false;
-        const retry =
+        let alternate = false;
+        if (lastRoute && kind === 'retry' && !lastRoute.output && failure !== undefined) {
+          const attempted = events
+            .filter(
+              (event) =>
+                event.type === 'model/route_result' &&
+                event.logicalRequestId === lastRoute!.logicalRequestId,
+            )
+            .map((event) => {
+              if (event.type !== 'model/route_result') throw new Error('Invalid route result');
+              return {
+                deploymentId: event.deploymentId,
+                connectionId: event.connectionId,
+                output: event.output,
+                retryAt: event.retry?.retryAt,
+                permanent: event.permanent,
+              };
+            });
+          try {
+            const next = await this.opts.routing!.resolve(
+              lastRoute.identity,
+              lastRoute.settings,
+              lastRoute.request,
+              attempted,
+            );
+            alternate = next.receipt.deploymentId !== lastRoute.route.receipt.deploymentId;
+          } catch (error) {
+            if ((error as { code?: string }).code !== 'UNAVAILABLE') throw error;
+          }
+          if (independentFallbackFailure(failure) && !alternate) return false;
+        }
+        let retry =
           failure === undefined
             ? undefined
             : modelRetry(failure, attempts + 1, (this.opts.now ?? Date.now)());
-        const progress = retry ? retryProgress(retry) : undefined;
+        if (retry && alternate)
+          retry = {
+            ...retry,
+            delayMs: 0,
+            retryAt: new Date((this.opts.now ?? Date.now)()).toISOString(),
+          };
+        const progress = alternate
+          ? 'The provider is unavailable. Switching to an approved backup for the next request.'
+          : retry
+            ? retryProgress(retry)
+            : undefined;
         await store.append(
           sessionId,
           [
@@ -572,7 +804,13 @@ export class CoreAgentLoop implements AgentLoop {
               force,
               memoryPromptId:
                 creation?.type === 'session/created' && creation.kind ? promptId : undefined,
-              model: this.opts.model,
+              model: activeModel,
+              ...(managedLimits
+                ? {
+                    windowTokens: managedLimits.contextTokens,
+                    outputTokens: managedLimits.outputTokens,
+                  }
+                : {}),
               ...(system ? { system } : {}),
               tools: gate.schemas(),
               llm: { stream: (request) => requestStream(request, 'compaction') },
@@ -689,6 +927,24 @@ export class CoreAgentLoop implements AgentLoop {
           }
           await waitForRetry();
           await runOpts?.contextGuard?.();
+          activeModel = this.opts.model;
+          activeContextTokens = this.opts.maxContextTokens ?? 200_000;
+          activeOutputTokens = this.opts.maxOutputTokens ?? 8192;
+          managedLimits = undefined;
+          if (this.opts.routing && ctx.authenticatedActor) {
+            // Planning reads configuration, without resolving secrets or
+            // contacting a provider. Dispatch revalidates the complete request.
+            const limits = await this.opts.routing.limits(
+              this.opts.routingSessionId ?? sessionId,
+              ctx.authenticatedActor,
+            );
+            if (limits) {
+              activeModel = limits.model;
+              activeContextTokens = limits.contextTokens;
+              activeOutputTokens = limits.outputTokens;
+              managedLimits = limits;
+            }
+          }
           const supplements = pendingSteering(await store.load(sessionId), promptId);
           if (supplements.length) {
             for (const input of supplements) {
@@ -778,12 +1034,7 @@ export class CoreAgentLoop implements AgentLoop {
                 });
                 const dialogueCharacters = Math.max(
                   0,
-                  Math.floor(
-                    ((this.opts.maxContextTokens ?? 200_000) -
-                      (this.opts.maxOutputTokens ?? 8192) -
-                      inputTokens * 1.15) *
-                      2,
-                  ),
+                  Math.floor((activeContextTokens - activeOutputTokens - inputTokens * 1.15) * 2),
                 );
                 const receipt = await this.opts.personalContext.select(
                   owner,
@@ -797,11 +1048,11 @@ export class CoreAgentLoop implements AgentLoop {
                         .update(
                           JSON.stringify({
                             version: 1,
-                            model: this.opts.model,
+                            model: activeModel,
                             system: this.opts.systemPrompt,
                             tools: gate.schemas(),
-                            window: this.opts.maxContextTokens,
-                            output: this.opts.maxOutputTokens,
+                            window: activeContextTokens,
+                            output: activeOutputTokens,
                           }),
                         )
                         .digest('hex')
@@ -863,19 +1114,19 @@ export class CoreAgentLoop implements AgentLoop {
           const verification = taskVerification(history, promptId);
           const budgetConcluding =
             (await taskBudget?.shouldConclude({
-              model: this.opts.model,
+              model: activeModel,
               messages: toModelMessages(history),
               tools: gate.schemas(),
               system: this.opts.systemPrompt,
-              maxOutputTokens: this.opts.maxOutputTokens ?? 8192,
+              maxOutputTokens: activeOutputTokens,
             })) ?? false;
           const budgetFinalizing =
             (await taskBudget?.shouldFinalize({
-              model: this.opts.model,
+              model: activeModel,
               messages: toModelMessages(history),
               system: this.opts.systemPrompt,
               tools: gate.schemas(),
-              maxOutputTokens: this.opts.maxOutputTokens ?? 8192,
+              maxOutputTokens: activeOutputTokens,
             })) ?? false;
           const verifying =
             planned &&
@@ -960,7 +1211,7 @@ export class CoreAgentLoop implements AgentLoop {
             runtimeClockMessage(clock),
           ];
           const request: LLMRequest = {
-            model: this.opts.model,
+            model: activeModel,
             cache: stableSegment,
             system,
             messages: currentMessages(),
@@ -978,10 +1229,10 @@ export class CoreAgentLoop implements AgentLoop {
                 : gate.schemas(),
             signal,
             maxOutputTokens: Math.min(
-              this.opts.maxOutputTokens ?? 8192,
+              activeOutputTokens,
               Math.max(
                 1,
-                (this.opts.maxContextTokens ?? 200_000) -
+                activeContextTokens -
                   Math.ceil(
                     estimateRequestTokens({
                       messages: currentMessages(),
@@ -1016,11 +1267,7 @@ export class CoreAgentLoop implements AgentLoop {
               ...request,
               estimatedInputTokens: undefined,
             });
-            if (
-              Math.ceil(rawEstimate * 1.15) + (this.opts.maxOutputTokens ?? 8192) <=
-              (this.opts.maxContextTokens ?? 200_000)
-            )
-              break;
+            if (Math.ceil(rawEstimate * 1.15) + activeOutputTokens <= activeContextTokens) break;
             const selection = history.findLast(
               (event) => event.type === 'memory/selection' && event.receipt.promptId === promptId,
             );
@@ -1045,14 +1292,14 @@ export class CoreAgentLoop implements AgentLoop {
             request.estimatedInputTokens = undefined;
           }
           request.estimatedInputTokens =
-            estimateRequestTokens(request) + observedInputAdjustment(history, this.opts.model);
+            estimateRequestTokens(request) + observedInputAdjustment(history, activeModel);
           const inputEstimate = Math.ceil(estimateRequestTokens(request) * 1.15);
-          const room = (this.opts.maxContextTokens ?? 200_000) - inputEstimate;
+          const room = activeContextTokens - inputEstimate;
           if (room < 1)
             throw new Error(
               'CONTEXT_TOO_LARGE: required prompt/instructions exceed the model window after compaction',
             );
-          request.maxOutputTokens = Math.min(this.opts.maxOutputTokens ?? 8192, room);
+          request.maxOutputTokens = Math.min(activeOutputTokens, room);
 
           // M5 quota gate (docs/design.md §17 "beforeModelCall 拦截点实时判定"):
           // deny BEFORE spending tokens. Fail-closed: a quota-store failure
@@ -1067,7 +1314,7 @@ export class CoreAgentLoop implements AgentLoop {
           }
 
           const stepSpan = tracer.startSpan('trinity.step', {
-            attributes: { 'trinity.step': steps, 'trinity.model': this.opts.model },
+            attributes: { 'trinity.step': steps, 'trinity.model': activeModel },
           });
           let text = '';
           let reasoningText = '';
@@ -1123,9 +1370,12 @@ export class CoreAgentLoop implements AgentLoop {
             )
               continue;
             if (
-              classification === 'retry' &&
+              (classification === 'retry' ||
+                (!!lastRoute && independentFallbackFailure(failure))) &&
               !text &&
               !reasoningText &&
+              !reasoningSignature &&
+              !lastRoute?.output &&
               !toolCalls.length &&
               (await recover(
                 'retry',
@@ -1795,7 +2045,10 @@ export class CoreAgentLoop implements AgentLoop {
       }
       turnSpan.end();
       turnDuration.record(Date.now() - turnStartedAt, {
-        'trinity.model': this.opts.model,
+        'trinity.model':
+          this.opts.routing && !(this.opts.pricing && Object.hasOwn(this.opts.pricing, activeModel))
+            ? 'unpriced'
+            : activeModel,
         'trinity.turn_reason': reason,
       });
       turnSteps.record(steps);

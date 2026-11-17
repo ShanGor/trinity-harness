@@ -9,7 +9,7 @@ import {
 import { EnvironmentController, HttpNodeRuntime } from '../src/index.js';
 
 it('reads status alongside guest traffic and does not quarantine a cancelled status read', async () => {
-  const identity: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'developer' };
+  const identity: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'member' };
   const record: EnvironmentRecord = {
     id: randomUUID(),
     generation: randomUUID(),
@@ -55,7 +55,7 @@ it('reads status alongside guest traffic and does not quarantine a cancelled sta
 });
 
 it('quarantines uncertain starts and never assigns another host on retry', async () => {
-  const identity: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'developer' };
+  const identity: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'member' };
   let record: EnvironmentRecord = {
     id: randomUUID(),
     generation: randomUUID(),

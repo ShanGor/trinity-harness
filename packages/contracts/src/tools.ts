@@ -24,6 +24,8 @@ export interface ToolResult<V = unknown> {
 }
 
 export interface ToolContext {
+  /** Authenticated originating account, inherited by children; never model input. */
+  authenticatedActor?: string | undefined;
   /** Current committed user message's text, supplied by the Loop, never tool arguments. */
   userRequest?: string | undefined;
   /** Current committed prompt event; set by the owning Loop, not model arguments. */

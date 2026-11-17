@@ -1,4 +1,18 @@
-import { steeringInputSchema } from '@trinity-harness/contracts';
+import { registerLlmConfigurationApi } from './llm-configuration-api.js';
+import type {
+  LlmConfigurationPort,
+  LlmCredentialPort,
+  LlmEndpointPolicyPort,
+  LlmProviderOperationsPort,
+  LLMPort,
+  ModelPricing,
+} from '@trinity-harness/contracts';
+import {
+  userRoleUpdateSchema,
+  roleSchema,
+  hasCapability,
+  steeringInputSchema,
+} from '@trinity-harness/contracts';
 import { workspaceDocumentRequestSchema, workspaceDocumentSchema } from '@trinity-harness/shared';
 import { historyPreferencesSchema } from '@trinity-harness/contracts';
 import {
@@ -182,7 +196,7 @@ const loginSchema = z.object({
 const createUserSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8).max(200),
-  role: z.enum(['admin', 'developer', 'viewer']),
+  role: roleSchema.default('member'),
 });
 
 const postParamsSchema = z.object({
@@ -633,6 +647,12 @@ export interface ServerAuthDeps {
 }
 
 export interface ServerDeps {
+  llmConfiguration?: LlmConfigurationPort | undefined;
+  llmOperations?: LlmProviderOperationsPort | undefined;
+  llmProbeGateway?: LLMPort | undefined;
+  llmPricing?: ModelPricing | undefined;
+  llmCredentials?: LlmCredentialPort | undefined;
+  llmEndpointPolicy?: LlmEndpointPolicyPort | undefined;
   browserPreview?: BrowserPreviewPort;
   browserInteraction?: BrowserInteractionPort;
   schedules?: ScheduleStore;
@@ -884,7 +904,21 @@ export async function buildServer(
         }
         return denied;
       }
-      req.identity = identity;
+      // Signed claims identify the account; the directory decides current authority.
+      let user;
+      try {
+        user = await auth.users.findById(identity.userId);
+      } catch {
+        const denied = reply.code(503).send({ error: 'account authorization unavailable' });
+        if ((req.headers.upgrade ?? '').toLowerCase() === 'websocket') req.raw.socket?.end();
+        return denied;
+      }
+      if (!user || user.tenantId !== identity.tenantId || user.role !== identity.role) {
+        const denied = reply.code(401).send({ error: 'unauthorized' });
+        if ((req.headers.upgrade ?? '').toLowerCase() === 'websocket') req.raw.socket?.end();
+        return denied;
+      }
+      req.identity = { userId: user.id, tenantId: user.tenantId, role: user.role };
     });
   }
 
@@ -1272,6 +1306,17 @@ export async function buildServer(
     return { sessionId, meta };
   };
 
+  registerLlmConfigurationApi(app, {
+    configuration: deps.llmConfiguration,
+    operations: deps.llmOperations,
+    pricing: deps.llmPricing,
+    gateway: deps.llmProbeGateway,
+    credentials: deps.llmCredentials,
+    endpointPolicy: deps.llmEndpointPolicy,
+    store: deps.store,
+    authorizeSession,
+  });
+
   const executionGuard = (sessionId: string, actor: string): (() => Promise<void>) | undefined =>
     !auth
       ? undefined
@@ -1519,6 +1564,29 @@ export async function buildServer(
         result: 'ok',
       });
       return reply.code(201).send({ user });
+    });
+
+    app.patch('/api/admin/users/:userId/role', async (req, reply) => {
+      const identity = req.identity!;
+      if (!hasCapability(identity.role, 'tenant.users.manage'))
+        return reply.code(403).send({ error: 'admin role required' });
+      if (!auth.users.setRole)
+        return reply.code(503).send({ error: 'role management unavailable' });
+      const params = z.object({ userId: z.uuid() }).safeParse(req.params);
+      const body = userRoleUpdateSchema.safeParse(req.body);
+      if (!params.success || !body.success)
+        return reply.code(400).send({ error: 'invalid role update' });
+      const outcome = await auth.users.setRole(
+        identity.tenantId,
+        params.data.userId,
+        body.data.role,
+        identity.userId,
+      );
+      if (outcome === 'not_found') return reply.code(404).send({ error: 'user not found' });
+      if (outcome === 'last_admin')
+        return reply.code(409).send({ error: 'retain at least one tenant Admin' });
+      if (outcome === 'forbidden') return reply.code(403).send({ error: 'Admin access revoked' });
+      return { ok: true };
     });
 
     app.get('/api/admin/users', async (req, reply) => {
@@ -1862,6 +1930,16 @@ export async function buildServer(
     }
   });
 
+  const initialLlmProfile = async (
+    identity: Identity | undefined,
+  ): Promise<{ llmProfileId?: string }> => {
+    if (!identity || !deps.llmConfiguration) return {};
+    const state = await deps.llmConfiguration.read(identity.tenantId);
+    if (state.source !== 'database') return {};
+    if (!state.published) throw new Error('Published AI configuration unavailable');
+    return { llmProfileId: state.published.defaultProfileId };
+  };
+
   app.post('/api/sessions', async (req, reply) => {
     const body = createSessionSchema.safeParse(req.body);
     if (!body.success) {
@@ -1883,7 +1961,7 @@ export async function buildServer(
     const kind = body.data.kind;
     const sessionRole =
       body.data.sessionRole ?? (kind === 'chat' ? 'side' : kind === 'work' ? 'task' : undefined);
-    if (identity?.role === 'viewer' && kind)
+    if (identity && !hasCapability(identity.role, 'assistant.run'))
       return reply.code(403).send({ error: 'viewer role is read-only' });
     if (
       (kind === 'chat' && (body.data.workspace || sessionRole === 'task')) ||
@@ -2009,6 +2087,7 @@ export async function buildServer(
       [
         {
           type: 'session/created',
+          ...(await initialLlmProfile(identity)),
           eventId: newId(),
           at: new Date().toISOString(),
           workspaceUri: existing ? existing.workspaceUri : workspaceDir,
@@ -2144,7 +2223,7 @@ export async function buildServer(
       !granted.meta ||
       !canAccess(identity, granted.meta)
     ) {
-      return reply.code(403).send({ error: 'session deletion requires a developer or admin' });
+      return reply.code(403).send({ error: 'session deletion requires execution permission' });
     }
     if (granted.meta.sessionRole === 'main')
       return reply
@@ -4219,6 +4298,8 @@ export async function buildServer(
           return result({});
 
         case 'session/new': {
+          if (identity && !hasCapability(identity.role, 'assistant.run'))
+            return reply.send(jsonRpcError(id, -32003, 'read-only role'));
           const cwd = typeof params['cwd'] === 'string' ? params['cwd'] : deps.workspaceRoot;
           const sessionId = newId();
           if (auth) {
@@ -4235,6 +4316,7 @@ export async function buildServer(
             [
               {
                 type: 'session/created',
+                ...(await initialLlmProfile(identity)),
                 eventId: newId(),
                 at: new Date().toISOString(),
                 workspaceUri: cwd,
@@ -4480,6 +4562,8 @@ export async function buildServer(
         }
 
         case 'session/set_config_option': {
+          if (identity && !hasCapability(identity.role, 'assistant.run'))
+            return reply.send(jsonRpcError(id, -32003, 'read-only role'));
           const sessionId = String(params['sessionId'] ?? '');
           const granted = await authorizeSession(sessionId, identity, reply);
           if (!granted) return;

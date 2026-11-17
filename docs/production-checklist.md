@@ -6,7 +6,9 @@
 
 ## Account roles and LLM configuration (planned)
 
-Requirements/design preparation only; no implementation or deployment is certified. Follow [the 2026-11-17 plan](improvement-plan-2026-11-17.md).
+Mechanisms are implemented in the checkout. The unchecked gates below concern deployment and production acceptance; local mechanism tests do not certify them. Follow [the plan](improvement-plan-2026-11-17.md), [operations runbook](llm-configuration-operations.md) and [recorded implementation evidence](project-progress.md#account-roles-and-llm-configuration--2026-11-17).
+
+- [x] Local implementation validation: 1,843 passing tests (32 opt-in skipped), lint/typecheck, changed-file formatting, production Web build, fresh/seeded-upgrade migration checks and desktop/mobile administration fixtures. Web build has a large-chunk warning; no paid-provider or production acceptance is implied.
 
 - [ ] Deploy compatible role/event/configuration readers across server, worker, scheduler, Node Agent and clients before target writers. Retire old writers; review/apply migrations and verify Developer→Member, Viewer retention, explicit Expert assignment, last-Admin protection and bounded token refresh/current-role checks.
 - [ ] Verify tenant/session access and capability matrix through direct API and background execution, including downgraded roles, stale tokens and invalid Expert overrides. No role bypasses tool approvals or grants additional private-data scope implicitly.

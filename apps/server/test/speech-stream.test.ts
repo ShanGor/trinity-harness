@@ -1,3 +1,4 @@
+import { usersForIdentity } from './auth-fixture.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { request as createRequest } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -75,6 +76,7 @@ describe('streaming ASR proxy (docs/voice-call-design.md §8.1)', () => {
       speech: { asrUrl: upstream.url, ttsUrl: upstream.url },
       usage: usageWith({}),
       auth: {
+        users: usersForIdentity(() => IDENTITY),
         tokens: { verify: async (t: string) => (t === 'good' ? IDENTITY : null) },
         hasher: { hash: async () => '', verify: async () => false },
       } as never,
@@ -146,6 +148,7 @@ describe('streaming ASR proxy (docs/voice-call-design.md §8.1)', () => {
       speech: { asrUrl: upstream.url, ttsUrl: upstream.url },
       usage: usageWith({ concurrentAsrStreams: 1 }),
       auth: {
+        users: usersForIdentity(() => IDENTITY),
         tokens: { verify: async (t: string) => (t === 'good' ? IDENTITY : null) },
         hasher: { hash: async () => '', verify: async () => false },
       } as never,

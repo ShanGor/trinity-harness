@@ -51,6 +51,8 @@ export interface EventSink {
 }
 
 export interface RunTurnOptions {
+  /** Authenticated originating account, inherited by children; never model input. */
+  authenticatedActor?: string | undefined;
   /** Inherited parent task allowance; never supplied by model arguments. */
   taskBudget?: TaskBudgetScope | undefined;
   contextGuard?: (() => Promise<void>) | undefined;

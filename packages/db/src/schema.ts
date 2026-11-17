@@ -173,12 +173,15 @@ export const users = pgTable(
     passwordHash: text('password_hash').notNull(),
     speechVoiceStyle: text('speech_voice_style'),
     historyTimezone: text('history_timezone'),
-    role: text('role').notNull().default('developer'),
+    role: text('role').notNull().default('member'),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
       .notNull()
       .defaultNow(),
   },
-  (t) => [uniqueIndex('users_email_key').on(t.email)],
+  (t) => [
+    uniqueIndex('users_email_key').on(t.email),
+    check('users_role_valid', sql`${t.role} in ('admin', 'expert', 'member', 'viewer')`),
+  ],
 );
 
 /** Session ownership/metadata; the event log lives in session_events. */
@@ -433,4 +436,107 @@ export const personaEvents = pgTable(
     primaryKey({ columns: [t.tenantId, t.userId, t.revision] }),
     uniqueIndex('persona_operation_key').on(t.tenantId, t.userId, t.operationId),
   ],
+);
+
+/** Tenant LLM control plane. Immutable revisions never contain credentials. */
+export const llmConfigurations = pgTable('llm_configurations', {
+  tenantId: uuid('tenant_id')
+    .primaryKey()
+    .references(() => tenants.id),
+  version: bigint('version', { mode: 'number' }).notNull().default(0),
+  activeRevision: bigint('active_revision', { mode: 'number' }),
+  source: text('source').notNull().default('environment'),
+  draft: jsonb('draft'),
+});
+export const llmConfigurationRevisions = pgTable(
+  'llm_configuration_revisions',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    configuration: jsonb('configuration').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.revision] })],
+);
+export const llmCredentials = pgTable(
+  'llm_credentials',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    connectionId: uuid('connection_id').notNull(),
+    versionId: uuid('version_id').notNull(),
+    sealed: text('sealed').notNull(),
+    revoked: boolean('revoked').notNull().default(false),
+    current: boolean('current').notNull().default(true),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.connectionId, t.versionId] }),
+    uniqueIndex('llm_credentials_current')
+      .on(t.tenantId, t.connectionId)
+      .where(sql`${t.current} = true`),
+  ],
+);
+export const llmConfigurationOperations = pgTable(
+  'llm_configuration_operations',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    operationId: uuid('operation_id').notNull(),
+    fingerprint: text('fingerprint').notNull(),
+    activity: jsonb('activity').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.operationId] })],
+);
+export const llmProbes = pgTable(
+  'llm_probes',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    operationId: uuid('operation_id').notNull(),
+    connectionId: uuid('connection_id').notNull(),
+    deploymentId: uuid('deployment_id').notNull(),
+    version: bigint('version', { mode: 'number' }).notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    result: jsonb('result').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.operationId] })],
+);
+export const llmHealth = pgTable(
+  'llm_health',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    deploymentId: uuid('deployment_id').notNull(),
+    credentialVersionId: uuid('credential_version_id').notNull(),
+    failures: bigint('failures', { mode: 'number' }).notNull().default(0),
+    credentialBlocked: boolean('credential_blocked').notNull().default(false),
+    connectionId: uuid('connection_id').notNull(),
+    retryAt: timestamp('retry_at', { withTimezone: true, mode: 'string' }),
+    connectionRetryAt: timestamp('connection_retry_at', { withTimezone: true, mode: 'string' }),
+    open: boolean('open').notNull().default(false),
+    observedAt: timestamp('observed_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.deploymentId, t.credentialVersionId] }),
+    index('llm_health_connection_retry').on(t.tenantId, t.connectionId, t.connectionRetryAt),
+  ],
+);
+export const llmHealthObservations = pgTable(
+  'llm_health_observations',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    requestId: uuid('request_id').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.requestId] })],
 );

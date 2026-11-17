@@ -71,9 +71,9 @@ export class EventTaskExecution implements TaskExecutionPort {
       Math.ceil(estimateRequestTokens(request) * 1.15) + (request.maxOutputTokens ?? 8192);
     const costs = (request: LLMRequest): { currency: string; amount: string }[] =>
       limits.maxCost.map((ceiling) => {
-        const prices = this.prices[request.model]?.filter(
-          (price) => price.currency === ceiling.currency,
-        );
+        const prices = (
+          Object.hasOwn(this.prices, request.model) ? this.prices[request.model] : undefined
+        )?.filter((price) => price.currency === ceiling.currency);
         if (!prices?.length)
           throw new TaskBudgetError(
             `Task cost cannot be bounded: missing ${ceiling.currency} price for ${request.model}`,

@@ -11,6 +11,7 @@ import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
 
 import {
+  llmInfrastructureEnvShape,
   browserDeploymentEnvShape,
   guestDeploymentEnvShape,
   validateGuestDeployment,
@@ -20,6 +21,7 @@ import {
 import { DEFAULT_SYSTEM_PROMPT, loadEnv } from '@trinity-harness/shared';
 
 const workerEnvSchema = z.object({
+  ...llmInfrastructureEnvShape,
   ...guestDeploymentEnvShape,
   SCHEDULING_ENABLED: z
     .enum(['true', 'false'])

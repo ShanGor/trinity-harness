@@ -219,9 +219,9 @@ describe('teams & per-session workspaces', () => {
     const address = await bundle.app.listen({ port: 0, host: '127.0.0.1' });
     baseUrl = address;
     alice = (
-      await bundle.users.createUser({ tenantId: 't1', email: 'alice@x.com', role: 'developer' })
+      await bundle.users.createUser({ tenantId: 't1', email: 'alice@x.com', role: 'member' })
     ).id;
-    bob = (await bundle.users.createUser({ tenantId: 't1', email: 'bob@x.com', role: 'developer' }))
+    bob = (await bundle.users.createUser({ tenantId: 't1', email: 'bob@x.com', role: 'member' }))
       .id;
   });
 
@@ -324,7 +324,7 @@ describe('teams & per-session workspaces', () => {
     const carol = await bundle.users.createUser({
       tenantId: 't1',
       email: 'carol@x.com',
-      role: 'developer',
+      role: 'member',
     });
     void carol;
 

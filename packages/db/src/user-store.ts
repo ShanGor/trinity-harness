@@ -1,22 +1,24 @@
 import type { Identity, PasswordHasher, Role, User, UserStore } from '@trinity-harness/contracts';
 import {
+  historicalRoleSchema,
+  roleSchema,
   historyPreferencesSchema,
   type HistoryPreferences,
   speechPreferencesSchema,
   type SpeechPreferences,
 } from '@trinity-harness/contracts';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { newId } from '@trinity-harness/shared';
 
 import type { Db } from './client.js';
-import { users } from './schema.js';
+import { users, auditLog } from './schema.js';
 
 function toUser(row: typeof users.$inferSelect): User {
   return {
     id: row.id,
     tenantId: row.tenantId,
     email: row.email,
-    role: row.role as Role,
+    role: historicalRoleSchema.parse(row.role),
     createdAt: new Date(row.createdAt).toISOString(),
   };
 }
@@ -62,13 +64,57 @@ export class PgUserStore implements UserStore {
         tenantId: input.tenantId,
         email: input.email,
         passwordHash: input.passwordHash,
-        role: input.role,
+        role: roleSchema.parse(input.role),
       })
       .returning();
     if (!row) {
       throw new Error('createUser: no row returned');
     }
     return toUser(row);
+  }
+
+  async setRole(
+    tenantId: string,
+    userId: string,
+    role: Role,
+    actorId?: string,
+  ): Promise<'updated' | 'not_found' | 'last_admin' | 'forbidden'> {
+    const parsed = roleSchema.parse(role);
+    return this.db.transaction(async (tx) => {
+      // Serialize all role changes in a tenant, including concurrent demotions.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${tenantId}, 0))`);
+      if (actorId) {
+        const [actor] = await tx
+          .select({ role: users.role })
+          .from(users)
+          .where(and(eq(users.id, actorId), eq(users.tenantId, tenantId)));
+        if (actor?.role !== 'admin') return 'forbidden';
+      }
+      const [target] = await tx
+        .select()
+        .from(users)
+        .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)))
+        .for('update');
+      if (!target) return 'not_found';
+      if (target.role === 'admin' && parsed !== 'admin') {
+        const admins = await tx
+          .select({ id: users.id })
+          .from(users)
+          .where(and(eq(users.tenantId, tenantId), eq(users.role, 'admin')));
+        if (admins.length < 2) return 'last_admin';
+      }
+      await tx.update(users).set({ role: parsed }).where(eq(users.id, userId));
+      await tx.insert(auditLog).values({
+        id: newId(),
+        tenantId,
+        userId: actorId ?? 'operator',
+        action: 'admin/user-role',
+        target: userId,
+        result: 'ok',
+        detail: { before: historicalRoleSchema.parse(target.role), role: parsed },
+      });
+      return 'updated';
+    });
   }
 
   async getHistoryPreferences(

@@ -14,7 +14,7 @@ function fixture(startup: ConstructorParameters<typeof FirecrackerGuestRouter>[8
   const user: User = {
     id: randomUUID(),
     tenantId: randomUUID(),
-    role: 'developer',
+    role: 'member',
     email: 'test@example.com',
     createdAt: '2026-01-01T00:00:00Z',
   };

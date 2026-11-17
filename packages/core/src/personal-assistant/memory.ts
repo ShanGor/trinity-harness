@@ -105,7 +105,7 @@ export class PersonalContext implements PersonalContextPort {
   ) {}
   async validate(meta: SessionMeta, receipt: RecallReceipt, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    const identity: Identity = { tenantId: meta.tenantId, userId: meta.userId, role: 'developer' };
+    const identity: Identity = { tenantId: meta.tenantId, userId: meta.userId, role: 'member' };
     const snapshot = await this.memory.snapshot(identity);
     const fail = (): never => {
       throw Object.assign(
@@ -216,7 +216,7 @@ export class PersonalContext implements PersonalContextPort {
     // Team execution receives no personal profile or personal history.
     if (meta.scope === 'team')
       return { promptId, policyRevision: 0, memories: [], episodes: [], omitted: false };
-    const identity: Identity = { tenantId: meta.tenantId, userId: meta.userId, role: 'developer' };
+    const identity: Identity = { tenantId: meta.tenantId, userId: meta.userId, role: 'member' };
     let snapshot = await this.memory.snapshot(identity);
     const explicit = snapshot.persona ? [] : explicitMemoryChanges(query);
     let commandResult: string | undefined =

@@ -29,6 +29,9 @@ import { fileURLToPath } from 'node:url';
 
 import {
   AiSdkGateway,
+  ProviderEndpointPolicy,
+  infrastructureCredentials,
+  TenantLlmRouting,
   bashTool,
   ContextManager,
   EventTaskExecution,
@@ -70,6 +73,8 @@ import {
   PgTeamStore,
   PgUsageStore,
   PgUserStore,
+  PgLlmConfigurationStore,
+  PgLlmProviderOperations,
 } from '@trinity-harness/db';
 import {
   BusAuditEmitter,
@@ -229,7 +234,7 @@ async function main(): Promise<void> {
       registry.register(
         createSubagentTool({
           browserAccess: env.BROWSER_CDP_ENDPOINT ? 'live' : 'saved-only',
-          createLoop: ({ parentSessionId, childSessionId }) => {
+          createLoop: ({ parentSessionId, childSessionId, parentPromptId }) => {
             const childStore = new MemorySessionStore();
             const childSkills = new SkillRuntime(catalog, childStore, {
               browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
@@ -267,6 +272,11 @@ async function main(): Promise<void> {
             return new CoreAgentLoop({
               resolveClockTimezone: () => resolveClockTimezone(parentSessionId),
               llm,
+              routing: llmRouting,
+              routingSessionId: parentSessionId,
+              routingJournal: parentPromptId
+                ? { store, sessionId: parentSessionId, promptId: parentPromptId }
+                : undefined,
               model: env.MODEL,
               pricing: env.modelPricing,
               systemPrompt: env.SYSTEM_PROMPT,
@@ -328,7 +338,16 @@ async function main(): Promise<void> {
   // agent-worker, which carries the same assembly — see apps/agent-worker).
   let lsp: LspService | null = null;
   let context: ContextManager | null = null;
+  const providerPolicy = new ProviderEndpointPolicy(env.LLM_PROVIDER_DESTINATIONS);
+  const providerCredentials = infrastructureCredentials(
+    env.LLM_CREDENTIAL_KEY_ID,
+    env.LLM_CREDENTIAL_KEYS,
+  );
+  let llmConfiguration: PgLlmConfigurationStore | undefined;
+  let llmOperations: PgLlmProviderOperations | undefined;
+  let llmRouting: TenantLlmRouting | undefined;
   const llm = new AiSdkGateway(undefined, {
+    providerFetch: providerPolicy.fetch,
     reasoningBudgetTokens: env.REASONING_BUDGET_TOKENS,
     reasoningEffort: env.REASONING_EFFORT,
   });
@@ -343,6 +362,7 @@ async function main(): Promise<void> {
   ): ConstructorParameters<typeof CoreAgentLoop>[0] => ({
     resolveClockTimezone: () => resolveClockTimezone(sessionId),
     llm,
+    routing: llmRouting,
     model: env.MODEL,
     pricing: env.modelPricing,
     maxSteps: env.MAX_TURN_STEPS,
@@ -537,6 +557,18 @@ async function main(): Promise<void> {
       promptDispatcher = new PgPromptDispatcher(pool, db, queue);
       await promptDispatcher.start();
     }
+    llmConfiguration = new PgLlmConfigurationStore(db);
+    llmOperations = new PgLlmProviderOperations(db);
+    llmRouting = new TenantLlmRouting(
+      llmConfiguration,
+      providerCredentials,
+      providerPolicy,
+      users,
+      store,
+      metas,
+      teams,
+      llmOperations,
+    );
     auth = { tokens: new HmacTokenService(env.TOKEN_SECRET), users, metas, hasher };
   } else if (env.REDIS_URL) {
     throw new Error('REDIS_URL requires DATABASE_URL (distributed mode needs the PG event log)');
@@ -545,6 +577,12 @@ async function main(): Promise<void> {
   const app = await buildServer(
     {
       store,
+      llmConfiguration,
+      llmOperations,
+      llmProbeGateway: llm,
+      llmPricing: env.modelPricing,
+      llmCredentials: providerCredentials,
+      llmEndpointPolicy: providerPolicy,
       memory,
       sessionRuns,
       conversationIndex,

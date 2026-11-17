@@ -24,7 +24,7 @@ if (url) {
 }
 const db = createDb(pool);
 const clock = () => new Date('2026-10-20T09:00:00.000Z');
-const owner: Identity = { tenantId: randomUUID(), userId: randomUUID(), role: 'developer' };
+const owner: Identity = { tenantId: randomUUID(), userId: randomUUID(), role: 'member' };
 const other: Identity = { ...owner, userId: randomUUID() };
 function command(): MemoryCommand {
   return {

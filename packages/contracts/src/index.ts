@@ -36,3 +36,4 @@ export * from './browser-document.js';
 export * from './browser-document-presentation.js';
 
 export * from './steering.js';
+export * from './llm-configuration.js';

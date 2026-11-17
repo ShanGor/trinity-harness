@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { classifyModelFailure, modelRetry } from '../src/loop/model-retry.js';
+import {
+  classifyModelFailure,
+  modelRetry,
+  safeProviderFailure,
+  independentFallbackFailure,
+} from '../src/loop/model-retry.js';
 
 const now = Date.parse('2026-10-22T03:00:00.000Z');
 const failure = (responseHeaders: Record<string, string>, statusCode = 429) =>
@@ -123,3 +128,20 @@ describe('provider retry scheduling', () => {
     expect(classifyModelFailure(failure({}, 529))).toBe('retry');
   });
 });
+
+it.each(['content_policy_violation', 'content_filter', 'safety_refusal'])(
+  'never treats coded refusal %s as an outage, including through redaction',
+  (code) => {
+    const error = Object.assign(new Error('private response body'), {
+      statusCode: 503,
+      isRetryable: true,
+      data: { error: { code } },
+    });
+    expect(classifyModelFailure(error)).toBe('fatal');
+    expect(independentFallbackFailure(error)).toBe(false);
+    const redacted = safeProviderFailure(error);
+    expect(classifyModelFailure(redacted)).toBe('fatal');
+    expect(independentFallbackFailure(redacted)).toBe(false);
+    expect(redacted.message).not.toContain('private');
+  },
+);

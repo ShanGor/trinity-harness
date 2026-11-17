@@ -16,3 +16,5 @@ export * from './prompt-dispatcher.js';
 export * from './schedule-store.js';
 export * from './environment-store.js';
 export * from './attachment-catalog.js';
+export * from './llm-configuration-store.js';
+export * from './llm-provider-operations.js';

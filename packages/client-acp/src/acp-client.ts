@@ -1,3 +1,34 @@
+import {
+  llmActivityListSchema,
+  llmProbeListSchema,
+  llmHealthListSchema,
+  llmSessionSettingsWriteSchema,
+  llmProbeRequestSchema,
+  userListSchema,
+  userRoleUpdateSchema,
+} from '@trinity-harness/shared';
+import {
+  type LlmHealthSnapshot,
+  llmConfigurationImpactSchema,
+  type LlmConfigurationImpact,
+  llmConfigurationSchema,
+  type User,
+  type Role,
+  llmProbeResultSchema,
+  type LlmProbeResult,
+  llmConfigurationStateSchema,
+  llmConfigurationSaveSchema,
+  llmConfigurationPublishSchema,
+  llmCredentialWriteSchema,
+  llmProfilesResponseSchema,
+  llmSessionSettingsResponseSchema,
+  type LlmConfiguration,
+  type LlmConfigurationState,
+  type LlmProfilesResponse,
+  type LlmSessionSettingsResponse,
+  type LlmSessionSettings,
+  type LlmActivity,
+} from '@trinity-harness/shared';
 import { steeringInputSchema, type SteeringInput } from '@trinity-harness/shared';
 import {
   workspaceDocumentSchema,
@@ -326,6 +357,145 @@ export class AcpClient {
     });
   }
 
+  async listTenantUsers(): Promise<User[]> {
+    return userListSchema.parse(await this.assistantRequest('/api/admin/users')).users;
+  }
+  async setTenantUserRole(userId: string, role: Role): Promise<void> {
+    await this.assistantRequest(
+      `/api/admin/users/${encodeURIComponent(userId)}/role`,
+      'PATCH',
+      userRoleUpdateSchema.parse({ role }),
+    );
+  }
+  async getLlmConfiguration(signal?: AbortSignal): Promise<LlmConfigurationState> {
+    return llmConfigurationStateSchema.parse(
+      await this.assistantRequest('/api/admin/llm/configuration', 'GET', undefined, signal),
+    );
+  }
+  async getLlmImpact(version: number): Promise<LlmConfigurationImpact> {
+    return llmConfigurationImpactSchema.parse(
+      await this.assistantRequest(`/api/admin/llm/configuration/impact/${version}`),
+    );
+  }
+  async getLlmRevision(revision: number): Promise<LlmConfiguration> {
+    return llmConfigurationSchema.parse(
+      await this.assistantRequest(`/api/admin/llm/revisions/${revision}`),
+    );
+  }
+  async saveLlmConfiguration(
+    expectedVersion: number,
+    configuration: LlmConfiguration,
+    operationId = newId(),
+  ): Promise<LlmConfigurationState> {
+    return llmConfigurationStateSchema.parse(
+      await this.assistantRequest(
+        '/api/admin/llm/configuration',
+        'PUT',
+        llmConfigurationSaveSchema.parse({ expectedVersion, operationId, configuration }),
+      ),
+    );
+  }
+  async publishLlmConfiguration(
+    expectedVersion: number,
+    reason: string,
+    restoreRevision?: number,
+    operationId = newId(),
+  ): Promise<LlmConfigurationState> {
+    return llmConfigurationStateSchema.parse(
+      await this.assistantRequest(
+        `/api/admin/llm/configuration/${restoreRevision ? 'rollback' : 'publish'}`,
+        'POST',
+        llmConfigurationPublishSchema.parse({
+          expectedVersion,
+          operationId,
+          reason,
+          ...(restoreRevision ? { restoreRevision } : {}),
+        }),
+      ),
+    );
+  }
+  async replaceLlmCredential(
+    connectionId: string,
+    expectedVersion: number,
+    secret: string,
+    operationId = newId(),
+  ): Promise<LlmConfigurationState> {
+    return llmConfigurationStateSchema.parse(
+      await this.assistantRequest(
+        `/api/admin/llm/connections/${encodeURIComponent(connectionId)}/credentials`,
+        'PUT',
+        llmCredentialWriteSchema.parse({ expectedVersion, operationId, secret }),
+      ),
+    );
+  }
+  async revokeLlmCredential(
+    connectionId: string,
+    expectedVersion: number,
+    operationId = newId(),
+  ): Promise<LlmConfigurationState> {
+    return llmConfigurationStateSchema.parse(
+      await this.assistantRequest(
+        `/api/admin/llm/connections/${encodeURIComponent(connectionId)}/credentials`,
+        'DELETE',
+        { expectedVersion, operationId },
+      ),
+    );
+  }
+  async testLlmConnection(
+    connectionId: string,
+    deploymentId: string,
+    expectedVersion: number,
+    operationId = newId(),
+  ): Promise<LlmProbeResult> {
+    return llmProbeResultSchema.parse(
+      await this.assistantRequest(
+        `/api/admin/llm/connections/${encodeURIComponent(connectionId)}/test`,
+        'POST',
+        llmProbeRequestSchema.parse({ deploymentId, expectedVersion, operationId }),
+      ),
+    );
+  }
+  async getLlmHealth(): Promise<LlmHealthSnapshot[]> {
+    return llmHealthListSchema.parse(await this.assistantRequest('/api/admin/llm/health')).health;
+  }
+  async getLlmTests(): Promise<LlmProbeResult[]> {
+    return llmProbeListSchema.parse(await this.assistantRequest('/api/admin/llm/tests')).tests;
+  }
+  async getLlmActivity(): Promise<LlmActivity[]> {
+    return llmActivityListSchema.parse(await this.assistantRequest('/api/admin/llm/activity'))
+      .activity;
+  }
+  async getLlmProfiles(signal?: AbortSignal): Promise<LlmProfilesResponse> {
+    return llmProfilesResponseSchema.parse(
+      await this.assistantRequest('/api/llm/profiles', 'GET', undefined, signal),
+    );
+  }
+  async getLlmSessionSettings(
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<LlmSessionSettingsResponse> {
+    return llmSessionSettingsResponseSchema.parse(
+      await this.assistantRequest(
+        `/api/sessions/${encodeURIComponent(sessionId)}/llm-settings`,
+        'GET',
+        undefined,
+        signal,
+      ),
+    );
+  }
+  async setLlmSessionSettings(
+    sessionId: string,
+    expectedLastSeq: number,
+    settings: LlmSessionSettings,
+    operationId = newId(),
+  ): Promise<void> {
+    await this.assistantRequest(
+      `/api/sessions/${encodeURIComponent(sessionId)}/llm-settings`,
+      'PUT',
+      llmSessionSettingsWriteSchema.parse({ expectedLastSeq, operationId, settings }),
+    );
+  }
+
   private async assistantRequest(
     path: string,
     method = 'GET',
@@ -341,7 +511,20 @@ export class AcpClient {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       ...(signal ? { signal } : {}),
     });
-    if (!res.ok) throw new Error(`Request failed (${res.status})`);
+    if (!res.ok) {
+      if (/\/(?:llm(?:\/|-)|admin\/(?:llm|users)(?:\/|$))/.test(path)) {
+        const body: unknown = await res.json().catch(() => null);
+        if (
+          typeof body === 'object' &&
+          body !== null &&
+          'error' in body &&
+          typeof body.error === 'string' &&
+          body.error.length <= 500
+        )
+          throw new Error(body.error);
+      }
+      throw new Error(`Request failed (${res.status})`);
+    }
     if (res.status === 204) return undefined;
     return res.json();
   }

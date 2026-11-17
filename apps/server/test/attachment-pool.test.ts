@@ -1,3 +1,4 @@
+import { usersForIdentity } from './auth-fixture.js';
 import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
@@ -12,7 +13,7 @@ import {
   PgSessionStore,
 } from '@trinity-harness/db';
 import { LocalBlobStore } from '@trinity-harness/core';
-import type { Identity, UserStore } from '@trinity-harness/contracts';
+import type { Identity } from '@trinity-harness/contracts';
 import { buildServer } from '../src/server.js';
 
 const url = process.env['DATABASE_URL'];
@@ -67,10 +68,10 @@ describe.skipIf(!reachable)(
       const identities: Record<string, Identity> = Object.fromEntries(
         ['a', 'b'].map((key) => [
           key,
-          { tenantId: randomUUID(), userId: randomUUID(), role: 'developer' as const },
+          { tenantId: randomUUID(), userId: randomUUID(), role: 'member' as const },
         ]),
       );
-      identities.viewer = { ...identities.a!, role: 'viewer' };
+      identities.viewer = { ...identities.a!, userId: randomUUID(), role: 'viewer' };
       const db = createDb(pool);
       const store = new PgSessionStore(db);
       const metas = new PgSessionMetaStore(db);
@@ -88,7 +89,9 @@ describe.skipIf(!reachable)(
               issue: async () => 'unused',
             },
             hasher: { hash: async () => '', verify: async () => false },
-            users: {} as UserStore,
+            users: usersForIdentity((id) =>
+              Object.values(identities).find((identity) => identity.userId === id),
+            ),
           },
         });
       let app = await build();

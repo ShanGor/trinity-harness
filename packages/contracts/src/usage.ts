@@ -1,3 +1,4 @@
+import { llmRouteReceiptSchema } from './llm-route.js';
 import { z } from 'zod';
 
 const tokenCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -45,6 +46,7 @@ export const usageCostSchema = z.object({
 export type UsageCost = z.infer<typeof usageCostSchema>;
 
 export const modelUsageSchema = z.object({
+  route: llmRouteReceiptSchema.optional(),
   requestId: z.uuid(),
   promptId: z.uuid(),
   model: z.string().min(1).max(200),

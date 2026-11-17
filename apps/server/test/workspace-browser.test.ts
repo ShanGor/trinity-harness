@@ -1,20 +1,16 @@
+import { usersForIdentity } from './auth-fixture.js';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, readFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, it, vi } from 'vitest';
-import type {
-  Identity,
-  SessionMeta,
-  SessionMetaStore,
-  UserStore,
-} from '@trinity-harness/contracts';
+import type { Identity, SessionMeta, SessionMetaStore } from '@trinity-harness/contracts';
 import { LocalSandbox, MemorySessionStore } from '@trinity-harness/core';
 import { buildServer } from '../src/index.js';
 
 it('browses the authorized session root, bounds previews, and rejects escapes and private context', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'trinity-workspace-view-'));
-  const owner: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'developer' };
+  const owner: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'member' };
   let identity = owner;
   const meta: SessionMeta = {
     id: randomUUID(),
@@ -41,7 +37,7 @@ it('browses the authorized session root, bounds previews, and rejects escapes an
     workspaceSandbox: factory,
     auth: {
       metas,
-      users: {} as UserStore,
+      users: usersForIdentity(() => identity),
       tokens: { verify: async () => identity, issue: async () => 'token' },
       hasher: { hash: async () => '', verify: async () => false },
     },
@@ -187,7 +183,7 @@ it('fails closed without a configured workspace adapter', async () => {
 
 it('gives unselected Chat and Work distinct UUIDv7 folders and honours explicit choices', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'trinity-workspace-choice-'));
-  const owner: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'developer' };
+  const owner: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'member' };
   const records = new Map<string, SessionMeta>();
   const metas: SessionMetaStore = {
     get: async (id) => records.get(id) ?? null,
@@ -205,7 +201,7 @@ it('gives unselected Chat and Work distinct UUIDv7 folders and honours explicit 
     workspaceSandbox: (_id, workspace) => new LocalSandbox(workspace),
     auth: {
       metas,
-      users: {} as UserStore,
+      users: usersForIdentity(() => owner),
       tokens: { verify: async () => owner, issue: async () => 'token' },
       hasher: { hash: async () => '', verify: async () => false },
     },

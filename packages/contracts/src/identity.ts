@@ -8,11 +8,33 @@ import type { PermissionPolicy } from './approval.js';
  * Identity & tenant contracts (docs/design.md §5.1 `Identity & Tenant`, §12.4).
  * Roles are coarse-grained RBAC scopes enforced at the API layer (M2):
  * - `admin`: tenant administration (user provisioning, audit query);
- * - `developer`: full agent usage (create/run sessions);
+ * - `member`: full agent usage (create/run sessions);
  * - `viewer`: read-only.
  */
 
-export const roleSchema = z.enum(['admin', 'developer', 'viewer']);
+export const roleSchema = z.enum(['admin', 'expert', 'member', 'viewer']);
+/** Read compatibility only. New writes and tokens use roleSchema. */
+export const historicalRoleSchema = z.union([
+  roleSchema,
+  z.literal('developer').transform(() => 'member' as const),
+]);
+export const capabilitySchema = z.enum([
+  'assistant.run',
+  'llm.profile.select',
+  'llm.session.tune',
+  'llm.configuration.manage',
+  'tenant.users.manage',
+]);
+export type Capability = z.infer<typeof capabilitySchema>;
+const roleCapabilities: Record<Role, readonly Capability[]> = {
+  admin: capabilitySchema.options,
+  expert: ['assistant.run', 'llm.profile.select', 'llm.session.tune'],
+  member: ['assistant.run', 'llm.profile.select'],
+  viewer: [],
+};
+export function hasCapability(role: Role, capability: Capability): boolean {
+  return roleCapabilities[role]?.includes(capability) ?? false;
+}
 export type Role = z.infer<typeof roleSchema>;
 
 /** Authenticated principal, attached to the request after token verification. */
@@ -134,6 +156,13 @@ export interface UserStore {
     passwordHash: string;
     role: Role;
   }): Promise<User>;
+  /** Transactionally protects the last tenant Admin. Missing users remain tenant-private. */
+  setRole?(
+    tenantId: string,
+    userId: string,
+    role: Role,
+    actorId?: string,
+  ): Promise<'updated' | 'not_found' | 'last_admin' | 'forbidden'>;
   /** Account TTS preferences, scoped to the authenticated owner, never model context. */
   getSpeechPreferences?(tenantId: string, userId: string): Promise<SpeechPreferences | null>;
   setSpeechPreferences?(
@@ -161,7 +190,7 @@ export interface SessionMetaStore {
   get(sessionId: string): Promise<SessionMeta | null>;
   /** Atomically bind a legacy null-workspace Chat and append its workspace receipt. */
   bindChatWorkspace?(sessionId: string, workspaceUri: string): Promise<SessionMeta>;
-  /** Own sessions for developer/viewer; whole tenant for admin. */
+  /** Own sessions for member/expert/viewer; whole tenant for admin. */
   listForIdentity(identity: Identity): Promise<SessionMeta[]>;
   /** Fill the title from the first prompt when a session began with an upload. */
   setTitleIfEmpty(sessionId: string, title: string): Promise<void>;
@@ -179,3 +208,5 @@ export interface TokenService {
   issue(identity: Identity): Promise<string>;
   verify(token: string): Promise<Identity | null>;
 }
+export const userListSchema = z.object({ users: z.array(userSchema) });
+export const userRoleUpdateSchema = z.object({ role: roleSchema }).strict();

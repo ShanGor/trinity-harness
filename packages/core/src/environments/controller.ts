@@ -154,7 +154,7 @@ export class EnvironmentController implements EnvironmentPort, EnvironmentMainte
           if (!record) return;
           try {
             await this.suspend(
-              { tenantId: record.tenantId, userId: record.userId, role: 'developer' },
+              { tenantId: record.tenantId, userId: record.userId, role: 'member' },
               signal,
             );
           } catch {

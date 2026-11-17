@@ -91,3 +91,44 @@ export { attachmentUploadErrorSchema } from '@trinity-harness/contracts';
 export { historyPreferencesSchema, type HistoryPreferences } from '@trinity-harness/contracts';
 
 export { steeringInputSchema, type SteeringInput } from '@trinity-harness/contracts';
+export {
+  roleSchema,
+  hasCapability,
+  llmConfigurationSchema,
+  llmConfigurationStateSchema,
+  llmConfigurationSaveSchema,
+  llmConfigurationPublishSchema,
+  llmSessionSettingsSchema,
+  llmCredentialWriteSchema,
+  llmActivitySchema,
+} from '@trinity-harness/contracts';
+export type {
+  Role,
+  Capability,
+  LlmConfiguration,
+  LlmConfigurationState,
+  LlmSessionSettings,
+  LlmActivity,
+} from '@trinity-harness/contracts';
+export {
+  llmProfilesResponseSchema,
+  llmSessionSettingsResponseSchema,
+} from '@trinity-harness/contracts';
+export type { LlmProfilesResponse, LlmSessionSettingsResponse } from '@trinity-harness/contracts';
+export { llmProbeResultSchema } from '@trinity-harness/contracts';
+export type { LlmProbeResult } from '@trinity-harness/contracts';
+export { userSchema } from '@trinity-harness/contracts';
+export type { User } from '@trinity-harness/contracts';
+export { llmConfigurationImpactSchema } from '@trinity-harness/contracts';
+export type { LlmConfigurationImpact } from '@trinity-harness/contracts';
+export { llmHealthSnapshotSchema } from '@trinity-harness/contracts';
+export type { LlmHealthSnapshot } from '@trinity-harness/contracts';
+export {
+  llmActivityListSchema,
+  llmProbeListSchema,
+  llmHealthListSchema,
+  llmSessionSettingsWriteSchema,
+  llmProbeRequestSchema,
+  userListSchema,
+  userRoleUpdateSchema,
+} from '@trinity-harness/contracts';

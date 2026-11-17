@@ -21,6 +21,9 @@ import { fileURLToPath } from 'node:url';
 
 import {
   AiSdkGateway,
+  ProviderEndpointPolicy,
+  infrastructureCredentials,
+  TenantLlmRouting,
   bashTool,
   ContextManager,
   EventTaskExecution,
@@ -55,6 +58,8 @@ import {
   PgApprovalStore,
   PgSessionMetaStore,
   PgUserStore,
+  PgLlmConfigurationStore,
+  PgLlmProviderOperations,
   PgSessionStore,
   PgUsageStore,
   PgScheduleStore,
@@ -276,7 +281,7 @@ async function main(): Promise<void> {
     registry.register(
       createSubagentTool({
         browserAccess: env.BROWSER_CDP_ENDPOINT ? 'live' : 'saved-only',
-        createLoop: ({ parentSessionId, childSessionId }) => {
+        createLoop: ({ parentSessionId, childSessionId, parentPromptId }) => {
           const childStore = new MemorySessionStore();
           const childSkills = new SkillRuntime(catalog, childStore, {
             browserCdpEndpoint: env.BROWSER_CDP_ENDPOINT,
@@ -312,6 +317,11 @@ async function main(): Promise<void> {
           return new CoreAgentLoop({
             resolveClockTimezone: () => resolveClockTimezone(parentSessionId),
             llm,
+            routing: llmRouting,
+            routingSessionId: parentSessionId,
+            routingJournal: parentPromptId
+              ? { store, sessionId: parentSessionId, promptId: parentPromptId }
+              : undefined,
             model: env.MODEL,
             pricing: env.modelPricing,
             systemPrompt: env.SYSTEM_PROMPT,
@@ -345,7 +355,25 @@ async function main(): Promise<void> {
     return assembly;
   };
 
+  const providerPolicy = new ProviderEndpointPolicy(env.LLM_PROVIDER_DESTINATIONS);
+  const providerCredentials = infrastructureCredentials(
+    env.LLM_CREDENTIAL_KEY_ID,
+    env.LLM_CREDENTIAL_KEYS,
+  );
+  const llmConfiguration = new PgLlmConfigurationStore(db);
+  const llmOperations = new PgLlmProviderOperations(db);
+  const llmRouting = new TenantLlmRouting(
+    llmConfiguration,
+    providerCredentials,
+    providerPolicy,
+    browserUsers,
+    store,
+    metas,
+    new PgTeamStore(db),
+    llmOperations,
+  );
   const llm = new AiSdkGateway(undefined, {
+    providerFetch: providerPolicy.fetch,
     reasoningBudgetTokens: env.REASONING_BUDGET_TOKENS,
     reasoningEffort: env.REASONING_EFFORT,
   });
@@ -377,6 +405,7 @@ async function main(): Promise<void> {
       new CoreAgentLoop({
         resolveClockTimezone: () => resolveClockTimezone(sessionId),
         llm,
+        routing: llmRouting,
         model: env.MODEL,
         pricing: env.modelPricing,
         maxSteps: env.MAX_TURN_STEPS,

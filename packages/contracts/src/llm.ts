@@ -4,6 +4,7 @@
  * lives in packages/core and is the only place that touches provider APIs.
  */
 
+import type { LlmResolvedRoute } from './llm-configuration.js';
 import type { TokenUsage } from './usage.js';
 import type { ContentBlock } from './events.js';
 import type { ContextSectionKind } from './execution-context.js';
@@ -87,5 +88,5 @@ export type StreamChunk =
   | { kind: 'finish'; reason: 'stop' | 'length' | 'error' };
 
 export interface LLMPort {
-  stream(req: LLMRequest): Promise<AsyncIterable<StreamChunk>>;
+  stream(req: LLMRequest, route?: LlmResolvedRoute): Promise<AsyncIterable<StreamChunk>>;
 }

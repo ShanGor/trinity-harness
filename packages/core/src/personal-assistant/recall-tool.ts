@@ -60,7 +60,7 @@ export function createRecallTool(deps: {
             message: 'Personal recall is unavailable in this scope.',
           },
         };
-      const identity = { tenantId: meta.tenantId, userId: meta.userId, role: 'developer' as const };
+      const identity = { tenantId: meta.tenantId, userId: meta.userId, role: 'member' as const };
       const snapshot = await deps.memory.snapshot(identity);
       const prompt = ctx.userPromptId
         ? (await deps.store.load(ctx.sessionId)).find((event) => event.eventId === ctx.userPromptId)

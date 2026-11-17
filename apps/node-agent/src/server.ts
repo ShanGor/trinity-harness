@@ -128,7 +128,7 @@ export function buildNodeAgent(
     reply.raw.once('close', abort);
     try {
       const result = await store.runShared(
-        { tenantId: environment.tenantId, userId: environment.userId, role: 'developer' },
+        { tenantId: environment.tenantId, userId: environment.userId, role: 'member' },
         async (lockSignal) => {
           if (!(await authorized(environment, envelope)))
             return { ok: false, effect: 'none' } as const;

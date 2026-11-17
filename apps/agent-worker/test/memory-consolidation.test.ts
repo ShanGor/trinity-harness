@@ -83,16 +83,10 @@ describe.skipIf(!reachable)('durable memory consolidation', () => {
       const metas = new PgSessionMetaStore(db);
       const store = new PgSessionStore(db);
       const schedules = new PgScheduleStore(db);
-      const identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'developer' as const };
+      const identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'member' as const };
       await pool.query(
         'insert into users(id,tenant_id,email,password_hash,role) values($1,$2,$3,$4,$5)',
-        [
-          identity.userId,
-          identity.tenantId,
-          `${identity.userId}@test.invalid`,
-          'unused',
-          'developer',
-        ],
+        [identity.userId, identity.tenantId, `${identity.userId}@test.invalid`, 'unused', 'member'],
       );
       const original = { id: randomUUID() };
       await metas.create({

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { HmacTokenService } from '../src/index.js';
 
-const identity = { userId: 'u1', tenantId: 't1', role: 'developer' as const };
+const identity = { userId: 'u1', tenantId: 't1', role: 'member' as const };
 
 describe('HmacTokenService (M2)', () => {
   it('round-trips an identity', async () => {

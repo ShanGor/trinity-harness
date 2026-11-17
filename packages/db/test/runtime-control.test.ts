@@ -36,7 +36,7 @@ const db = createDb(pool);
 const schedules = new PgScheduleStore(db);
 const metas = new PgSessionMetaStore(db);
 const events = new PgSessionStore(db);
-const owner: Identity = { tenantId: randomUUID(), userId: randomUUID(), role: 'developer' };
+const owner: Identity = { tenantId: randomUUID(), userId: randomUUID(), role: 'member' };
 const at = new Date('2026-10-24T00:00:00Z');
 let source: string;
 let initialized = false;
@@ -64,7 +64,7 @@ beforeAll(async () => {
   );
   await pool.query(
     'insert into users(id,tenant_id,email,password_hash,role) values($1,$2,$3,$4,$5)',
-    [owner.userId, owner.tenantId, `${owner.userId}@test.invalid`, 'unused', 'developer'],
+    [owner.userId, owner.tenantId, `${owner.userId}@test.invalid`, 'unused', 'member'],
   );
   source = randomUUID();
   await metas.create({
@@ -389,7 +389,7 @@ describe.skipIf(!reachable)('durable runtime control', () => {
         (item) => item.scheduleId === revoked.id,
       ),
     ).toMatchObject({ status: 'skipped', reason: 'access_revoked' });
-    await pool.query('update users set role=$2 where id=$1', [owner.userId, 'developer']);
+    await pool.query('update users set role=$2 where id=$1', [owner.userId, 'member']);
   });
 
   it('does not widen a retry after the source policy changes', async () => {
@@ -439,7 +439,7 @@ describe.skipIf(!reachable)('durable runtime control', () => {
     const maintenanceOwner: Identity = {
       tenantId: randomUUID(),
       userId: randomUUID(),
-      role: 'developer',
+      role: 'member',
     };
     const node = {
       id: 'maintenance-node',
@@ -464,7 +464,7 @@ describe.skipIf(!reachable)('durable runtime control', () => {
     const maintenanceOwner: Identity = {
       tenantId: randomUUID(),
       userId: randomUUID(),
-      role: 'developer',
+      role: 'member',
     };
     const node = {
       id: 'drain-auth-node',

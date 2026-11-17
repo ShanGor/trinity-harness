@@ -1,9 +1,10 @@
+import { llmSessionSettingsSchema, llmRouteReceiptSchema } from './llm-configuration.js';
 import { promptDeliverySchema } from './prompt-delivery.js';
 import { permissionPolicySchema } from './approval.js';
 import { personalContextEventSchema } from './personal-assistant.js';
 import { z } from 'zod';
 import { modelUsageSchema } from './usage.js';
-import { taskEventSchemas } from './task.js';
+import { taskEventSchemas, modelRetrySchema } from './task.js';
 import { executionContextEventSchemas, toolEffectSchema } from './execution-context.js';
 
 import { skillSummarySchema, skillSnapshotSchema } from './skills.js';
@@ -51,6 +52,7 @@ export const modelUsageEventSchema = z.object({
 export const sessionCreatedEventSchema = z.object({
   ...baseFields,
   type: z.literal('session/created'),
+  llmProfileId: z.uuid().optional(),
   workspaceUri: z.string().min(1).nullable(),
   kind: z.enum(['chat', 'work']).optional(),
   sessionRole: z.enum(['main', 'side', 'task']).optional(),
@@ -293,6 +295,34 @@ export const sessionEventSchema = z.discriminatedUnion('type', [
   discardedPromptEventSchema,
   personalContextEventSchema,
   modelUsageEventSchema,
+  z.object({
+    ...baseFields,
+    type: z.literal('llm/settings'),
+    operationId: z.uuid(),
+    settings: llmSessionSettingsSchema,
+  }),
+  z.object({
+    ...baseFields,
+    type: z.literal('model/route'),
+    promptId: z.uuid(),
+    requestId: z.uuid(),
+    logicalRequestId: z.uuid(),
+    purpose: z.enum(['assistant', 'compaction', 'subagent']),
+    receipt: llmRouteReceiptSchema,
+  }),
+  z.object({
+    ...baseFields,
+    type: z.literal('model/route_result'),
+    promptId: z.uuid(),
+    requestId: z.uuid(),
+    logicalRequestId: z.uuid(),
+    deploymentId: z.uuid(),
+    connectionId: z.uuid(),
+    output: z.boolean(),
+    success: z.boolean(),
+    retry: modelRetrySchema.optional(),
+    permanent: z.boolean().optional(),
+  }),
   ...taskEventSchemas.map((schema) => schema.extend(baseFields)),
   ...executionContextEventSchemas.map((schema) => schema.extend(baseFields)),
   skillCatalogEventSchema,

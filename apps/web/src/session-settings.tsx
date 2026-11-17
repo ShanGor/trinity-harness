@@ -1,3 +1,4 @@
+import { LlmSessionSettings } from './llm-settings';
 import { useEffect, useRef, useState, type ReactElement } from 'react';
 import { Alert, Button, Descriptions, Flex, Form, Modal, Select, Spin, Typography } from 'antd';
 import type { AcpClient, TeamView } from '@trinity-harness/client-acp';
@@ -216,6 +217,11 @@ export function SessionSettingsModal({
                 requests keep their existing permissions.
               </Typography.Paragraph>
             </Form>
+            <LlmSessionSettings
+              client={client}
+              sessionId={sessionId}
+              readOnly={!settings.canChangePolicy}
+            />
             {saved && <Alert type="success" showIcon message="Permissions saved." />}
             {saveError && (
               <Alert

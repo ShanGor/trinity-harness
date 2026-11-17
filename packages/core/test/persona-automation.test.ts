@@ -60,7 +60,7 @@ async function fixture(autoSaveEnabled = true) {
     findById: async () => ({
       id: userId,
       tenantId,
-      role: 'developer',
+      role: 'member',
       email: 'test@example.com',
       createdAt: at,
     }),

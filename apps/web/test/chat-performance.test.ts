@@ -77,6 +77,8 @@ vi.mock('@trinity-harness/client-acp', () => ({
     getInbox = async () => ({ available: false, items: [] });
     getBrowserPreview = fake.getBrowserPreview;
     getEnvironment = fake.getEnvironment;
+    getLlmProfiles = async () => ({ available: false, profiles: [] });
+    getLlmSessionSettings = async () => ({ expectedLastSeq: 0, settings: null });
     getSessionSettings = fake.getSessionSettings;
     createSession = fake.createSession;
     ensureMainChat = async () => 'main-session';

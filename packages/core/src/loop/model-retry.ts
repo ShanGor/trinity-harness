@@ -37,8 +37,22 @@ function failures(error: unknown): z.infer<typeof failureSchema>[] {
   return result;
 }
 
+const refusalCodes = new Set(['content_policy_violation', 'content_filter', 'safety_refusal']);
+function refusalFailure(error: unknown): boolean {
+  return failures(error).some((failure) => {
+    const parsed = providerDataSchema.safeParse(failure.data);
+    return [
+      failure.code,
+      ...(parsed.success
+        ? [parsed.data.code, parsed.data.type, parsed.data.error?.code, parsed.data.error?.type]
+        : []),
+    ].some((code) => refusalCodes.has(String(code).toLowerCase()));
+  });
+}
+
 /** Provider-independent classification; raw messages/headers never enter the log. */
 export function classifyModelFailure(error: unknown): 'overflow' | 'retry' | 'fatal' {
+  if (refusalFailure(error)) return 'fatal';
   const chain = failures(error);
   const codes = chain.flatMap((failure) => {
     const parsed = providerDataSchema.safeParse(failure.data);
@@ -172,4 +186,54 @@ export function retryProgress(retry: ModelRetry): string {
     transport: 'Provider connection interrupted',
   }[retry.reason];
   return `${reason}${retry.statusCode ? ` (HTTP ${retry.statusCode})` : ''}${retry.exhausted.length ? `: ${retry.exhausted.join(', ')}` : ''}. Retry ${retry.attempt} scheduled for ${retry.retryAt} (in ${Math.ceil(retry.delayMs / 1000)} seconds).`;
+}
+
+export function providerFailureStatus(error: unknown): number | undefined {
+  return failures(error).find((failure) => failure.statusCode !== undefined)?.statusCode;
+}
+export function independentFallbackFailure(error: unknown): boolean {
+  if (refusalFailure(error)) return false;
+  if (providerFailureStatus(error) === 401) return true;
+  return failures(error).some((failure) => {
+    const data = providerDataSchema.safeParse(failure.data);
+    return (
+      data.success &&
+      [data.data.code, data.data.type, data.data.error?.code, data.data.error?.type].some((code) =>
+        permanentQuotaCodes.has(String(code)),
+      )
+    );
+  });
+}
+/** Remove request/response bodies and URLs while retaining bounded recovery hints. */
+export function safeProviderFailure(error: unknown): Error {
+  if (error instanceof Error && error.name === 'AbortError') return error;
+  if (refusalFailure(error))
+    return Object.assign(new Error('Provider refused the request'), { code: 'safety_refusal' });
+  const classification = classifyModelFailure(error);
+  const statusCode = providerFailureStatus(error);
+  const headers: Record<string, string> = {};
+  for (const failure of failures(error))
+    for (const [key, value] of Object.entries(failure.responseHeaders ?? {})) {
+      if (
+        /^(retry-after(?:-ms)?|(?:anthropic-|x-)ratelimit-[a-z-]+)$/i.test(key) &&
+        value.length <= 100 &&
+        /^[\w. :+-]+$/.test(value)
+      )
+        headers[key.toLowerCase()] = value;
+    }
+  return Object.assign(
+    new Error(
+      classification === 'overflow'
+        ? 'Provider context length exceeded'
+        : 'Provider request failed',
+    ),
+    {
+      ...(statusCode !== undefined ? { statusCode } : {}),
+      responseHeaders: headers,
+      isRetryable: classification === 'retry',
+      ...(independentFallbackFailure(error) && statusCode !== 401
+        ? { data: { code: 'insufficient_quota' } }
+        : {}),
+    },
+  );
 }

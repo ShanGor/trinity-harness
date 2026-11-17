@@ -361,3 +361,41 @@ describe('checkpoint safety and bounded summarization', () => {
     expect(replayed[0]!.content).toContain('unknown outcome');
   });
 });
+
+it('uses per-request deployment windows/output without changing another session on the same manager', async () => {
+  const store = new MemorySessionStore();
+  const requests: LLMRequest[] = [];
+  const manager = new ContextManager({
+    store,
+    model: 'bootstrap/model',
+    maxTokens: 100000,
+    keepTokens: 40000,
+    windowTokens: 200000,
+    summaryWindowTokens: 200000,
+    outputTokens: 8192,
+    llm: {
+      stream: async (request) => {
+        requests.push(request);
+        return (async function* () {
+          yield* textChunks('Condensed prior context');
+        })();
+      },
+    },
+  });
+  for (const session of ['small-deployment', 'bootstrap-deployment'])
+    await store.append(session, [
+      user('x'.repeat(8000)),
+      assistant('y'.repeat(8000)),
+      user('Current request'),
+    ]);
+  expect(
+    (await manager.compact('small-deployment', { windowTokens: 4096, outputTokens: 512 }))
+      .compacted,
+  ).toBe(true);
+  expect(requests.length).toBeGreaterThan(0);
+  expect(requests.every((request) => request.maxOutputTokens === 512)).toBe(true);
+  expect(toModelMessages(await store.load('small-deployment')).at(-1)?.content).toBe(
+    'Current request',
+  );
+  expect((await manager.compact('bootstrap-deployment')).compacted).toBe(false);
+});

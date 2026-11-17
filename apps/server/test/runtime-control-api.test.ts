@@ -1,3 +1,4 @@
+import { usersForIdentity } from './auth-fixture.js';
 import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import type {
@@ -5,13 +6,12 @@ import type {
   Identity,
   SessionMeta,
   SessionMetaStore,
-  UserStore,
 } from '@trinity-harness/contracts';
 import { MemorySessionStore } from '@trinity-harness/core';
 import { buildServer } from '../src/index.js';
 
 it('keeps live private pixels owner-only and rechecks access before delivery', async () => {
-  const owner: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'developer' };
+  const owner: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'member' };
   let identity = owner;
   const meta: SessionMeta = {
     id: randomUUID(),
@@ -37,7 +37,7 @@ it('keeps live private pixels owner-only and rechecks access before delivery', a
     browserPreview: { preview },
     auth: {
       metas,
-      users: {} as UserStore,
+      users: usersForIdentity(() => identity),
       tokens: { verify: async () => identity, issue: async () => 'token' },
       hasher: { hash: async () => '', verify: async () => false },
     },
@@ -123,7 +123,7 @@ it('drains and resumes a Firecracker node with the dedicated operator token', as
     firecrackerMaintenanceToken: token,
     auth: {
       tokens: { verify, issue: async () => 'unused' },
-      users: {} as UserStore,
+      users: usersForIdentity(() => undefined),
       metas: {} as SessionMetaStore,
       hasher: { hash: async () => '', verify: async () => false },
     },
@@ -156,7 +156,7 @@ it('drains and resumes a Firecracker node with the dedicated operator token', as
 });
 
 it('keeps interactive browser commands owner-only, validates their scope and rechecks revocation', async () => {
-  const owner: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'developer' };
+  const owner: Identity = { userId: randomUUID(), tenantId: randomUUID(), role: 'member' };
   let identity = owner;
   const meta: SessionMeta = {
     id: randomUUID(),
@@ -191,7 +191,7 @@ it('keeps interactive browser commands owner-only, validates their scope and rec
     browserInteraction: { interact },
     auth: {
       metas,
-      users: {} as UserStore,
+      users: usersForIdentity(() => identity),
       tokens: { verify: async () => identity, issue: async () => 'token' },
       hasher: { hash: async () => '', verify: async () => false },
     },

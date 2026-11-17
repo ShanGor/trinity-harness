@@ -1,16 +1,11 @@
+import { usersForIdentity } from './auth-fixture.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { MemorySessionStore } from '@trinity-harness/core';
-import type {
-  Identity,
-  SessionMeta,
-  SessionMetaStore,
-  TurnTask,
-  UserStore,
-} from '@trinity-harness/contracts';
+import type { Identity, SessionMeta, SessionMetaStore, TurnTask } from '@trinity-harness/contracts';
 import { buildServer } from '../src/server.js';
 
 it.each(['inline', 'worker', 'main'] as const)(
@@ -19,7 +14,7 @@ it.each(['inline', 'worker', 'main'] as const)(
     const store = new MemorySessionStore();
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'trinity-delivery-'));
     const sessionId = randomUUID();
-    const owner: Identity = { tenantId: randomUUID(), userId: randomUUID(), role: 'developer' };
+    const owner: Identity = { tenantId: randomUUID(), userId: randomUUID(), role: 'member' };
     const meta: SessionMeta = {
       id: sessionId,
       title: 'Test call',
@@ -55,7 +50,7 @@ it.each(['inline', 'worker', 'main'] as const)(
         metas,
         tokens: { issue: async () => 'token', verify: async () => owner },
         hasher: { hash: async () => '', verify: async () => false },
-        users: {} as UserStore,
+        users: usersForIdentity(() => owner),
       },
       ...(runner === 'inline'
         ? { createLoop: () => ({ run: async () => ({ reason: 'completed' as const, steps: 0 }) }) }

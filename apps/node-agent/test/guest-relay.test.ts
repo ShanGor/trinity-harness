@@ -179,7 +179,7 @@ it('revalidates PG owner/workspace/generation around guest dispatch and fails cl
   const user = {
     id: userId,
     tenantId,
-    role: 'developer' as const,
+    role: 'member' as const,
     email: 'user@example.com',
     createdAt: meta.createdAt,
   };

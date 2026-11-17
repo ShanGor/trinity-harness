@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { usersForIdentity } from './auth-fixture.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -124,7 +125,7 @@ describe.skipIf(!hasInfra)('M3 approvals over the distributed topology', () => {
   const IDENTITY: Identity = {
     userId: '00000000-0000-4000-8000-00000000e2e1',
     tenantId: '00000000-0000-0000-0000-000000000000',
-    role: 'developer',
+    role: 'member',
   };
   const AUTH = { authorization: 'Bearer test-token' };
   const JSON_HEADERS = { 'content-type': 'application/json', ...AUTH };
@@ -171,7 +172,7 @@ describe.skipIf(!hasInfra)('M3 approvals over the distributed topology', () => {
         },
         users: {
           findByEmail: async () => null,
-          findById: async () => null,
+          findById: usersForIdentity(() => IDENTITY).findById,
           verifyCredentials: async () => null,
           createUser: async () => {
             throw new Error('not implemented');

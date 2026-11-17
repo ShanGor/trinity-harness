@@ -1,10 +1,12 @@
 import type {
+  LlmResolvedRoute,
   ContentBlock,
   ConversationMessage,
   LLMPort,
   LLMRequest,
   StreamChunk,
 } from '@trinity-harness/contracts';
+import { safeProviderFailure } from '../loop/model-retry.js';
 import { z } from 'zod';
 import { sumTokenUsage } from '@trinity-harness/shared';
 import { tokenUsageSchema } from '@trinity-harness/contracts';
@@ -232,6 +234,7 @@ function mapFinishReason(
 }
 
 export interface GatewayOptions {
+  providerFetch?: typeof globalThis.fetch | undefined;
   /**
    * Anthropic-format thinking control (provider: anthropic). `adaptive` is
    * what MiniMax-M3 expects (`thinking: {"type": "adaptive"}`); `enabled`
@@ -257,7 +260,51 @@ export class AiSdkGateway implements LLMPort {
     private readonly opts: GatewayOptions = {},
   ) {}
 
-  async stream(req: LLMRequest): Promise<AsyncIterable<StreamChunk>> {
+  async stream(req: LLMRequest, route?: LlmResolvedRoute): Promise<AsyncIterable<StreamChunk>> {
+    if (route) {
+      if (
+        req.messages.some((message) =>
+          message.blocks?.some(
+            (block) =>
+              (block.kind === 'image' || block.kind === 'file') &&
+              !block.uri.startsWith('blob://') &&
+              !block.uri.startsWith('data:'),
+          ),
+        )
+      )
+        throw new Error('Managed providers require authorized inline or blob media');
+      if (!this.opts.providerFetch) throw new Error('Constrained provider transport unavailable');
+      const { connection, deployment, credential } = route;
+      const providers: Record<string, ModelFactory> = {
+        [connection.adapter]: (modelId) =>
+          connection.adapter === 'anthropic'
+            ? createAnthropic({
+                apiKey: credential,
+                baseURL: connection.endpoint,
+                fetch: this.opts.providerFetch,
+              }).languageModel(modelId)
+            : createOpenAI({
+                apiKey: credential,
+                baseURL: connection.endpoint,
+                fetch: this.opts.providerFetch,
+              }).languageModel(modelId),
+      };
+      try {
+        const stream = await new AiSdkGateway(providers, deployment.settings).stream({
+          ...req,
+          model: `${connection.adapter}/${deployment.modelId}`,
+        });
+        return (async function* (): AsyncIterable<StreamChunk> {
+          try {
+            yield* stream;
+          } catch (error) {
+            throw safeProviderFailure(error);
+          }
+        })();
+      } catch (error) {
+        throw safeProviderFailure(error);
+      }
+    }
     const slash = req.model.indexOf('/');
     if (slash <= 0) {
       throw new Error(`model must be "provider/model-id", got: ${req.model}`);

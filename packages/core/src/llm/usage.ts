@@ -29,7 +29,7 @@ export function priceUsage(
 } {
   const t = normalizeTokenUsage(tokens);
   if (t.inputTokens === undefined || t.outputTokens === undefined) return {};
-  const selected = prices[model]
+  const selected = (Object.hasOwn(prices, model) ? prices[model] : undefined)
     ?.filter((price) => price.minInputTokens <= t.inputTokens!)
     .sort((a, b) => b.minInputTokens - a.minInputTokens)[0];
   if (!selected) return {};

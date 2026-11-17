@@ -256,7 +256,7 @@ describe('M2 auth / tenants / RBAC', () => {
           tenantId: tenantId!,
           email: email!,
           passwordHash: 'h:password123',
-          role: 'developer',
+          role: 'member',
         });
         tokens.push((await login(baseUrl, email!, 'password123')).token!);
       }
@@ -323,7 +323,7 @@ describe('M2 auth / tenants / RBAC', () => {
           tenantId: tenantId!,
           email: email!,
           passwordHash: 'h:password123',
-          role: 'developer',
+          role: 'member',
         });
         tokens.push((await login(baseUrl, email!, 'password123')).token!);
       }
@@ -390,7 +390,7 @@ describe('M2 auth / tenants / RBAC', () => {
 
     // Provision developer + viewer.
     for (const [email, role] of [
-      ['dev@example.com', 'developer'],
+      ['dev@example.com', 'member'],
       ['view@example.com', 'viewer'],
     ] as const) {
       const res = await authed(baseUrl, token, '/api/admin/users', {
@@ -424,13 +424,13 @@ describe('M2 auth / tenants / RBAC', () => {
       tenantId: 't1',
       email: 'dev@example.com',
       passwordHash: await hasher.hash(passwordOf()),
-      role: 'developer',
+      role: 'member',
     });
     await bundle.users.createUser({
       tenantId: 't1',
       email: 'dev2@example.com',
       passwordHash: await hasher.hash(passwordOf()),
-      role: 'developer',
+      role: 'member',
     });
     await bundle.users.createUser({
       tenantId: 't1',
@@ -459,7 +459,16 @@ describe('M2 auth / tenants / RBAC', () => {
       method: 'POST',
       body: JSON.stringify({ title: 'view-only' }),
     });
-    const { sessionId: viewerSessionId } = (await viewerSession.json()) as { sessionId: string };
+    expect(viewerSession.status).toBe(403);
+    const viewerSessionId = crypto.randomUUID();
+    const viewerAccount = await bundle.users.findByEmail('view@example.com');
+    await bundle.metas.create({
+      id: viewerSessionId,
+      tenantId: 't1',
+      userId: viewerAccount!.id,
+      title: 'Existing read-only conversation',
+      workspaceUri: null,
+    });
     expect(
       (await authed(baseUrl, viewerToken, `/api/sessions/${viewerSessionId}/messages`)).status,
     ).toBe(200);
@@ -496,7 +505,7 @@ describe('M2 auth / tenants / RBAC', () => {
       tenantId: 't1',
       email,
       passwordHash: `h:${passwordOf()}`,
-      role: 'developer',
+      role: 'member',
     });
     const token = (await login(baseUrl, email, passwordOf())).token!;
     const created = await authed(baseUrl, token, '/api/sessions', {
@@ -530,7 +539,7 @@ describe('M2 auth / tenants / RBAC', () => {
       tenantId: 't1',
       email: outsiderEmail,
       passwordHash: `h:${passwordOf()}`,
-      role: 'developer',
+      role: 'member',
     });
     const outsiderToken = (await login(baseUrl, outsiderEmail, passwordOf())).token!;
     expect((await authed(baseUrl, outsiderToken, `/api/sessions/${sessionId}/export`)).status).toBe(
@@ -569,13 +578,13 @@ describe('M2 auth / tenants / RBAC', () => {
       tenantId: 't1',
       email: 'dev@example.com',
       passwordHash: `h:${passwordOf()}`,
-      role: 'developer',
+      role: 'member',
     });
     await bundle.users.createUser({
       tenantId: 't1',
       email: 'dev2@example.com',
       passwordHash: `h:${passwordOf()}`,
-      role: 'developer',
+      role: 'member',
     });
     const tokens: Record<string, string> = {};
     for (const email of ['dev@example.com', 'dev2@example.com']) {
@@ -652,7 +661,7 @@ describe('authenticated session settings', () => {
       tenantId,
       email: 'settings-owner@example.com',
       passwordHash: 'h:password123',
-      role: 'developer',
+      role: 'member',
     });
     const token = (await login(baseUrl, owner.email, passwordOf())).token!;
     const created = await authed(baseUrl, token, '/api/sessions', {
@@ -724,7 +733,7 @@ describe('authenticated session settings', () => {
     const principals = await Promise.all(
       [
         ['viewer', tenantId, 'viewer'],
-        ['other', tenantId, 'developer'],
+        ['other', tenantId, 'member'],
         ['foreign', crypto.randomUUID(), 'admin'],
       ].map(async ([name, tenant, role]) => {
         const user = await bundle.users.createUser({

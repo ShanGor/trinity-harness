@@ -77,9 +77,9 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
       tenantId,
       email: addr,
       passwordHash: 'scrypt$fake',
-      role: 'developer',
+      role: 'member',
     });
-    expect(created.role).toBe('developer');
+    expect(created.role).toBe('member');
 
     const byEmail = await users.findByEmail(addr);
     const byId = await users.findById(created.id);
@@ -104,13 +104,13 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const peer = await users.createUser({
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const preferences = { voiceStyle: '标准普通话，亲切耐心的女声。' };
     expect(await users.getSpeechPreferences(tenantId, owner.id)).toBeNull();
@@ -133,13 +133,13 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const peer = await users.createUser({
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const admin = await users.createUser({
       tenantId,
@@ -181,7 +181,7 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const id = crypto.randomUUID();
     await metas.create({
@@ -230,7 +230,7 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const id = crypto.randomUUID();
     await metas.create({
@@ -262,19 +262,19 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const member = await users.createUser({
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const outsider = await users.createUser({
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
 
     const team = await teams.create({ tenantId, name: 'platform', ownerId: owner.id });
@@ -302,19 +302,19 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const teammate = await users.createUser({
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const outsider = await users.createUser({
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const team = await teams.create({ tenantId, name: 'shared-space', ownerId: owner.id });
     await teams.addMember(team.id, teammate.id, 'member');
@@ -395,7 +395,7 @@ describe.skipIf(!reachable)('M2 stores (integration)', () => {
       tenantId,
       email: email(),
       passwordHash: 'h',
-      role: 'developer',
+      role: 'member',
     });
     const sessionId = crypto.randomUUID();
     const record: AuditRecord = newAuditRecord({

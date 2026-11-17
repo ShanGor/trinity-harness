@@ -22,7 +22,11 @@ import type { CoreAgentLoop } from '../loop/agent-loop.js';
  * recursion; the child runs ungated-by-default with an explicit policy).
  */
 export interface SubagentToolOptions {
-  createLoop: (scope: { parentSessionId: string; childSessionId: string }) => CoreAgentLoop;
+  createLoop: (scope: {
+    parentSessionId: string;
+    childSessionId: string;
+    parentPromptId?: string | undefined;
+  }) => CoreAgentLoop;
   description?: string | undefined;
   /** Composition-root capability, independent of the parent's browser configuration. */
   browserAccess?: 'live' | 'saved-only';
@@ -60,6 +64,7 @@ export function createSubagentTool(opts: SubagentToolOptions): ToolDefinition {
       // lives inside it (fresh context = nothing replays into the parent).
       const loop: AgentLoop = opts.createLoop({
         parentSessionId: ctx.sessionId,
+        parentPromptId: ctx.userPromptId,
         childSessionId: childId,
       });
       let finalText = '';
@@ -128,6 +133,7 @@ export function createSubagentTool(opts: SubagentToolOptions): ToolDefinition {
         outcome = await loop.run(childId, childPrompt, sink, {
           signal,
           actor: `subagent:${ctx.sessionId}`,
+          authenticatedActor: ctx.authenticatedActor,
           tenantId: ctx.tenantId,
           policy: ctx.permissionPolicy ?? policy,
           taskBudget: ctx.taskBudget,

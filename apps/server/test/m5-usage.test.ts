@@ -58,7 +58,7 @@ class FakeUserStore implements UserStore {
         id: crypto.randomUUID(),
         tenantId: 't1',
         email,
-        role: 'developer' as const,
+        role: 'member' as const,
         createdAt: new Date().toISOString(),
       }
     );
@@ -192,7 +192,7 @@ describe('M5: usage & quota API + loop gate', () => {
       tenantId: 't1',
       email: 'dev@example.com',
       passwordHash: 'h:password123',
-      role: 'developer',
+      role: 'member',
     });
     baseUrl = await app.listen({ port: 0, host: '127.0.0.1' });
     token = await login('admin@example.com');

@@ -1,3 +1,4 @@
+import { usersForIdentity } from './auth-fixture.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -272,7 +273,7 @@ describe('WebRTC media signaling (docs/webrtc-media-design.md §3–§5)', () =>
           issue: async () => 'good',
         },
         metas,
-        users: {} as never,
+        users: usersForIdentity(() => IDENTITY),
         hasher: {} as never,
       },
     });
@@ -431,7 +432,7 @@ describe('WebRTC media signaling (docs/webrtc-media-design.md §3–§5)', () =>
             issue: async () => 'good',
           },
           metas: await ownedMetas(),
-          users: {} as never,
+          users: usersForIdentity(() => IDENTITY),
           hasher: {} as never,
         },
       });

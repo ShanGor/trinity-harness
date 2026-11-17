@@ -545,6 +545,8 @@ Design §21.9 supersedes the earlier no-digest/browser-only timezone notes: opti
 
 ## 14. Roles and web-managed LLM configuration (2026-11-17 requirements)
 
+Implementation and rollout details are in the [operations runbook](llm-configuration-operations.md); source verification and production acceptance are tracked separately in [project progress](project-progress.md) and the [release checklist](production-checklist.md).
+
 ### 14.1 Product roles
 
 The primary hierarchy is **Admin > Expert > Member**. Member is the user-facing name for the agreed Normal tier. Admin inherits Expert controls; Expert inherits Member capabilities. Preserve Viewer as a separate restricted read-only role for existing accounts and deployments needing it. Role inheritance concerns permitted operations, not access to other users' data. Preserve existing session ownership, team membership, tenant scope and specifically authorized administrative access; Expert gains no additional access to private conversations or workspaces.

@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import type { Identity, TokenService } from '@trinity-harness/contracts';
-import { roleSchema } from '@trinity-harness/contracts';
+import { historicalRoleSchema, roleSchema } from '@trinity-harness/contracts';
 
 /**
  * HMAC-SHA256 signed bearer tokens (design.md §12.4: secrets stay server-side;
@@ -34,7 +34,11 @@ export class HmacTokenService implements TokenService {
   }
 
   async issue(identity: Identity): Promise<string> {
-    const payload = { u: identity.userId, t: identity.tenantId, r: identity.role };
+    const payload = {
+      u: identity.userId,
+      t: identity.tenantId,
+      r: roleSchema.parse(identity.role),
+    };
     const body = b64url(JSON.stringify(payload));
     const exp = this.now() + this.ttlMs;
     const sig = sign(this.secret, `${body}.${exp}`);
@@ -43,13 +47,15 @@ export class HmacTokenService implements TokenService {
 
   async verify(token: string): Promise<Identity | null> {
     try {
-      const [body, expRaw, sig] = token.split('.');
+      const parts = token.split('.');
+      if (parts.length !== 3) return null;
+      const [body, expRaw, sig] = parts;
       if (!body || !expRaw || !sig) return null;
       const expected = sign(this.secret, `${body}.${expRaw}`);
       const a = Buffer.from(sig);
       const b = Buffer.from(expected);
       if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-      if (Number(expRaw) <= this.now()) return null;
+      if (!Number.isSafeInteger(Number(expRaw)) || Number(expRaw) <= this.now()) return null;
       const payload: unknown = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
       if (
         typeof payload !== 'object' ||
@@ -60,7 +66,7 @@ export class HmacTokenService implements TokenService {
         return null;
       }
       const { u, t, r } = payload as Record<string, unknown>;
-      const role = roleSchema.safeParse(r);
+      const role = historicalRoleSchema.safeParse(r);
       if (!role.success) return null;
       return { userId: u as string, tenantId: t as string, role: role.data };
     } catch {

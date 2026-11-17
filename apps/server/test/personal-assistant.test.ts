@@ -1,3 +1,4 @@
+import { usersForIdentity } from './auth-fixture.js';
 import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
@@ -7,7 +8,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { createDb, PgMemoryStore, PgSessionMetaStore, PgSessionStore } from '@trinity-harness/db';
 import { LocalBlobStore, PersonalContext } from '@trinity-harness/core';
-import type { Identity, UserStore } from '@trinity-harness/contracts';
+import type { Identity } from '@trinity-harness/contracts';
 import { buildServer } from '../src/server.js';
 const url = process.env['DATABASE_URL'];
 const pool = new pg.Pool({ connectionString: url, connectionTimeoutMillis: 2000 });
@@ -22,7 +23,7 @@ if (url) {
 }
 const db = createDb(pool);
 const clock = () => new Date('2026-10-20T09:00:00.000Z');
-const owner: Identity = { tenantId: randomUUID(), userId: randomUUID(), role: 'developer' };
+const owner: Identity = { tenantId: randomUUID(), userId: randomUUID(), role: 'member' };
 afterAll(async () => {
   await pool.end();
 });
@@ -82,7 +83,7 @@ describe.skipIf(!reachable)('personal assistant creation API', () => {
         metas,
         tokens: { verify: async () => owner, issue: async () => 'token' },
         hasher: { hash: async () => '', verify: async () => false },
-        users: {} as UserStore,
+        users: usersForIdentity(() => owner),
       },
     });
     const headers = { authorization: 'Bearer token' };
@@ -184,11 +185,14 @@ describe.skipIf(!reachable)('Markdown Persona API', () => {
       auth: {
         metas: new PgSessionMetaStore(db),
         tokens: {
-          verify: async () => ({ ...identity, role: viewer ? 'viewer' : 'developer' }),
+          verify: async () => ({ ...identity, role: viewer ? 'viewer' : 'member' }),
           issue: async () => 'token',
         },
         hasher: { hash: async () => '', verify: async () => false },
-        users: {} as UserStore,
+        users: usersForIdentity(() => ({
+          ...identity,
+          role: viewer ? ('viewer' as const) : ('member' as const),
+        })),
       },
     });
     const payload = {

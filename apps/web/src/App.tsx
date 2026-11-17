@@ -70,6 +70,7 @@ import { ScheduledTasks } from './scheduled-tasks';
 import { InboxIndicator } from './inbox-indicator';
 import { PersonalComputer } from './personal-computer';
 import { WorkspaceBrowser } from './workspace-browser';
+import { LlmAdministration } from './llm-settings';
 import { SessionSettingsModal } from './session-settings';
 import { SpeechSettingsModal } from './speech-settings';
 import { loadTimelineWithPrompt } from './conversation-history';
@@ -105,7 +106,7 @@ import {
 
 const TOKEN_KEY = 'trinity.token';
 
-type Role = 'admin' | 'developer' | 'viewer';
+type Role = 'admin' | 'expert' | 'member' | 'viewer';
 type MeUser = { id: string; email: string; role: Role };
 
 type AuditRow = {
@@ -149,6 +150,7 @@ function workspaceLabel(s: SessionSummary, teams: TeamView[]): string {
 export default function App() {
   const { message, modal } = AntdApp.useApp();
   const [user, setUser] = useState<MeUser | null>(null);
+  const [llmAdministrationOpen, setLlmAdministrationOpen] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   useEffect(() => {
     if (!user) return;
@@ -1553,12 +1555,18 @@ export default function App() {
                 { key: 'teams', label: 'Teams' },
                 { key: 'memory', label: 'Memory' },
                 { key: 'voice', label: 'Voice settings' },
-                ...(user.role === 'admin' ? [{ key: 'audit', label: 'Audit log' }] : []),
+                ...(user.role === 'admin'
+                  ? [
+                      { key: 'llm', label: 'Administration · AI configuration' },
+                      { key: 'audit', label: 'Audit log' },
+                    ]
+                  : []),
                 { key: 'sign-out', label: 'Sign out', danger: true },
               ],
               onClick: ({ key }) => {
                 if (key === 'memory') setPage('memory');
                 if (key === 'voice') setSpeechSettingsOpen(true);
+                if (key === 'llm') setLlmAdministrationOpen(true);
                 if (key === 'audit') setPage('audit');
                 if (key === 'teams') setTeamsOpen(true);
                 if (key === 'sign-out') logout();
@@ -1579,6 +1587,9 @@ export default function App() {
             </Button>
           </Dropdown>
         </div>
+        {llmAdministrationOpen && user?.role === 'admin' && (
+          <LlmAdministration client={client} onClose={() => setLlmAdministrationOpen(false)} />
+        )}
         {speechSettingsOpen && (
           <SpeechSettingsModal
             key={user.id}

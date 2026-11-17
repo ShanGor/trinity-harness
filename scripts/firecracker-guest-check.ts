@@ -86,7 +86,7 @@ const nodeAgent =
             findById: async () => ({
               id: userId,
               tenantId,
-              role: 'developer',
+              role: 'member',
               email: 'fixture@example.com',
               createdAt: '2026-01-01T00:00:00Z',
             }),
