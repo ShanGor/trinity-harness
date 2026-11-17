@@ -1937,7 +1937,7 @@ export async function buildServer(
     const state = await deps.llmConfiguration.read(identity.tenantId);
     if (state.source !== 'database') return {};
     if (!state.published) throw new Error('Published AI configuration unavailable');
-    return { llmProfileId: state.published.defaultProfileId };
+    return state.published.routing ? {} : { llmProfileId: state.published.defaultProfileId };
   };
 
   app.post('/api/sessions', async (req, reply) => {

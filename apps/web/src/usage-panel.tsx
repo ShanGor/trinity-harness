@@ -127,7 +127,7 @@ export const UsagePanel = memo(function UsagePanel({
                 <span>
                   {record.route?.modelId ?? record.model}
                   {record.route
-                    ? ` · ${record.route.deploymentName ?? 'Configured deployment'} · ${record.route.profileName ?? 'Profile'} · ${record.route.reason === 'pin' ? 'pinned' : record.route.reason}`
+                    ? ` · ${record.route.deploymentName ?? 'Configured deployment'} · ${record.route.profileName ?? (record.route.selection === 'default' ? 'Default model' : 'Selected model')} · ${record.route.reason === 'pin' ? 'pinned' : record.route.reason}`
                     : ''}{' '}
                   · {record.purpose} · {costs(record.cost ? [record.cost] : [])}
                 </span>

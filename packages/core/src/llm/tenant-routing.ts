@@ -1,5 +1,6 @@
 import {
   hasLlmSessionOverrides,
+  llmSelectionPolicy,
   hasCapability,
   LlmConfigurationError,
   type LlmConfigurationPort,
@@ -109,11 +110,13 @@ export class TenantLlmRouting implements LlmRoutingPort {
     if (events.some((event) => event.type === 'model/usage'))
       throw new LlmConfigurationError(
         'MIGRATION_REQUIRED',
-        'Select an approved AI profile for this existing conversation before continuing',
+        'Select an enabled model for this existing conversation before continuing',
       );
     if (!state.published)
       throw new LlmConfigurationError('UNAVAILABLE', 'Published configuration missing');
-    const settings = { profileId: state.published.defaultProfileId };
+    const settings: LlmSessionSettings = state.published.routing
+      ? { followDefault: true }
+      : { profileId: state.published.defaultProfileId };
     await this.store.append(
       sessionId,
       [
@@ -134,7 +137,7 @@ export class TenantLlmRouting implements LlmRoutingPort {
     const scope = await this.session(sessionId, actor);
     if (!scope) return null;
     const state = await this.configs.read(scope.identity.tenantId);
-    const profile = state.published?.profiles.find((row) => row.id === scope.settings.profileId);
+    const profile = state.published && llmSelectionPolicy(state.published, scope.settings);
     if (!profile)
       throw new LlmConfigurationError(
         'UNAVAILABLE',
@@ -202,7 +205,7 @@ export class TenantLlmRouting implements LlmRoutingPort {
     const config = state.published;
     if (state.source !== 'database' || !config || !state.activeRevision)
       throw new LlmConfigurationError('UNAVAILABLE', 'Published routing unavailable');
-    const profile = config.profiles.find((row) => row.id === settings.profileId);
+    const profile = llmSelectionPolicy(config, settings);
     if (!profile)
       throw new LlmConfigurationError(
         'UNAVAILABLE',
@@ -340,10 +343,15 @@ export class TenantLlmRouting implements LlmRoutingPort {
       if (!sealed) continue;
       return {
         receipt: {
-          profileName: profile.name,
+          ...(settings.profileId
+            ? { profileName: config.profiles.find((row) => row.id === settings.profileId)?.name }
+            : {}),
           deploymentName: deployment.name,
           revision: state.activeRevision,
-          profileId: profile.id,
+          ...(settings.profileId
+            ? { profileId: settings.profileId }
+            : { selection: settings.model ? ('model' as const) : ('default' as const) }),
+          automaticFallback: profile.mode === 'automatic',
           connectionId: connection.id,
           deploymentId: deployment.id,
           credentialVersionId: key.versionId,
@@ -354,11 +362,12 @@ export class TenantLlmRouting implements LlmRoutingPort {
           ...(settings.reasoningBudgetTokens
             ? { reasoningBudgetTokens: settings.reasoningBudgetTokens }
             : {}),
-          reason: settings.pinnedDeploymentId
-            ? 'pin'
-            : candidate === profile.primary
-              ? 'primary'
-              : 'fallback',
+          reason:
+            settings.pinnedDeploymentId || settings.pinned
+              ? 'pin'
+              : candidate === profile.primary
+                ? 'primary'
+                : 'fallback',
         },
         connection,
         deployment: {
@@ -434,8 +443,9 @@ export class TenantLlmRouting implements LlmRoutingPort {
         responseHeaders: { 'retry-after-ms': String(Math.max(1, Date.parse(wait) - this.now())) },
       });
     if (
-      state.published?.profiles.find((profile) => profile.id === route.receipt.profileId)?.mode ===
-        'automatic' &&
+      (route.receipt.automaticFallback ??
+        state.published?.profiles.find((profile) => profile.id === route.receipt.profileId)
+          ?.mode === 'automatic') &&
       route.receipt.reason !== 'pin' &&
       this.operations &&
       (await this.operations.blocked(

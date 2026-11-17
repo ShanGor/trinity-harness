@@ -3,7 +3,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { App as AntdApp } from 'antd';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { TimelinePage, ServerEvent } from '@trinity-harness/shared';
+import type { LlmModelsResponse, TimelinePage, ServerEvent } from '@trinity-harness/shared';
 import type { EventStreamStatus } from '@trinity-harness/client-acp';
 
 import App from '../src/App';
@@ -16,6 +16,8 @@ const fake = vi.hoisted(() => ({
   onConnectionState: undefined as ((status: EventStreamStatus) => void) | undefined,
   onStreamError: undefined as ((error: unknown) => void) | undefined,
   markdown: vi.fn(),
+  getLlmModels: vi.fn<() => Promise<LlmModelsResponse>>(),
+  setLlmSessionSettings: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
   getTimeline: vi.fn<() => Promise<TimelinePage>>(),
   createSession: vi.fn<(...args: unknown[]) => Promise<string>>(async () => 'new-session'),
   sendPrompt: vi.fn(async () => undefined),
@@ -78,6 +80,8 @@ vi.mock('@trinity-harness/client-acp', () => ({
     getBrowserPreview = fake.getBrowserPreview;
     getEnvironment = fake.getEnvironment;
     getLlmProfiles = async () => ({ available: false, profiles: [] });
+    getLlmModels = fake.getLlmModels;
+    setLlmSessionSettings = fake.setLlmSessionSettings;
     getLlmSessionSettings = async () => ({ expectedLastSeq: 0, settings: null });
     getSessionSettings = fake.getSessionSettings;
     createSession = fake.createSession;
@@ -162,6 +166,13 @@ beforeEach(async () => {
   fake.getTimeline.mockReset().mockResolvedValue({ events: [], lastSeq: 0, nextBefore: null });
   fake.onEvent = undefined;
   fake.markdown.mockClear();
+  fake.getLlmModels.mockReset().mockResolvedValue({
+    available: false,
+    models: [],
+    defaultModel: null,
+    canTune: false,
+  });
+  fake.setLlmSessionSettings.mockReset().mockResolvedValue(undefined);
   fake.createSession.mockReset().mockResolvedValue('new-session');
   fake.sendPrompt.mockClear();
   fake.reviseMessage.mockReset().mockResolvedValue(undefined);
@@ -416,6 +427,69 @@ describe('chat typing and streaming performance', () => {
       'workspace-write',
       undefined,
       expect.objectContaining({ kind: 'chat' }),
+    );
+  });
+
+  it('applies new Chat model settings before sending the first prompt', async () => {
+    const providerId = '00000000-0000-4000-8000-000000000001';
+    fake.getLlmModels.mockResolvedValue({
+      available: true,
+      models: [
+        {
+          id: providerId,
+          connectionId: providerId,
+          providerName: 'Test provider',
+          modelId: 'chosen-model',
+          name: 'Chosen model',
+          pricingKey: 'unpriced',
+          enabled: true,
+          contextTokens: 128000,
+          outputTokens: 8192,
+          adapter: 'openai',
+          capabilities: { reasoning: true, tools: true, images: false, files: false },
+          settings: {},
+        },
+      ],
+      defaultModel: { providerId, modelId: 'chosen-model' },
+      canTune: true,
+    });
+    await click(container.querySelector('.history-item'));
+    await click(container.querySelector('.new-chat-button'));
+    const composer = container.querySelector('textarea')!;
+    await type(composer, 'Use my chosen model');
+    const trigger = container.querySelector('[aria-label="Model and reasoning settings"]')!;
+    expect(trigger.closest('.composer-model-toolbar')).toBeTruthy();
+    await click(trigger);
+    await act(async () => {
+      document
+        .querySelector('[aria-label="AI model"]')!
+        .closest('.ant-select')!
+        .querySelector('.ant-select-selector')!
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    await click(
+      document.querySelector('.ant-select-item-option[title="Test provider / chosen-model"]'),
+    );
+    await act(async () => {
+      document
+        .querySelector('[aria-label="Session reasoning effort"]')!
+        .closest('.ant-select')!
+        .querySelector('.ant-select-selector')!
+        .dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    await click(document.querySelector('.ant-select-item-option[title="high"]'));
+    await click(
+      [...document.querySelectorAll('button')].find((button) => button.textContent === 'Apply')!,
+    );
+    expect(fake.createSession).not.toHaveBeenCalled();
+    expect(composer.value).toBe('Use my chosen model');
+    await click(container.querySelector('.ant-sender-actions-btn'));
+    expect(fake.setLlmSessionSettings).toHaveBeenCalledWith('new-session', 0, {
+      model: { providerId, modelId: 'chosen-model' },
+      reasoningEffort: 'high',
+    });
+    expect(fake.setLlmSessionSettings.mock.invocationCallOrder[0]).toBeLessThan(
+      fake.sendPrompt.mock.invocationCallOrder[0]!,
     );
   });
 

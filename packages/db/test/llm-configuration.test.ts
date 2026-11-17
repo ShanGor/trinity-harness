@@ -460,3 +460,124 @@ describe.skipIf(!url)('LLM activation and binding fences', () => {
     expect(await replica.cooldown(tenantId, connection, deployment)).toBeNull();
   });
 });
+
+describe.skipIf(!url)('atomic direct provider settings', () => {
+  const pool = createPool(url ?? 'postgresql://invalid');
+  const db = createDb(pool);
+  const store = new PgLlmConfigurationStore(db);
+  const users = new PgUserStore(db, { hash: async (value) => value, verify: async () => false });
+  afterAll(async () => {
+    await pool.end();
+  });
+  it('connects with an inline key independently, activates a default and never returns to environment', async () => {
+    const tenant = await createTenant(db, `direct-${randomUUID()}`);
+    const admin = identityOf(
+      await users.createUser({
+        tenantId: tenant.id,
+        email: `${randomUUID()}@test.invalid`,
+        passwordHash: 'unused',
+        role: 'admin',
+      }),
+    );
+    const connectionId = randomUUID(),
+      operationId = randomUUID();
+    const configuration: LlmConfiguration = {
+      connections: [
+        {
+          id: connectionId,
+          name: 'Kimi',
+          adapter: 'openai',
+          endpoint: 'https://api.kimi.com/coding/v1',
+          enabled: true,
+        },
+      ],
+      deployments: [],
+      profiles: [],
+      defaultProfileId: '',
+      routing: { defaultModel: null, automaticFallback: false, fallbackModels: [] },
+    };
+    const sealed = JSON.stringify({
+      version: 1,
+      keyId: 'test',
+      wrappedKey: '',
+      wrapIv: '',
+      wrapTag: '',
+      iv: '',
+      tag: '',
+      body: 'encrypted',
+      digest: 'a'.repeat(64),
+    });
+    const input = {
+      expectedVersion: 0,
+      operationId,
+      configuration,
+      sealedKeys: [{ connectionId, sealed }],
+    };
+    const saved = await store.configure(admin, input);
+    expect(saved.source).toBe('environment');
+    expect(saved.version).toBe(1);
+    expect(saved.published).toBeNull();
+    expect(saved.credentials[0]).toMatchObject({ connectionId, revoked: false });
+    expect(JSON.stringify(saved)).not.toContain('encrypted');
+    expect((await new PgLlmConfigurationStore(db).configure(admin, input)).version).toBe(1);
+    const model = {
+      id: randomUUID(),
+      name: 'Kimi model',
+      connectionId,
+      modelId: 'k3-256k',
+      pricingKey: 'unpriced',
+      enabled: true,
+      contextTokens: 262144,
+      outputTokens: 8192,
+      capabilities: { tools: true, images: false, files: false, reasoning: true },
+      settings: {},
+    };
+    configuration.deployments.push(model);
+    configuration.routing!.defaultModel = { providerId: connectionId, modelId: model.modelId };
+    const active = await store.configure(admin, {
+      expectedVersion: 1,
+      operationId: randomUUID(),
+      configuration,
+      sealedKeys: [],
+    });
+    expect(active.source).toBe('database');
+    expect(active.published?.profiles).toEqual([]);
+    expect(active.credentials[0]?.versionId).toBe(operationId);
+    await expect(
+      store.configure(admin, {
+        expectedVersion: 1,
+        operationId: randomUUID(),
+        configuration,
+        sealedKeys: [],
+      }),
+    ).rejects.toThrow('Configuration changed');
+    configuration.routing!.defaultModel = null;
+    const cleared = await store.configure(admin, {
+      expectedVersion: 2,
+      operationId: randomUUID(),
+      configuration,
+      sealedKeys: [],
+    });
+    expect(cleared.source).toBe('database');
+    expect(cleared.published?.routing?.defaultModel).toBeNull();
+    const failedConfiguration = {
+      ...configuration,
+      connections: [
+        ...configuration.connections,
+        { ...configuration.connections[0]!, id: randomUUID() },
+      ],
+    };
+    await expect(
+      store.configure(admin, {
+        expectedVersion: 3,
+        operationId: randomUUID(),
+        configuration: failedConfiguration,
+        sealedKeys: [{ connectionId, sealed }],
+      }),
+    ).rejects.toThrow('Enter an API key');
+    const after = await store.read(tenant.id);
+    expect(after.version).toBe(3);
+    expect(after.credentials[0]?.versionId).toBe(operationId);
+    expect(after.draft?.connections).toHaveLength(1);
+  });
+});

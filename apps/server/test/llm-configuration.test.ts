@@ -104,6 +104,7 @@ async function fixture(role: Role = 'admin') {
     credentials: [{ connectionId, versionId: randomUUID(), revoked: false }],
   };
   const configs: LlmConfigurationPort = {
+    configure: vi.fn(async () => state),
     impact: async () => ({ version: 1, unboundSessions: 0, bindings: [] }),
     read: vi.fn(async () => state),
     revision: vi.fn(async () => configuration),
@@ -424,4 +425,129 @@ it('allows an emergency publication during DNS outage while live probes record a
   expect(test.json()).toMatchObject({ status: 'failed', inputTokens: 0, outputTokens: 0 });
   expect(f.gateway.stream).not.toHaveBeenCalled();
   expect(f.operations.finishProbe).toHaveBeenCalledTimes(1);
+});
+
+describe('direct provider configuration API', () => {
+  it('accepts a connection and inline encrypted key without a model or default', async () => {
+    const f = await fixture();
+    const response = await f.app.inject({
+      method: 'PUT',
+      url: '/api/admin/llm/providers',
+      headers: f.headers,
+      payload: {
+        expectedVersion: 1,
+        operationId: randomUUID(),
+        settings: {
+          providers: f.configuration.connections,
+          models: [],
+          routing: { defaultModel: null, automaticFallback: false, fallbackModels: [] },
+        },
+        keys: [{ providerId: f.connectionId, secret: 'private-inline-key' }],
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    const call = vi.mocked(f.configs.configure!).mock.calls[0]![1];
+    expect(call.configuration.profiles).toEqual([]);
+    expect(call.sealedKeys[0]!.sealed).not.toContain('private-inline-key');
+    expect(response.body).not.toContain('private-inline-key');
+  });
+  it('rejects Member writes and duplicate inline keys before the store', async () => {
+    const member = await fixture('member');
+    expect(
+      (
+        await member.app.inject({
+          method: 'PUT',
+          url: '/api/admin/llm/providers',
+          headers: member.headers,
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(403);
+    expect(member.configs.configure).not.toHaveBeenCalled();
+    const f = await fixture();
+    const key = { providerId: f.connectionId, secret: 'private-key' };
+    const response = await f.app.inject({
+      method: 'PUT',
+      url: '/api/admin/llm/providers',
+      headers: f.headers,
+      payload: {
+        expectedVersion: 1,
+        operationId: randomUUID(),
+        settings: {
+          providers: f.configuration.connections,
+          models: [],
+          routing: { defaultModel: null, automaticFallback: false, fallbackModels: [] },
+        },
+        keys: [key, key],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(f.configs.configure).not.toHaveBeenCalled();
+  });
+  it('allows Members direct model selection without Expert privileges', async () => {
+    const f = await fixture('member');
+    f.state.published = {
+      ...f.configuration,
+      profiles: [],
+      defaultProfileId: '',
+      routing: {
+        defaultModel: { providerId: f.connectionId, modelId: 'model' },
+        automaticFallback: false,
+        fallbackModels: [],
+      },
+    };
+    const response = await f.app.inject({
+      method: 'PUT',
+      url: `/api/sessions/${f.sessionId}/llm-settings`,
+      headers: f.headers,
+      payload: {
+        operationId: randomUUID(),
+        expectedLastSeq: 0,
+        settings: { model: { providerId: f.connectionId, modelId: 'model' } },
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    const events = await f.store.load(f.sessionId);
+    expect(events.at(-1)).toMatchObject({
+      type: 'llm/settings',
+      settings: { model: { providerId: f.connectionId, modelId: 'model' } },
+    });
+  });
+});
+
+it('identifies a rejected connection without exposing its full endpoint or credentials', async () => {
+  const f = await fixture();
+  f.policy.validateConfiguration.mockImplementation(() => {
+    throw new LlmConfigurationError(
+      'INVALID',
+      'Provider origin is not allowed. Check LLM_PROVIDER_DESTINATIONS.',
+    );
+  });
+  const response = await f.app.inject({
+    method: 'PUT',
+    url: '/api/admin/llm/providers',
+    headers: f.headers,
+    payload: {
+      expectedVersion: 1,
+      operationId: randomUUID(),
+      settings: {
+        providers: [
+          {
+            ...f.configuration.connections[0]!,
+            endpoint: 'https://unsupported.example/private-path',
+          },
+        ],
+        models: [],
+        routing: { defaultModel: null, automaticFallback: false, fallbackModels: [] },
+      },
+      keys: [{ providerId: f.connectionId, secret: 'private-inline-key' }],
+    },
+  });
+  expect(response.statusCode).toBe(400);
+  expect(response.body).toContain('Example');
+  expect(response.body).toContain('https://unsupported.example');
+  expect(response.body).toContain('LLM_PROVIDER_DESTINATIONS');
+  expect(response.body).not.toContain('private-path');
+  expect(response.body).not.toContain('private-inline-key');
+  expect(f.configs.configure).not.toHaveBeenCalled();
 });

@@ -95,6 +95,7 @@ export {
   roleSchema,
   hasCapability,
   llmConfigurationSchema,
+  llmPublishedConfigurationSchema,
   llmConfigurationStateSchema,
   llmConfigurationSaveSchema,
   llmConfigurationPublishSchema,
@@ -131,4 +132,16 @@ export {
   llmProbeRequestSchema,
   userListSchema,
   userRoleUpdateSchema,
+} from '@trinity-harness/contracts';
+export {
+  llmProviderSettingsSchema,
+  llmProviderSettingsWriteSchema,
+  llmProviderSettingsResponseSchema,
+  llmModelsResponseSchema,
+} from '@trinity-harness/contracts';
+export type {
+  LlmProviderSettings,
+  LlmProviderSettingsResponse,
+  LlmModelReference,
+  LlmModelsResponse,
 } from '@trinity-harness/contracts';

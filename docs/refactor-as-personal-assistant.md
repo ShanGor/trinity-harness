@@ -554,12 +554,12 @@ The primary hierarchy is **Admin > Expert > Member**. Member is the user-facing 
 | Capability                                                                      | Member | Expert | Admin | Viewer       |
 | ------------------------------------------------------------------------------- | ------ | ------ | ----- | ------------ |
 | Run Main, Chat and Work with configured tools and ordinary approvals            | Yes    | Yes    | Yes   | No           |
-| Select an approved model profile for an accessible writable session             | Yes    | Yes    | Yes   | No           |
-| Use the profile's approved automatic fallback                                   | Yes    | Yes    | Yes   | No execution |
+| Select an enabled provider/model for an accessible writable session             | Yes    | Yes    | Yes   | No           |
+| Use approved automatic fallback                                                 | Yes    | Yes    | Yes   | No execution |
 | Tune reasoning/output settings within administrator limits                      | No     | Yes    | Yes   | No           |
 | Set session-specific fallback order or pin an approved deployment where allowed | No     | Yes    | Yes   | No           |
 | Manage provider endpoints, credentials and model deployments                    | No     | No     | Yes   | No           |
-| Publish profiles, tenant defaults, permitted destinations and emergency routing | No     | No     | Yes   | No           |
+| Manage default model, approved fallback destinations and emergency switching    | No     | No     | Yes   | No           |
 | Manage tenant users, roles, quotas and configuration audit                      | No     | No     | Yes   | No           |
 | See actual model/fallback information in an already accessible conversation     | Yes    | Yes    | Yes   | Yes          |
 | Retrieve a stored provider secret                                               | No     | No     | No    | No           |
@@ -572,19 +572,21 @@ New ordinary users default to Member. Migrate existing Developer accounts to Mem
 
 An Admin can manage LLM configuration from Account → Administration → AI configuration without editing `.env`, rebuilding images or restarting application services for ordinary connection/model/routing changes. Deploying a new SDK adapter or changing infrastructure secrets can still require an operator release. Configuration is tenant-scoped; tenant Admin is not a platform-wide operator.
 
-Separate three concepts:
+Use **Providers and Models**, following the configuration model reviewed in the local OpenCode reference. Remove routing profiles from the product, public configuration API and new session selection. A generated or hidden profile per provider is not the target mechanism.
 
-- **Provider connection:** named endpoint, supported protocol adapter, write-only credential reference and administrative availability. Multiple connections may use the same protocol/model through different vendors or accounts.
-- **Model deployment:** a model ID on one connection, declared context/output limits, supported inputs/tools, provider-specific settings and reference to the fixed pricing catalog. Protocol compatibility alone does not prove capability or model identity.
-- **Routing profile:** a named primary deployment, ordered approved backups, mode (manual, automatic or pinned), parameter bounds and permitted data destinations. Members choose profiles; Experts may override within the profile's bounds.
+- **Providers:** choose a known provider, enter its API key and Save. Endpoint/protocol defaults come from a curated preset; Custom provider exposes these fields. Saving a key does not require a model, a default, or a routing object. A provider can offer multiple models and distinct named accounts.
+- **Models:** select an enabled provider/model pair directly. The composer displays the actual model, grouped by provider in the picker. Set one tenant default model; no separate model-deployment form is required for catalog models. Custom models may define validated capabilities and limits in advanced settings.
+- **Fallback:** an optional ordered list of approved provider/model pairs in AI settings, with automatic fallback off until explicitly enabled. It is a setting, not a named object users must create. Admins approve destinations. Members choose enabled models; Experts adjust bounded model parameters and may pin a session to prohibit fallback.
 
-Provide Connections, Routing and Activity views. Show draft versus published configuration, revision conflicts, timestamped test results and separate administrative/observed health states. Connection tests use bounded synthetic input and report which capabilities were tested; they never use private conversation content. Explain that tests incur provider requests and may cost money. Missing health data is Unknown, never Healthy.
+Settings → AI opens a connection list with distinct rows and Add/Edit/Delete actions. Add/Edit opens one connection form with inline credentials, Save connection and Cancel. Default model and optional Fallback models are a separate Model settings section with its own Save action. Connection forms include name/provider, endpoint and an inline API key password field with one Save action. Editing uses the same form: a blank key preserves the stored secret and a newly entered value updates it. Do not expose Add key, Replace key or Change key as separate actions. Provider cards expose Edit, Disconnect and explicit Test connection. Saved status means credentials are stored, not that paid inference or all capabilities were tested. Keys remain write-only. Do not show revision numbers, publication reasons, draft/publish buttons, protocol adapters or pricing keys in the normal flow. Keep audit/history and custom model details in advanced settings.
 
-Publishing and emergency switching show the affected profiles, any model/destination change and the next-request application boundary. An Admin can switch an affected profile to a preconfigured backup quickly, then restore it explicitly. A default-profile change affects newly bound sessions; editing a bound profile affects its future eligible requests. Pinned sessions keep their explicit selection unless an Admin disables that deployment, in which case they stop with an actionable explanation. Opening settings must preserve composer drafts, focus, history references and active streams.
+Each ordinary Save applies the named change with concurrency control and a clear success/error result. Configuration revisions and replay evidence remain internal safeguards. Provider/key creation uses one server-owned idempotent operation; metadata, encrypted credentials and active configuration commit atomically. Failed operations preserve the complete prior state. Selecting a default is independent of connecting a provider. A failure must not discard an entered key before acknowledgement or falsely report connection success.
+
+Sessions either follow the tenant default or explicitly select a provider/model. Following-default sessions use the latest default at the next eligible request boundary; explicit selections stay selected when the default changes. Show “Default · <model>” versus an explicit model in the picker. Disabling a selected model produces an actionable unavailable state. Preserve current streams, tool effects, composer drafts and focus.
 
 ### 14.3 Fallback and transparency
 
-Automatic fallback uses only administrator-approved compatible destinations. Before dispatch, check tools, attachments, context/output size, provider-specific history, data-location restrictions, current authorization and task/tenant budgets. Never drop input, tools or constraints merely to fit a backup. An unavailable compatible backup produces a clear failure. Approval of cross-provider data transfer belongs to profile configuration; the application must not invent new destinations during an outage.
+Automatic fallback uses only administrator-approved compatible destinations. Before dispatch, check tools, attachments, context/output size, provider-specific history, data-location restrictions, current authorization and task/tenant budgets. Never drop input, tools or constraints merely to fit a backup. An unavailable compatible backup produces a clear failure. Approval of cross-provider data transfer belongs to the fallback settings; the application must not invent new destinations during an outage.
 
 First automatic-fallback scope is failed model requests with no output, including no reasoning or tool-call output. Preserve bounded same-deployment continuation for partial streams; changing models after partial output remains deferred. Never replay tool actions, execute incomplete calls or restart a completed task to repair an outage. Cancellation, policy denial and safety refusal do not trigger fallback.
 
@@ -592,9 +594,13 @@ Users see a concise routing notice when a fallback changes the executing deploym
 
 ### 14.4 Acceptance outcomes
 
-1. A Member completes normal Chat/Work and selects an approved profile, but cannot alter shared configuration through either UI or direct API calls.
+1. A Member completes normal Chat/Work and selects an enabled model, but cannot alter shared configuration through either UI or direct API calls.
 2. An Expert adjusts permitted settings for an authorized session; exceeding bounds, changing another user's session or supplying an unapproved destination is rejected.
-3. An Admin tests and publishes a backup, previews impact and switches routing without service restart. Existing streams/tools continue; the next eligible model request uses the published revision.
+3. An Admin connects a provider, saves a default/backup model and switches routing without service restart. Existing streams/tools continue; the next eligible model request uses the acknowledged saved configuration.
 4. An outage before model output can use an approved compatible backup under the same budgets. Partial streams, cancellation and unknown tool effects never cause automatic cross-model replay.
 5. Concurrent edits, cross-tenant IDs, revoked roles, stale tokens and unavailable authorization/secret stores fail closed. Viewer remains read-only after migration.
 6. Reconnect/restart preserves routing decisions, retry counters and usage attribution; a disabled credential or deployment cannot be resurrected by rollback or stale environment settings.
+
+### Compatibility and delivery
+
+The checkout now saves connection metadata and inline keys atomically and dispatches from direct default/explicit model selections. No hidden profiles are generated. Historical profile events remain readable. When an Admin replaces legacy routing, existing profile-bound sessions require an explicit model/default selection; no automatic migration guesses destinations or permission bounds. Legacy routing cannot be republished over activated direct settings. The China Kimi Code preset includes its endpoint/model defaults; other providers accept upstream model IDs, with capability/limit details collapsed. Live-provider acceptance and deployment remain release gates.

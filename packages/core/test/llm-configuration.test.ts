@@ -877,3 +877,95 @@ it.each(['missing/model', 'constructor', '__proto__'])(
     ).toEqual({});
   },
 );
+
+describe('direct model routing', () => {
+  function direct() {
+    const f = fixture();
+    const first = { providerId: f.connections[0]!.id, modelId: f.deployments[0]!.modelId };
+    const second = { providerId: f.connections[1]!.id, modelId: f.deployments[1]!.modelId };
+    const configuration = llmConfigurationSchema.parse({
+      ...f.configuration,
+      profiles: [],
+      defaultProfileId: '',
+      routing: { defaultModel: first, automaticFallback: true, fallbackModels: [second] },
+    });
+    const state = { ...f.state, published: configuration, draft: configuration };
+    f.updateState(state);
+    return { ...f, state, first, second };
+  }
+  it('follows a changed default while explicit selections remain fixed', async () => {
+    const f = direct();
+    const initial = await f.routing.resolve(f.identity, { followDefault: true }, f.request, []);
+    expect(initial.receipt.deploymentId).toBe(f.deployments[0]!.id);
+    expect(initial.receipt.profileId).toBeUndefined();
+    f.state.published!.routing!.defaultModel = f.second;
+    f.state.published!.routing!.fallbackModels = [];
+    f.state.activeRevision = 2;
+    f.updateState(f.state);
+    const following = await f.routing.resolve(f.identity, { followDefault: true }, f.request, []);
+    const explicit = await f.routing.resolve(f.identity, { model: f.first }, f.request, []);
+    expect(following.receipt.deploymentId).toBe(f.deployments[1]!.id);
+    expect(explicit.receipt.deploymentId).toBe(f.deployments[0]!.id);
+    expect(explicit.receipt.selection).toBe('model');
+    await expect(f.routing.admit(f.identity, initial)).rejects.toThrow('Routing changed');
+  });
+  it('uses approved fallback and preserves partial-output deployment fencing', async () => {
+    const f = direct();
+    const failed = {
+      deploymentId: f.deployments[0]!.id,
+      connectionId: f.connections[0]!.id,
+      output: false,
+    };
+    const backup = await f.routing.resolve(f.identity, { followDefault: true }, f.request, [
+      failed,
+    ]);
+    expect(backup.receipt.reason).toBe('fallback');
+    expect(backup.receipt.deploymentId).toBe(f.deployments[1]!.id);
+    const partial = await f.routing.resolve(f.identity, { followDefault: true }, f.request, [
+      { ...failed, output: true },
+    ]);
+    expect(partial.receipt.deploymentId).toBe(f.deployments[0]!.id);
+    await expect(
+      f.routing.resolve(f.identity, { followDefault: true, pinned: true }, f.request, []),
+    ).rejects.toThrow('account role');
+    f.user.role = 'expert';
+    const pinned = await f.routing.resolve(
+      f.identity,
+      { followDefault: true, pinned: true },
+      f.request,
+      [failed],
+    );
+    expect(pinned.receipt.deploymentId).toBe(f.deployments[0]!.id);
+    expect(pinned.receipt.automaticFallback).toBe(false);
+  });
+  it('persists a default-following binding and refuses ambiguous retired profiles', async () => {
+    const f = direct();
+    const scope = await f.routing.session(f.sessionId, f.user.id);
+    expect(scope?.settings).toEqual({ followDefault: true });
+    expect(
+      (await f.store.load(f.sessionId)).find((row) => row.type === 'llm/settings'),
+    ).toMatchObject({ settings: { followDefault: true } });
+    await expect(
+      f.routing.resolve(f.identity, { profileId: f.profile.id }, f.request, []),
+    ).rejects.toThrow('Select a model');
+  });
+  it('rejects duplicate, disabled and missing routing references', () => {
+    const f = direct();
+    const config = f.state.published!;
+    expect(
+      llmConfigurationSchema.safeParse({
+        ...config,
+        routing: { ...config.routing, fallbackModels: [f.first] },
+      }).success,
+    ).toBe(false);
+    expect(
+      llmConfigurationSchema.safeParse({
+        ...config,
+        routing: {
+          ...config.routing,
+          defaultModel: { providerId: randomUUID(), modelId: 'unknown' },
+        },
+      }).success,
+    ).toBe(false);
+  });
+});

@@ -1465,3 +1465,32 @@
     margin-top: 8px;
   }
 }
+
+.composer-model-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 12px 8px;
+}
+
+.composer-model-trigger.ant-btn {
+  max-width: 100%;
+  color: var(--text-secondary);
+  font-size: 12px;
+  border-radius: 16px;
+}
+
+.composer-model-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-model-popover {
+  width: min(320px, calc(100vw - 48px));
+  max-height: min(560px, calc(100dvh - 96px));
+  overflow-y: auto;
+}
+
+.composer-model-popover .ant-form-item {
+  margin-bottom: 12px;
+}

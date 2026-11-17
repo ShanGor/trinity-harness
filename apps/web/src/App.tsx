@@ -4,7 +4,7 @@ import { chatDateHeadings } from './chat-dates';
 import { saveHistoryTimezone, useHistoryTimezone } from './history-timezone';
 import { publishResponseSpeech } from './response-speech-events';
 import { XDuCompanion, companionState } from './x-du-companion';
-import type { PromptDelivery } from '@trinity-harness/shared';
+import type { LlmSessionSettings as ModelSettings, PromptDelivery } from '@trinity-harness/shared';
 import { newId, pendingCreationSchema } from '@trinity-harness/shared';
 import {
   AssistantMemory,
@@ -70,7 +70,7 @@ import { ScheduledTasks } from './scheduled-tasks';
 import { InboxIndicator } from './inbox-indicator';
 import { PersonalComputer } from './personal-computer';
 import { WorkspaceBrowser } from './workspace-browser';
-import { LlmAdministration } from './llm-settings';
+import { LlmAdministration, LlmSessionSettings } from './llm-settings';
 import { SessionSettingsModal } from './session-settings';
 import { SpeechSettingsModal } from './speech-settings';
 import { loadTimelineWithPrompt } from './conversation-history';
@@ -182,6 +182,11 @@ export default function App() {
     { sourceSessionId: string; sourceEventId: string; kind: 'chat' | 'work' }[]
   >([]);
   const [queuedPrompts, setQueuedPrompts] = useState<{ promptId: string; text: string }[]>([]);
+  const [modelSettingsVersion, setModelSettingsVersion] = useState(0);
+  const [draftModelSettings, setDraftModelSettings] = useState<ModelSettings>();
+  const pendingModelSettings = useRef<{ settings: ModelSettings; sessionId?: string } | undefined>(
+    undefined,
+  );
   const composerDrafts = useRef(new Map<string, string>());
   const timelineHistory = useRef(
     new Map<string, { events: ServerEvent[]; before: number | null }>(),
@@ -632,6 +637,7 @@ export default function App() {
       creationPromise.current = pending;
       try {
         const id = await pending;
+        if (pendingModelSettings.current) pendingModelSettings.current.sessionId = id;
         if (user) sessionStorage.removeItem(`trinity.pendingCreation:${user.id}`);
         activateSession(id);
         setCreationPending(false);
@@ -716,6 +722,8 @@ export default function App() {
     sessionRef.current = null;
     setSessionId(null);
     setMode('chat');
+    setDraftModelSettings(undefined);
+    pendingModelSettings.current = undefined;
     setDraftOrigin(null);
     setWorkspaceChosen(false);
     setCreationPending(false);
@@ -992,6 +1000,13 @@ export default function App() {
       try {
         // First prompt of a session doubles as its sidebar title.
         const id = await ensureSession(trimmed.slice(0, 60) || undefined);
+        const pendingSettings = pendingModelSettings.current;
+        if (pendingSettings?.sessionId === id) {
+          const current = await client.getLlmSessionSettings(id);
+          await client.setLlmSessionSettings(id, current.expectedLastSeq, pendingSettings.settings);
+          pendingModelSettings.current = undefined;
+          setModelSettingsVersion((value) => value + 1);
+        }
         for (const attachment of mimeList) {
           const file = localFiles.current.get(attachment.uri);
           if (file) {
@@ -1435,6 +1450,24 @@ export default function App() {
               />
             </div>
           </Flex>
+          <div className="composer-model-toolbar">
+            <LlmSessionSettings
+              key={`${sessionId ?? 'new'}:${llmAdministrationOpen}:${modelSettingsVersion}`}
+              compact
+              client={client}
+              sessionId={sessionId ?? undefined}
+              draftSettings={sessionId ? undefined : draftModelSettings}
+              onDraftChange={(settings) => {
+                setDraftModelSettings(settings);
+                pendingModelSettings.current = { settings };
+              }}
+              onApplied={() => {
+                if (pendingModelSettings.current?.sessionId === sessionId)
+                  pendingModelSettings.current = undefined;
+              }}
+              readOnly={user?.role === 'viewer' || busy || creationPending}
+            />
+          </div>
         </div>
         <p className="composer-hint">Enter to send · Shift + Enter for a new line</p>
       </div>

@@ -4,6 +4,7 @@ import type { ClientRequest, IncomingMessage, RequestOptions } from 'node:http';
 import { request } from 'node:https';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { lookup } from 'node:dns/promises';
+import { llmInfrastructureEnvShape } from '../src/llm/infrastructure.js';
 import { ProviderEndpointPolicy } from '../src/llm/endpoint-policy.js';
 
 vi.mock('node:https', () => ({ request: vi.fn() }));
@@ -98,4 +99,18 @@ it('permits safe configuration publication while provider DNS is down and redact
     message: 'Provider address unavailable',
     isRetryable: true,
   });
+});
+
+it('allows shipped China provider presets by default and rejects unknown origins without echoing secrets', () => {
+  const policy = new ProviderEndpointPolicy(
+    llmInfrastructureEnvShape.LLM_PROVIDER_DESTINATIONS.parse(undefined),
+  );
+  expect(() => policy.validateConfiguration('https://api.kimi.com/coding/v1')).not.toThrow();
+  expect(() => policy.validateConfiguration('https://api.minimax.cn/anthropic/v1')).not.toThrow();
+  expect(() => policy.validateConfiguration('https://unknown.example/v1')).toThrow(
+    'LLM_PROVIDER_DESTINATIONS',
+  );
+  expect(() =>
+    policy.validateConfiguration('https://secret@api.kimi.com/coding/v1?key=private'),
+  ).toThrow('Provider endpoint denied');
 });

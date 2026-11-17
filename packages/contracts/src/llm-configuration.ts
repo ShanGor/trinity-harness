@@ -52,18 +52,31 @@ export const llmProfileSchema = z
     primary: id,
     backups: z.array(id).max(3),
     mode: z.enum(['manual', 'automatic']),
-    allowedDeployments: z.array(id).min(1).max(256),
+    allowedDeployments: z.array(id).max(256),
     maxOutputTokens: z.number().int().positive().max(1_000_000),
     reasoningEfforts: z.array(effort).max(6).optional(),
     maxReasoningTokens: z.number().int().min(1024).max(1_000_000).optional(),
+  })
+  .strict();
+export const llmModelReferenceSchema = z
+  .object({ providerId: id, modelId: z.string().min(1).max(256) })
+  .strict();
+export type LlmModelReference = z.infer<typeof llmModelReferenceSchema>;
+export const llmDirectRoutingSchema = z
+  .object({
+    defaultModel: llmModelReferenceSchema.nullable(),
+    automaticFallback: z.boolean(),
+    fallbackModels: z.array(llmModelReferenceSchema).max(3),
   })
   .strict();
 export const llmConfigurationSchema = z
   .object({
     connections: z.array(llmConnectionSchema).max(64),
     deployments: z.array(llmDeploymentSchema).max(256),
-    profiles: z.array(llmProfileSchema).min(1).max(64),
-    defaultProfileId: id,
+    profiles: z.array(llmProfileSchema).max(64),
+    // Empty is valid in a saved draft while the first profile is being configured.
+    defaultProfileId: z.union([id, z.literal('')]),
+    routing: llmDirectRoutingSchema.optional(),
   })
   .strict()
   .superRefine((config, ctx) => {
@@ -105,10 +118,51 @@ export const llmConfigurationSchema = z
           issue('Route outside approved destinations');
       }
     }
-    if (!config.profiles.some((profile) => profile.id === config.defaultProfileId))
+    if (
+      config.profiles.length > 0 &&
+      !config.profiles.some((profile) => profile.id === config.defaultProfileId)
+    )
       issue('Missing default profile');
+    if (config.routing) {
+      if (config.profiles.length || config.defaultProfileId)
+        issue('Direct routing cannot contain profiles');
+      const refs = [config.routing.defaultModel, ...config.routing.fallbackModels].filter(
+        (ref) => !!ref,
+      );
+      if (new Set(refs.map((ref) => `${ref.providerId}/${ref.modelId}`)).size !== refs.length)
+        issue('Duplicate routing models');
+      for (const ref of refs) {
+        const model = config.deployments.find(
+          (row) => row.connectionId === ref.providerId && row.modelId === ref.modelId,
+        );
+        if (!model?.enabled || !connections.get(ref.providerId)?.enabled)
+          issue('Routing model must be enabled');
+      }
+      if (
+        new Set(config.deployments.map((row) => `${row.connectionId}/${row.modelId}`)).size !==
+        config.deployments.length
+      )
+        issue('Duplicate provider model');
+    }
     if (JSON.stringify(config).length > 512_000) issue('Configuration too large');
   });
+/** A draft can be assembled incrementally; only publication requires a usable route. */
+export const llmPublishedConfigurationSchema = llmConfigurationSchema.superRefine((config, ctx) => {
+  if (config.connections.length === 0)
+    ctx.addIssue({ code: 'custom', message: 'Add at least one provider connection' });
+  if (config.deployments.length === 0)
+    ctx.addIssue({ code: 'custom', message: 'Add at least one model deployment' });
+  if (!config.routing && config.profiles.length === 0)
+    ctx.addIssue({ code: 'custom', message: 'Add at least one routing profile' });
+  if (!config.routing && !config.profiles.some((profile) => profile.id === config.defaultProfileId))
+    ctx.addIssue({ code: 'custom', message: 'Choose a valid default profile' });
+  for (const profile of config.profiles)
+    if (profile.allowedDeployments.length === 0)
+      ctx.addIssue({
+        code: 'custom',
+        message: `Profile ${profile.name} must approve a deployment`,
+      });
+});
 export type LlmConfiguration = z.infer<typeof llmConfigurationSchema>;
 export type LlmConnection = z.infer<typeof llmConnectionSchema>;
 export type LlmDeployment = z.infer<typeof llmDeploymentSchema>;
@@ -153,17 +207,26 @@ export const llmCredentialWriteSchema = z
   .strict();
 export const llmSessionSettingsSchema = z
   .object({
-    profileId: id,
+    profileId: id.optional(),
+    model: llmModelReferenceSchema.optional(),
+    followDefault: z.literal(true).optional(),
+    pinned: z.boolean().optional(),
     pinnedDeploymentId: id.optional(),
     maxOutputTokens: z.number().int().positive().max(1_000_000).optional(),
     reasoningEffort: effort.optional(),
     reasoningBudgetTokens: z.number().int().min(1024).max(1_000_000).optional(),
     backups: z.array(id).max(3).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      [!!value.profileId, !!value.model, !!value.followDefault].filter(Boolean).length === 1,
+    'Choose default or one model',
+  );
 export type LlmSessionSettings = z.infer<typeof llmSessionSettingsSchema>;
 export function hasLlmSessionOverrides(settings: LlmSessionSettings): boolean {
   return !!(
+    settings.pinned ||
     settings.pinnedDeploymentId ||
     settings.maxOutputTokens ||
     settings.backups ||
@@ -175,12 +238,28 @@ export const llmActivitySchema = z.object({
   id,
   at: z.iso.datetime(),
   actor: z.string(),
-  action: z.enum(['draft', 'publish', 'rollback', 'credential.replace', 'credential.revoke']),
+  action: z.enum([
+    'draft',
+    'publish',
+    'rollback',
+    'credential.replace',
+    'credential.revoke',
+    'configure',
+  ]),
   version: z.number().int().positive(),
   reason: z.string().max(500).optional(),
 });
 export type LlmActivity = z.infer<typeof llmActivitySchema>;
 export interface LlmConfigurationPort {
+  configure?(
+    identity: Identity,
+    input: {
+      expectedVersion: number;
+      operationId: string;
+      configuration: LlmConfiguration;
+      sealedKeys: { connectionId: string; sealed: string }[];
+    },
+  ): Promise<LlmConfigurationState>;
   read(tenantId: string): Promise<LlmConfigurationState>;
   impact(tenantId: string, expectedVersion: number): Promise<LlmConfigurationImpact>;
   revision(tenantId: string, revision: number): Promise<LlmConfiguration | null>;
@@ -394,3 +473,91 @@ export const llmSessionSettingsWriteSchema = z
 export const llmProbeRequestSchema = z
   .object({ operationId: id, expectedVersion: z.number().int().nonnegative(), deploymentId: id })
   .strict();
+
+export const llmProviderSettingsSchema = z
+  .object({
+    providers: z.array(llmConnectionSchema).max(64),
+    models: z.array(llmDeploymentSchema).max(256),
+    routing: llmDirectRoutingSchema,
+  })
+  .strict();
+export type LlmProviderSettings = z.infer<typeof llmProviderSettingsSchema>;
+export const llmProviderSettingsWriteSchema = z
+  .object({
+    expectedVersion: z.number().int().nonnegative(),
+    operationId: id,
+    settings: llmProviderSettingsSchema,
+    keys: z
+      .array(z.object({ providerId: id, secret: llmCredentialWriteSchema.shape.secret }).strict())
+      .max(64),
+  })
+  .strict();
+export const llmProviderSettingsResponseSchema = z.object({
+  version: z.number().int().nonnegative(),
+  settings: llmProviderSettingsSchema,
+  credentials: z.array(z.object({ providerId: id, configured: z.boolean() })).max(64),
+  migrationRequired: z.boolean(),
+});
+export type LlmProviderSettingsResponse = z.infer<typeof llmProviderSettingsResponseSchema>;
+
+/** Internal dispatch policy, computed directly from selection; never stored as a profile. */
+export function llmSelectionPolicy(
+  config: LlmConfiguration,
+  settings: LlmSessionSettings,
+): Omit<LlmProfile, 'id' | 'name'> {
+  if (settings.profileId) {
+    const old = config.profiles.find((row) => row.id === settings.profileId);
+    if (!old)
+      throw new LlmConfigurationError('MIGRATION_REQUIRED', 'Select a model for this conversation');
+    return old;
+  }
+  if (!config.routing)
+    throw new LlmConfigurationError(
+      'MIGRATION_REQUIRED',
+      'Select a model after provider migration',
+    );
+  const ref = settings.model ?? config.routing.defaultModel;
+  const primary = config.deployments.find(
+    (row) => row.connectionId === ref?.providerId && row.modelId === ref?.modelId,
+  );
+  if (!primary) throw new LlmConfigurationError('UNAVAILABLE', 'Select an available default model');
+  const backups = config.routing.fallbackModels
+    .map(
+      (ref) =>
+        config.deployments.find(
+          (row) => row.connectionId === ref.providerId && row.modelId === ref.modelId,
+        )?.id,
+    )
+    .filter((value): value is string => !!value && value !== primary.id);
+  return {
+    primary: primary.id,
+    backups,
+    mode: config.routing.automaticFallback && !settings.pinned ? 'automatic' : 'manual',
+    allowedDeployments: config.deployments
+      .filter(
+        (row) =>
+          row.enabled &&
+          config.connections.some(
+            (provider) => provider.id === row.connectionId && provider.enabled,
+          ),
+      )
+      .map((row) => row.id),
+    maxOutputTokens: primary.outputTokens,
+    reasoningEfforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+    maxReasoningTokens: Math.max(1024, primary.outputTokens - 1),
+  };
+}
+export const llmModelsResponseSchema = z.object({
+  available: z.boolean(),
+  canTune: z.boolean(),
+  defaultModel: llmModelReferenceSchema.nullable(),
+  models: z
+    .array(
+      llmDeploymentSchema.extend({
+        providerName: name,
+        adapter: z.enum(['openai', 'anthropic']).optional(),
+      }),
+    )
+    .max(256),
+});
+export type LlmModelsResponse = z.infer<typeof llmModelsResponseSchema>;

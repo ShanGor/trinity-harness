@@ -753,3 +753,34 @@ local PostgreSQL arbitration; lint, typecheck and production Web build passed.
 An isolated composer preview verified desktop/mobile layout, supplement/queue
 selection and separate Stop through agent-browser; it was removed afterward.
 This does not establish deployed end-to-end or real-provider acceptance.
+
+### Provider setup UX revision
+
+Primary setup now asks for Provider, API key and Model, with China Kimi Code prefilled. Save and use creates and publishes the connection/deployment/default profile through existing CAS APIs; advanced routing/access remains collapsed. Six focused UI tests passed, with lint and workspace typechecks. No live key or provider request was used.
+
+### OpenCode configuration review — revised target
+
+Reviewed local OpenCode provider/configuration/credential sources and direct model-selection tests. Requirements §14.2, design §5.4 and the implementation plan now specify Providers + Models + Default model + optional fallback settings. Profiles and the quick-setup wrapper are superseded. This is a documentation revision; the checkout's runtime/API/session migration remains pending. Earlier verification counts apply to the old implementation, not the revised target.
+
+### Inline connection credentials
+
+Connection editors now accept the API key directly alongside connection metadata and submit it through Save changes. Removed separate Add/Update/Revoke key buttons and the key modal. Blank key retains an existing secret; entered keys remain ephemeral, clear after acknowledgement and survive rejected writes for correction. Completed server steps retain their acknowledged version if a subsequent write fails. Six focused UI tests, Web typecheck and repository lint passed. This UI change does not complete the pending profile-to-direct-model runtime migration.
+
+### Direct provider/model configuration delivered
+
+- [x] Replaced the normal profile/deployment/publication editor with connection cards containing inline credentials, multiple models per connection, a default model and optional ordered fallback settings. Removed the profile-generating quick-setup wrapper. China Kimi Code has its own preset. Model selection is searchable, grouped by provider and available beside the composer and in session settings.
+- [x] Added shared DTOs and typed provider/model APIs. One server-owned `configure` transaction saves metadata, encrypted key versions, immutable active configuration and audit under current-Admin, tenant CAS and idempotency locks. Connections need no model/default to save; blank keys preserve existing secrets, rejected writes retain entered values, acknowledged keys clear. No paid test runs on Save.
+- [x] Direct default/explicit model selection drives request preparation, compaction, child routing and per-attempt receipts/accounting through the existing durable recovery logic. Expert pins/limits remain role-gated. Historical profile events/revisions remain readable; after Admin conversion, old profile-bound sessions require explicit model/default selection. Legacy routing cannot be republished over activated direct settings. No SQL schema change or automatic rewrite of session events is needed.
+- [x] Verification: full suite passed 1,853 tests in 189 files, with 32 opt-in tests skipped in 10 files. A transient real-LSP diagnostic timing failure passed on separate and full reruns. Final focused API/UI checks cover inline key failures/retries, blank-key retention and direct selection; PostgreSQL tests prove atomic rollback/idempotency and source fencing. Lint, workspace typechecks, formatting and production Web build passed; build reports a large-chunk warning. Agent-browser exercised a fake-key save and 390px layout (body/viewport both 390; acknowledged key cleared).
+- [ ] Deploy matching readers/writers and perform real-provider/multi-worker production acceptance. No live key, application configuration, service deployment or Git state was changed by this implementation.
+
+### Connection CRUD and endpoint diagnostics
+
+- Replaced inline connection editing with a saved connection list and explicit Add/Edit/Delete actions. Separate Add/Edit form contains inline key, endpoint and model fields, Save connection and Cancel. Default/fallback settings stay outside with Save model settings. Delete confirms and clears model/default/fallback references; Cancel persists nothing and removes entered keys.
+- Corrected the default provider policy to include MiniMax China (`api.minimax.cn`), already supported by environment configuration, alongside China Kimi Code. Added a matching MiniMax preset. Explicit policies still replace defaults; unknown origins/private-address restrictions remain enforced. Save errors identify the bounded connection name and safe origin without echoing full endpoints, query values or keys.
+- Validation: 367 tests in 38 relevant frontend/core/API files passed, plus workspace typechecks, repository lint and production Web build (large-chunk warning). CRUD/key failure/cancel/delete and default-policy tests are included. Agent-browser checked separate connection rows, focused editing/saving and mobile list/modal layouts with fake keys; the mobile drawer is explicitly viewport-bounded. Final Cancel behavior was checked separately after simplifying it to discard directly.
+- No application deployment, live provider request, database write or Git state change was performed. Read-only deployment inspection confirmed the running Kimi origin is allowed; the exact rejected pending connection URL was not provided, so the observed error cannot be attributed conclusively to MiniMax.
+
+### Composer model controls (2026-11-17)
+
+Model/reasoning controls now open from a compact button at the composer's bottom right across Main, new Chat/Work and historical conversations. Explicit Apply confirms changes; dismissing discards edits. New-chat selections are saved before the first prompt. Supported reasoning effort/budget controls retain catalog capability and role checks. Duplicate model fields were removed from Session settings. Deterministic component/first-prompt coverage and desktop/mobile fixture inspection accompany the change; deployment remains pending.

@@ -2,6 +2,9 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import {
   llmSessionSettingsWriteSchema,
+  llmSelectionPolicy,
+  llmConfigurationSchema,
+  llmProviderSettingsWriteSchema,
   llmProbeRequestSchema,
   hasLlmSessionOverrides,
   hasCapability,
@@ -45,6 +48,25 @@ export function registerLlmConfigurationApi(app: FastifyInstance, deps: LlmApiDe
     if (!deps.configuration || !deps.credentials || !deps.endpointPolicy)
       throw new LlmConfigurationError('UNAVAILABLE', 'Provider management unavailable');
     return identity;
+  };
+  const validateProvider = (connection: { name: string; endpoint: string }): void => {
+    try {
+      deps.endpointPolicy!.validateConfiguration(connection.endpoint);
+    } catch (cause) {
+      if (!(cause instanceof LlmConfigurationError)) throw cause;
+      // Only include a bounded origin for otherwise safe URLs; never echo paths,
+      // query strings or embedded credentials in a configuration error.
+      let origin = '';
+      if (URL.canParse(connection.endpoint)) {
+        const url = new URL(connection.endpoint);
+        if (url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash)
+          origin = ` (${url.origin.slice(0, 200)})`;
+      }
+      throw new LlmConfigurationError(
+        cause.code,
+        `Connection "${connection.name.slice(0, 100)}"${origin}: ${cause.message.slice(0, 240)}`,
+      );
+    }
   };
   const handle = async (reply: FastifyReply, action: () => Promise<unknown>): Promise<unknown> => {
     reply.header('cache-control', 'private, no-store');
@@ -103,8 +125,7 @@ export function registerLlmConfigurationApi(app: FastifyInstance, deps: LlmApiDe
     handle(reply, async () => {
       const identity = admin(req.identity);
       const input = llmConfigurationSaveSchema.parse(req.body);
-      for (const connection of input.configuration.connections)
-        deps.endpointPolicy!.validateConfiguration(connection.endpoint);
+      for (const connection of input.configuration.connections) validateProvider(connection);
       return deps.configuration!.save(identity, input);
     }),
   );
@@ -123,8 +144,7 @@ export function registerLlmConfigurationApi(app: FastifyInstance, deps: LlmApiDe
           : state.draft;
         if (!target)
           throw new LlmConfigurationError('INVALID', 'Configuration revision unavailable');
-        for (const connection of target.connections)
-          deps.endpointPolicy!.validateConfiguration(connection.endpoint);
+        for (const connection of target.connections) validateProvider(connection);
         return deps.configuration!.publish(identity, input);
       }),
     );
@@ -173,7 +193,7 @@ export function registerLlmConfigurationApi(app: FastifyInstance, deps: LlmApiDe
           'INVALID',
           'Enabled draft deployment and current key required',
         );
-      deps.endpointPolicy!.validateConfiguration(connection.endpoint);
+      validateProvider(connection);
       const cooldown = await deps.operations.cooldown(
         identity.tenantId,
         connection.id,
@@ -235,7 +255,9 @@ export function registerLlmConfigurationApi(app: FastifyInstance, deps: LlmApiDe
           {
             receipt: {
               revision: state.version,
-              profileId: state.draft!.defaultProfileId,
+              ...(state.draft!.routing
+                ? { selection: 'model' as const }
+                : { profileId: state.draft!.defaultProfileId }),
               connectionId: id,
               deploymentId: deployment.id,
               credentialVersionId: key.versionId,
@@ -317,12 +339,103 @@ export function registerLlmConfigurationApi(app: FastifyInstance, deps: LlmApiDe
       return { activity: await deps.configuration!.activity(identity.tenantId) };
     }),
   );
+  const providerView = async (tenantId: string): Promise<unknown> => {
+    const state = await deps.configuration!.read(tenantId);
+    const config = state.draft ?? state.published;
+    return {
+      version: state.version,
+      settings: {
+        providers: config?.connections ?? [],
+        models: config?.deployments ?? [],
+        routing: config?.routing ?? {
+          defaultModel: null,
+          automaticFallback: false,
+          fallbackModels: [],
+        },
+      },
+      credentials: state.credentials.map((row) => ({
+        providerId: row.connectionId,
+        configured: !row.revoked,
+      })),
+      migrationRequired: !!config?.profiles.length,
+    };
+  };
+  app.get('/api/admin/llm/providers', (req, reply) =>
+    handle(reply, async () => {
+      const identity = admin(req.identity);
+      return providerView(identity.tenantId);
+    }),
+  );
+  app.put('/api/admin/llm/providers', { bodyLimit: 1_700_000 }, (req, reply) =>
+    handle(reply, async () => {
+      const identity = admin(req.identity);
+      if (!deps.configuration!.configure)
+        throw new LlmConfigurationError('UNAVAILABLE', 'Update the provider configuration service');
+      const input = llmProviderSettingsWriteSchema.parse(req.body);
+      const configuration = llmConfigurationSchema.parse({
+        connections: input.settings.providers,
+        deployments: input.settings.models,
+        profiles: [],
+        defaultProfileId: '',
+        routing: input.settings.routing,
+      });
+      for (const provider of configuration.connections) validateProvider(provider);
+      if (new Set(input.keys.map((row) => row.providerId)).size !== input.keys.length)
+        throw new LlmConfigurationError('INVALID', 'Duplicate provider keys');
+      const sealedKeys = [];
+      for (const key of input.keys)
+        sealedKeys.push({
+          connectionId: key.providerId,
+          sealed: await deps.credentials!.seal(
+            identity.tenantId,
+            key.providerId,
+            input.operationId,
+            key.secret,
+          ),
+        });
+      await deps.configuration!.configure(identity, {
+        expectedVersion: input.expectedVersion,
+        operationId: input.operationId,
+        configuration,
+        sealedKeys,
+      });
+      return providerView(identity.tenantId);
+    }),
+  );
+  app.get('/api/llm/models', (req, reply) =>
+    handle(reply, async () => {
+      if (!req.identity || !deps.configuration)
+        return { available: false, models: [], defaultModel: null, canTune: false };
+      const state = await deps.configuration.read(req.identity.tenantId);
+      const config = state.published;
+      return {
+        available: state.source === 'database',
+        defaultModel: config?.routing?.defaultModel ?? null,
+        canTune: hasCapability(req.identity.role, 'llm.session.tune'),
+        models: (config?.deployments ?? [])
+          .filter(
+            (row) =>
+              row.enabled &&
+              config?.connections.some(
+                (provider) => provider.id === row.connectionId && provider.enabled,
+              ),
+          )
+          .map((row) => ({
+            ...row,
+            providerName: config!.connections.find((provider) => provider.id === row.connectionId)!
+              .name,
+            adapter: config!.connections.find((provider) => provider.id === row.connectionId)!
+              .adapter,
+          })),
+      };
+    }),
+  );
   app.get('/api/llm/profiles', (req, reply) =>
     handle(reply, async () => {
       if (!req.identity || !deps.configuration) return { available: false, profiles: [] };
       const state = await deps.configuration.read(req.identity.tenantId);
       const config = state.published;
-      if (!config) return { available: false, profiles: [] };
+      if (!config || config.routing) return { available: false, profiles: [] };
       return {
         available: true,
         defaultProfileId: config.defaultProfileId,
@@ -376,9 +489,45 @@ export function registerLlmConfigurationApi(app: FastifyInstance, deps: LlmApiDe
         throw new LlmConfigurationError('UNAVAILABLE', 'Provider configuration unavailable');
       const input = llmSessionSettingsWriteSchema.parse(req.body);
       const state = await deps.configuration.read(identity.tenantId);
-      const profile = state.published?.profiles.find((row) => row.id === input.settings.profileId);
-      if (!profile) throw new LlmConfigurationError('INVALID', 'Select a published profile');
+      const profile = state.published && llmSelectionPolicy(state.published, input.settings);
+      if (!profile) throw new LlmConfigurationError('INVALID', 'Select an enabled model');
       const settings = input.settings;
+      if (settings.profileId && state.published?.routing)
+        throw new LlmConfigurationError(
+          'MIGRATION_REQUIRED',
+          'Select a model to replace this retired profile',
+        );
+      if (!settings.profileId && (settings.pinnedDeploymentId || settings.backups))
+        throw new LlmConfigurationError(
+          'INVALID',
+          'Legacy overrides cannot be used with model selection',
+        );
+      if (!settings.profileId && state.published) {
+        const selected = state.published.deployments.find((row) => row.id === profile.primary);
+        if (
+          !selected?.enabled ||
+          !state.published.connections.some(
+            (provider) => provider.id === selected.connectionId && provider.enabled,
+          )
+        )
+          throw new LlmConfigurationError('INVALID', 'Selected model is unavailable');
+        const provider = state.published.connections.find(
+          (row) => row.id === selected.connectionId,
+        )!;
+        if (
+          (settings.reasoningEffort &&
+            (!selected.capabilities.reasoning || provider.adapter !== 'openai')) ||
+          (settings.reasoningBudgetTokens &&
+            (!selected.capabilities.reasoning ||
+              provider.adapter !== 'anthropic' ||
+              settings.reasoningBudgetTokens >=
+                (settings.maxOutputTokens ?? selected.outputTokens)))
+        )
+          throw new LlmConfigurationError(
+            'INVALID',
+            'Reasoning settings are incompatible with this model',
+          );
+      }
       if (hasLlmSessionOverrides(settings) && !hasCapability(identity.role, 'llm.session.tune'))
         throw new LlmConfigurationError('FORBIDDEN', 'Expert role required for advanced settings');
       if (

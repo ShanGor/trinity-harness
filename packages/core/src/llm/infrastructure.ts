@@ -9,7 +9,7 @@ export const llmInfrastructureEnvShape = {
     .string()
     .max(16384)
     .default(
-      '[{"origin":"https://api.openai.com"},{"origin":"https://api.anthropic.com"},{"origin":"https://api.kimi.com"}]',
+      '[{"origin":"https://api.openai.com"},{"origin":"https://api.anthropic.com"},{"origin":"https://api.kimi.com"},{"origin":"https://api.minimax.cn"}]',
     )
     .transform((value) =>
       z

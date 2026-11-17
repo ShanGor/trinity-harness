@@ -6,6 +6,7 @@ import {
   llmSealedCredentialSchema,
   hasCapability,
   llmConfigurationSchema,
+  llmPublishedConfigurationSchema,
   llmActivitySchema,
   LlmConfigurationError,
   llmConfigurationSaveSchema,
@@ -227,7 +228,12 @@ export class PgLlmConfigurationStore implements LlmConfigurationPort {
       parsed.operationId,
       'draft',
       parsed.configuration,
-      async (tx) => {
+      async (tx, state) => {
+        if (state.published?.routing && !parsed.configuration.routing)
+          throw new LlmConfigurationError(
+            'MIGRATION_REQUIRED',
+            'Use provider and model settings after migration',
+          );
         await tx
           .update(configs)
           .set({ draft: parsed.configuration })
@@ -262,6 +268,14 @@ export class PgLlmConfigurationStore implements LlmConfigurationPort {
           draft = llmConfigurationSchema.parse(old.configuration);
         }
         if (!draft) throw new LlmConfigurationError('INVALID', 'Save a draft first');
+        if (state.published?.routing && !draft.routing)
+          throw new LlmConfigurationError(
+            'MIGRATION_REQUIRED',
+            'Legacy profile routing cannot be restored after migration',
+          );
+        // Drafts can be incomplete while an Admin enters a provider key/model/profile.
+        // Activate only a complete, routable configuration.
+        draft = llmPublishedConfigurationSchema.parse(draft);
         if (parsed.restoreRevision && state.published) {
           for (const connection of draft.connections.filter((row) => row.enabled))
             if (!state.published.connections.some((row) => row.id === connection.id && row.enabled))
@@ -291,6 +305,69 @@ export class PgLlmConfigurationStore implements LlmConfigurationPort {
           .where(eq(configs.tenantId, identity.tenantId));
       },
       parsed.reason,
+    );
+  }
+  async configure(
+    identity: Identity,
+    input: NonNullable<Parameters<NonNullable<LlmConfigurationPort['configure']>>[1]>,
+  ): Promise<LlmConfigurationState> {
+    const configuration = llmConfigurationSchema.parse(input.configuration);
+    if (!configuration.routing || configuration.profiles.length)
+      throw new LlmConfigurationError('INVALID', 'Direct model configuration required');
+    const keys = input.sealedKeys.map((row) => ({
+      ...row,
+      digest: llmSealedCredentialSchema.parse(JSON.parse(row.sealed)).digest,
+    }));
+    return this.change(
+      identity,
+      input.expectedVersion,
+      input.operationId,
+      'configure',
+      { configuration, keys: keys.map(({ connectionId, digest }) => ({ connectionId, digest })) },
+      async (tx, state, version) => {
+        for (const row of keys) {
+          if (!configuration.connections.some((provider) => provider.id === row.connectionId))
+            throw new LlmConfigurationError('INVALID', 'Unknown provider for key');
+          await tx
+            .update(credentials)
+            .set({ current: false })
+            .where(
+              and(
+                eq(credentials.tenantId, identity.tenantId),
+                eq(credentials.connectionId, row.connectionId),
+              ),
+            );
+          await tx.insert(credentials).values({
+            tenantId: identity.tenantId,
+            connectionId: row.connectionId,
+            versionId: input.operationId,
+            sealed: row.sealed,
+          });
+        }
+        for (const provider of configuration.connections.filter((row) => row.enabled))
+          if (
+            !keys.some((row) => row.connectionId === provider.id) &&
+            !state.credentials.some((row) => row.connectionId === provider.id && !row.revoked)
+          )
+            throw new LlmConfigurationError(
+              'INVALID',
+              'Enter an API key for each new enabled connection',
+            );
+        // Connecting alone does not switch an existing environment deployment.
+        // Once managed, even a cleared default stays managed and fails closed at dispatch.
+        const active = !!configuration.routing!.defaultModel || state.source === 'database';
+        if (active)
+          await tx
+            .insert(revisions)
+            .values({ tenantId: identity.tenantId, revision: version, configuration });
+        await tx
+          .update(configs)
+          .set({
+            draft: configuration,
+            ...(active ? { activeRevision: version, source: 'database' } : {}),
+          })
+          .where(eq(configs.tenantId, identity.tenantId));
+      },
     );
   }
   async replaceCredential(

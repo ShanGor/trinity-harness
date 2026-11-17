@@ -1,4 +1,12 @@
 import {
+  llmProviderSettingsWriteSchema,
+  llmProviderSettingsResponseSchema,
+  llmModelsResponseSchema,
+  type LlmProviderSettings,
+  type LlmProviderSettingsResponse,
+  type LlmModelsResponse,
+} from '@trinity-harness/shared';
+import {
   llmActivityListSchema,
   llmProbeListSchema,
   llmHealthListSchema,
@@ -365,6 +373,30 @@ export class AcpClient {
       `/api/admin/users/${encodeURIComponent(userId)}/role`,
       'PATCH',
       userRoleUpdateSchema.parse({ role }),
+    );
+  }
+  async getLlmProviders(signal?: AbortSignal): Promise<LlmProviderSettingsResponse> {
+    return llmProviderSettingsResponseSchema.parse(
+      await this.assistantRequest('/api/admin/llm/providers', 'GET', undefined, signal),
+    );
+  }
+  async saveLlmProviders(
+    expectedVersion: number,
+    settings: LlmProviderSettings,
+    keys: { providerId: string; secret: string }[],
+    operationId = newId(),
+  ): Promise<LlmProviderSettingsResponse> {
+    return llmProviderSettingsResponseSchema.parse(
+      await this.assistantRequest(
+        '/api/admin/llm/providers',
+        'PUT',
+        llmProviderSettingsWriteSchema.parse({ expectedVersion, operationId, settings, keys }),
+      ),
+    );
+  }
+  async getLlmModels(signal?: AbortSignal): Promise<LlmModelsResponse> {
+    return llmModelsResponseSchema.parse(
+      await this.assistantRequest('/api/llm/models', 'GET', undefined, signal),
     );
   }
   async getLlmConfiguration(signal?: AbortSignal): Promise<LlmConfigurationState> {

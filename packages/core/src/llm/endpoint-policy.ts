@@ -68,10 +68,8 @@ export class ProviderEndpointPolicy implements LlmEndpointPolicyPort {
     } catch {
       return denied();
     }
-    const rule = this.rules.get(url.origin);
     if (
       endpoint.length > 2048 ||
-      !rule ||
       url.protocol !== 'https:' ||
       url.username ||
       url.password ||
@@ -79,6 +77,12 @@ export class ProviderEndpointPolicy implements LlmEndpointPolicyPort {
       url.hash
     )
       return denied();
+    const rule = this.rules.get(url.origin);
+    if (!rule)
+      throw new LlmConfigurationError(
+        'INVALID',
+        'Provider origin is not allowed. Add its HTTPS origin to LLM_PROVIDER_DESTINATIONS on the server and worker.',
+      );
     const hostname = url.hostname.replace(/^\[|\]$/g, '');
     if (isIP(hostname) && !rule.allowPrivate && !isPublicProviderAddress(hostname)) return denied();
     return { url, rule };
