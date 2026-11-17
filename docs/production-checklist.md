@@ -255,3 +255,5 @@ Two-repeat synthetic real-model export acceptance passed twice (four trials); th
 See the [Steering specification](in-flight-steering-gap-analysis.md#9-implementation-specification-and-delivered-scope) for source scope and limitations.
 
 - [ ] Deploy the composer model/reasoning picker refinement (2026-11-17) and verify new Chat/Work, Main and reopened conversations with authenticated Member/Expert/Admin accounts. Confirm first-prompt selection, explicit Apply, supported reasoning controls and mobile fit. Local UI fixtures do not establish live-provider acceptance.
+
+- [ ] Verify the simplified model picker has no numeric budgets, output limits or advanced controls; named effort choices appear only on supported integrations. Confirm Apply clears legacy hidden tuning.

@@ -784,3 +784,7 @@ Connection editors now accept the API key directly alongside connection metadata
 ### Composer model controls (2026-11-17)
 
 Model/reasoning controls now open from a compact button at the composer's bottom right across Main, new Chat/Work and historical conversations. Explicit Apply confirms changes; dismissing discards edits. New-chat selections are saved before the first prompt. Supported reasoning effort/budget controls retain catalog capability and role checks. Duplicate model fields were removed from Session settings. Deterministic component/first-prompt coverage and desktop/mobile fixture inspection accompany the change; deployment remains pending.
+
+### Simplified composer reasoning (2026-11-17)
+
+The chat model picker now contains only model selection and named reasoning effort where supported by the integration and account role, plus Apply. Numeric reasoning budgets, maximum output tokens, pinning and advanced/reset controls have been removed from this user flow. Models without effort selection keep configured reasoning defaults; no synthetic effort-to-token mapping is introduced. Apply clears legacy hidden numeric/pin overrides. Deterministic tests cover both OpenAI-compatible and Anthropic composer surfaces and legacy override cleanup. Deployment remains pending.

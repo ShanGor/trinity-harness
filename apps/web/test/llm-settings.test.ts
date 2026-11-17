@@ -310,6 +310,49 @@ describe('direct provider and model settings', () => {
     expect(client.getLlmSessionSettings).not.toHaveBeenCalled();
     expect(client.setLlmSessionSettings).not.toHaveBeenCalled();
   });
+  it.each(['openai', 'anthropic'] as const)(
+    'keeps the %s composer free of numeric tuning and clears legacy overrides on Apply',
+    async (adapter) => {
+      vi.mocked(client.getLlmModels).mockResolvedValue({
+        available: true,
+        canTune: true,
+        defaultModel: { providerId, modelId: model.modelId },
+        models: [{ ...model, providerName: provider.name, adapter }],
+      });
+      vi.mocked(client.getLlmSessionSettings).mockResolvedValue({
+        expectedLastSeq: 5,
+        settings: {
+          followDefault: true,
+          reasoningBudgetTokens: 4096,
+          maxOutputTokens: 8192,
+          pinned: true,
+        },
+      });
+      await act(async () =>
+        root.render(
+          createElement(LlmSessionSettings, {
+            client,
+            sessionId: 'session',
+            readOnly: false,
+            compact: true,
+          }),
+        ),
+      );
+      await click(document.querySelector('[aria-label="Model and reasoning settings"]'));
+      expect(document.querySelector('[role="spinbutton"]')).toBeNull();
+      expect(document.querySelector('[role="switch"]')).toBeNull();
+      expect(document.body.textContent).not.toMatch(
+        /budget|tokens|Advanced settings|Reset advanced|fallback/i,
+      );
+      expect(!!document.querySelector('[aria-label="Session reasoning effort"]')).toBe(
+        adapter === 'openai',
+      );
+      await click(button('Apply'));
+      expect(client.setLlmSessionSettings).toHaveBeenCalledWith('session', 5, {
+        followDefault: true,
+      });
+    },
+  );
   it('keeps Viewer controls read-only', async () => {
     await act(async () =>
       root.render(

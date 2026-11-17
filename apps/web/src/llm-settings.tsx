@@ -931,83 +931,27 @@ export function LlmSessionSettings({
           );
         }}
       />
-      {catalog?.canTune && (
-        <>
-          {selected?.capabilities.reasoning && selected.adapter === 'openai' && (
-            <Form.Item label="Reasoning effort">
-              <Select
-                aria-label="Session reasoning effort"
-                allowClear
-                placeholder="Model default"
-                disabled={readOnly || busy}
-                value={settings.reasoningEffort}
-                options={['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].map((value) => ({
-                  value,
-                  label: value,
-                }))}
-                onChange={(value) => {
-                  const next = { ...settings };
-                  if (value) next.reasoningEffort = value;
-                  else delete next.reasoningEffort;
-                  setSettings(next);
-                }}
-              />
-            </Form.Item>
-          )}
-          {selected?.capabilities.reasoning && selected.adapter === 'anthropic' && (
-            <Form.Item label="Reasoning budget tokens">
-              <InputNumber
-                aria-label="Session reasoning budget tokens"
-                min={1024}
-                max={(selected.outputTokens ?? 8192) - 1}
-                value={settings.reasoningBudgetTokens}
-                disabled={readOnly || busy}
-                onChange={(value) => {
-                  const next = { ...settings };
-                  if (value) next.reasoningBudgetTokens = value;
-                  else delete next.reasoningBudgetTokens;
-                  setSettings(next);
-                }}
-              />
-            </Form.Item>
-          )}
-        </>
-      )}
-      {catalog?.canTune && (
-        <Collapse
-          items={[
-            {
-              key: 'advanced',
-              label: 'Advanced settings',
-              children: (
-                <>
-                  <Form.Item label="Pin model (disable fallback)">
-                    <Switch
-                      checked={settings.pinned ?? false}
-                      disabled={readOnly || busy}
-                      onChange={(pinned) => setSettings({ ...settings, pinned })}
-                    />
-                  </Form.Item>
-                  <Form.Item label="Maximum output tokens">
-                    <InputNumber
-                      aria-label="Maximum session output tokens"
-                      disabled={readOnly || busy}
-                      min={1}
-                      max={selected?.outputTokens}
-                      value={settings.maxOutputTokens}
-                      onChange={(value) => {
-                        const next = { ...settings };
-                        if (value) next.maxOutputTokens = value;
-                        else delete next.maxOutputTokens;
-                        setSettings(next);
-                      }}
-                    />
-                  </Form.Item>
-                </>
-              ),
-            },
-          ]}
-        />
+      {catalog?.canTune && selected?.capabilities.reasoning && selected.adapter === 'openai' && (
+        <Form.Item label="Reasoning effort">
+          <Select
+            aria-label="Session reasoning effort"
+            allowClear
+            placeholder="Model default"
+            style={{ width: '100%' }}
+            disabled={readOnly || busy}
+            value={settings.reasoningEffort}
+            options={['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].map((value) => ({
+              value,
+              label: value,
+            }))}
+            onChange={(value) => {
+              const next = { ...settings };
+              if (value) next.reasoningEffort = value;
+              else delete next.reasoningEffort;
+              setSettings(next);
+            }}
+          />
+        </Form.Item>
       )}
       {!readOnly && (
         <Space>
@@ -1016,15 +960,27 @@ export function LlmSessionSettings({
             disabled={!current || !!settings.profileId || busy || !catalog?.available}
             onClick={() => {
               if (!current) return;
+              // The composer owns model/effort only. Applying also clears legacy
+              // tuning that no longer has a control in this picker.
+              const selection: LlmSessionSettings = settings.model
+                ? { model: settings.model }
+                : { followDefault: true };
+              if (
+                catalog?.canTune &&
+                selected?.capabilities.reasoning &&
+                selected.adapter === 'openai' &&
+                settings.reasoningEffort
+              )
+                selection.reasoningEffort = settings.reasoningEffort;
               if (!sessionId) {
-                onDraftChange?.(settings);
+                onDraftChange?.(selection);
                 setOpen(false);
                 return;
               }
               setBusy(true);
               setError('');
               void client
-                .setLlmSessionSettings(sessionId, current.expectedLastSeq, settings)
+                .setLlmSessionSettings(sessionId, current.expectedLastSeq, selection)
                 .then(() => client.getLlmSessionSettings(sessionId))
                 .then((saved) => {
                   onApplied?.();
@@ -1038,20 +994,9 @@ export function LlmSessionSettings({
           >
             {compact ? 'Apply' : 'Save model'}
           </Button>
-          <Button
-            disabled={busy}
-            onClick={() =>
-              setSettings(settings.model ? { model: settings.model } : { followDefault: true })
-            }
-          >
-            Reset advanced settings
-          </Button>
         </Space>
       )}
-      <Typography.Text type="secondary">
-        Default follows the administrator's latest default. An explicit model stays selected.
-        Changes apply at the next request.
-      </Typography.Text>
+      <Typography.Text type="secondary">Applies to your next message.</Typography.Text>
     </Space>
   );
   if (!compact) return form;
