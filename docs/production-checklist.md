@@ -257,3 +257,12 @@ See the [Steering specification](in-flight-steering-gap-analysis.md#9-implementa
 - [ ] Deploy the composer model/reasoning picker refinement (2026-11-17) and verify new Chat/Work, Main and reopened conversations with authenticated Member/Expert/Admin accounts. Confirm first-prompt selection, explicit Apply, supported reasoning controls and mobile fit. Local UI fixtures do not establish live-provider acceptance.
 
 - [ ] Verify the simplified model picker has no numeric budgets, output limits or advanced controls; named effort choices appear only on supported integrations. Confirm Apply clears legacy hidden tuning.
+
+- [x] Deploy the 2026-11-18 unbound-conversation routing repair locally with matching server/worker/client. All six Podman services run, API/control-worker health checks pass, and deployed server/worker hashes match. Deterministic tests verify historical usage/default binding, explicit/legacy selections and Apply after chat sequence changes.
+- [ ] Confirm an authenticated existing conversation completes a real MiniMax response after the routing repair; local deployment health and fake-provider tests do not establish provider acceptance.
+
+- [x] Diagnose the latest MiniMax HTTP 400 turns, correct invalid prefixed upstream IDs through audited configuration, and pass a real quota-metered constrained-SDK synthetic test (2026-11-18).
+- [x] Deploy the MiniMax model-ID write validation/editor hint and safe actionable HTTP 400 message; all six services run and API/control-worker health checks pass (2026-11-18). Tests preserve custom gateway namespaced IDs and historical configuration/event reads.
+
+- [x] Deploy the K3 object-union schema/known model metadata repair (2026-11-18). All six services and API/control-worker health checks pass; deployed server/worker exporter hashes match. Both models passed full 17-tool quota-metered tests during diagnosis; deployed registry output verifies explicit object roots. No-tools tests alone do not establish ordinary chat readiness.
+- [ ] Confirm normal post-deployment Chat turn completion for K3 and MiniMax Flash. Immediate repeat probes were blocked before dispatch by the existing ten-probes-per-hour limit; no new user turn had arrived at the final check.

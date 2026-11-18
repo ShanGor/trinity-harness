@@ -74,6 +74,36 @@ const presets = {
     reasoning: false,
   },
 };
+/** Curated defaults apply only to exact model IDs on the known provider endpoints. */
+export function knownModelDefaults(
+  provider: LlmProviderSettings['providers'][number],
+  modelId: string,
+):
+  | Pick<
+      LlmProviderSettings['models'][number],
+      'contextTokens' | 'outputTokens' | 'capabilities' | 'settings'
+    >
+  | undefined {
+  if (!URL.canParse(provider.endpoint)) return undefined;
+  const url = new URL(provider.endpoint);
+  const miniMax =
+    provider.adapter === 'anthropic' &&
+    ['api.minimax.cn', 'api.minimax.io', 'api.minimaxi.com'].includes(url.hostname) &&
+    ['MiniMax-M3', 'MiniMax-M3.1-Flash'].includes(modelId);
+  const kimi =
+    provider.adapter === 'openai' &&
+    ['api.kimi.com', 'api.kimi.ai'].includes(url.hostname) &&
+    url.pathname.replace(/\/$/, '') === '/coding/v1' &&
+    ['k3', 'k3-256k'].includes(modelId);
+  if (!miniMax && !kimi) return undefined;
+  return {
+    contextTokens: miniMax ? 1000000 : modelId === 'k3' ? 1048576 : 262144,
+    outputTokens: 8192,
+    capabilities: { tools: true, reasoning: true, images: false, files: false },
+    settings: miniMax ? { thinkingType: 'adaptive' } : { reasoningEffort: 'high' },
+  };
+}
+
 const refKey = (ref: { providerId: string; modelId: string }): string =>
   JSON.stringify([ref.providerId, ref.modelId]);
 
@@ -511,7 +541,10 @@ export function LlmAdministration({
                       .filter((model) => model.connectionId === provider.id)
                       .map((model) => (
                         <div key={model.id}>
-                          <Form.Item label="Model ID">
+                          <Form.Item
+                            label="Model ID"
+                            extra="Use the upstream model name, for example MiniMax-M3 or k3-256k."
+                          >
                             <Input
                               aria-label={`Model for ${provider.name}`}
                               value={model.modelId}
@@ -522,6 +555,9 @@ export function LlmAdministration({
                                   const previous = selected.modelId;
                                   selected.modelId = event.target.value;
                                   selected.name = event.target.value;
+                                  const defaults = knownModelDefaults(provider, event.target.value);
+                                  if (defaults && previous !== event.target.value)
+                                    Object.assign(selected, defaults);
                                   if (
                                     value.routing.defaultModel?.providerId === provider.id &&
                                     value.routing.defaultModel.modelId === previous
@@ -980,8 +1016,22 @@ export function LlmSessionSettings({
               setBusy(true);
               setError('');
               void client
-                .setLlmSessionSettings(sessionId, current.expectedLastSeq, selection)
-                .then(() => client.getLlmSessionSettings(sessionId))
+                .getLlmSessionSettings(sessionId)
+                .then(async (latest) => {
+                  // Ordinary chat events advance the sequence without changing
+                  // model settings. Refresh it, but never overwrite a new selection.
+                  if (
+                    JSON.stringify(latest.settings ?? { followDefault: true }) !==
+                    JSON.stringify(current.settings ?? { followDefault: true })
+                  ) {
+                    setCurrent(latest);
+                    throw new Error(
+                      'Model selection changed elsewhere. Close and reopen the picker to review it.',
+                    );
+                  }
+                  await client.setLlmSessionSettings(sessionId, latest.expectedLastSeq, selection);
+                  return client.getLlmSessionSettings(sessionId);
+                })
                 .then((saved) => {
                   onApplied?.();
                   setCurrent(saved);

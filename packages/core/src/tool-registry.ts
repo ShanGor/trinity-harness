@@ -45,11 +45,23 @@ export class CoreToolRegistry implements ToolRegistry {
   }
 
   schemas(): ToolSchema[] {
-    return [...this.tools.values()].map((def) => ({
-      name: def.name,
-      description: def.description,
-      parameters: z.toJSONSchema(def.parameters, { io: 'input' }) as Record<string, unknown>,
-    }));
+    return [...this.tools.values()].map((def) => {
+      const parameters = z.toJSONSchema(def.parameters, { io: 'input' });
+      const branches = parameters.oneOf ?? parameters.anyOf;
+      // Object unions already require object inputs. Some compatible providers
+      // additionally require that type at the root; retain every branch constraint.
+      if (
+        parameters.type === undefined &&
+        branches?.length &&
+        branches.every((branch) => branch.type === 'object')
+      )
+        parameters.type = 'object';
+      return {
+        name: def.name,
+        description: def.description,
+        parameters: parameters as Record<string, unknown>,
+      };
+    });
   }
 
   concurrencyOf(name: string): 'parallel' | 'exclusive' {

@@ -380,6 +380,22 @@ export function registerLlmConfigurationApi(app: FastifyInstance, deps: LlmApiDe
         routing: input.settings.routing,
       });
       for (const provider of configuration.connections) validateProvider(provider);
+      for (const model of configuration.deployments) {
+        const provider = configuration.connections.find((row) => row.id === model.connectionId)!;
+        // Managed model IDs are upstream IDs. Only reject the known MiniMax
+        // mismatch; custom gateways can legitimately use namespaced IDs.
+        if (
+          provider.adapter === 'anthropic' &&
+          ['api.minimax.cn', 'api.minimax.io', 'api.minimaxi.com'].includes(
+            new URL(provider.endpoint).hostname,
+          ) &&
+          model.modelId.startsWith('anthropic/MiniMax-')
+        )
+          throw new LlmConfigurationError(
+            'INVALID',
+            'Use the upstream MiniMax model ID, such as MiniMax-M3, without the anthropic/ prefix.',
+          );
+      }
       if (new Set(input.keys.map((row) => row.providerId)).size !== input.keys.length)
         throw new LlmConfigurationError('INVALID', 'Duplicate provider keys');
       const sealedKeys = [];

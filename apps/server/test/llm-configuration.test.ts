@@ -484,6 +484,44 @@ describe('direct provider configuration API', () => {
     expect(response.statusCode).toBe(400);
     expect(f.configs.configure).not.toHaveBeenCalled();
   });
+  it.each([
+    ['https://api.minimax.cn/anthropic/v1', 'anthropic/MiniMax-M3', 400],
+    ['https://api.minimax.cn/anthropic/v1', 'MiniMax-M3', 200],
+    ['https://custom.example/v1', 'anthropic/MiniMax-M3', 200],
+  ])(
+    'validates upstream MiniMax IDs without rewriting custom gateway IDs (%s, %s)',
+    async (endpoint, modelId, status) => {
+      const f = await fixture();
+      const response = await f.app.inject({
+        method: 'PUT',
+        url: '/api/admin/llm/providers',
+        headers: f.headers,
+        payload: {
+          expectedVersion: 1,
+          operationId: randomUUID(),
+          keys: [],
+          settings: {
+            providers: [{ ...f.configuration.connections[0], adapter: 'anthropic', endpoint }],
+            models: [{ ...f.configuration.deployments[0], modelId }],
+            routing: {
+              defaultModel: { providerId: f.connectionId, modelId },
+              automaticFallback: false,
+              fallbackModels: [],
+            },
+          },
+        },
+      });
+      expect(response.statusCode).toBe(status);
+      if (status === 400) {
+        expect(response.json().error).toContain('without the anthropic/ prefix');
+        expect(f.configs.configure).not.toHaveBeenCalled();
+      } else {
+        expect(
+          vi.mocked(f.configs.configure!).mock.calls[0]![1].configuration.deployments[0]!.modelId,
+        ).toBe(modelId);
+      }
+    },
+  );
   it('allows Members direct model selection without Expert privileges', async () => {
     const f = await fixture('member');
     f.state.published = {

@@ -5,7 +5,7 @@ import { App } from 'antd';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AcpClient } from '@trinity-harness/client-acp';
 import type { LlmProviderSettingsResponse } from '@trinity-harness/shared';
-import { LlmAdministration, LlmSessionSettings } from '../src/llm-settings';
+import { LlmAdministration, LlmSessionSettings, knownModelDefaults } from '../src/llm-settings';
 
 let root: Root, container: HTMLDivElement, client: AcpClient;
 const providerId = crypto.randomUUID(),
@@ -199,6 +199,42 @@ describe('direct provider and model settings', () => {
       routing: { defaultModel: null, automaticFallback: false, fallbackModels: [] },
     });
   });
+  it.each([
+    ['MiniMax-M3.1-Flash', true, 1000000],
+    ['Custom model', false, 32768],
+  ] as const)(
+    'applies known defaults when entering %s without assuming unknown capabilities',
+    async (modelId, tools, contextTokens) => {
+      vi.mocked(client.getLlmProviders).mockResolvedValue({
+        ...structuredClone(state),
+        settings: {
+          ...structuredClone(state.settings),
+          providers: [
+            {
+              ...provider,
+              name: 'MiniMax',
+              adapter: 'anthropic',
+              endpoint: 'https://api.minimax.cn/anthropic/v1',
+            },
+          ],
+        },
+        credentials: [{ providerId, configured: true }],
+      });
+      await administration();
+      await click(button('Edit'));
+      await click(button('Add model'));
+      await input(
+        document.querySelector<HTMLInputElement>('[aria-label="Model for MiniMax"]')!,
+        modelId,
+      );
+      await click(button('Save connection'));
+      expect(vi.mocked(client.saveLlmProviders).mock.calls[0]?.[1].models[0]).toMatchObject({
+        modelId,
+        contextTokens,
+        capabilities: { tools, reasoning: tools },
+      });
+    },
+  );
   it('lets Members follow the default directly without advanced controls', async () => {
     await act(async () =>
       root.render(
@@ -291,6 +327,53 @@ describe('direct provider and model settings', () => {
         .querySelector('[aria-label="Model and reasoning settings"]')!
         .getAttribute('aria-expanded'),
     ).toBe('true');
+  });
+  it('refreshes the event sequence before saving after ordinary chat activity', async () => {
+    await act(async () =>
+      root.render(
+        createElement(LlmSessionSettings, {
+          client,
+          sessionId: 'session',
+          readOnly: false,
+          compact: true,
+        }),
+      ),
+    );
+    vi.mocked(client.getLlmSessionSettings).mockResolvedValue({
+      expectedLastSeq: 19,
+      settings: { followDefault: true },
+    });
+    await click(document.querySelector('[aria-label="Model and reasoning settings"]'));
+    await click(button('Apply'));
+    expect(client.setLlmSessionSettings).toHaveBeenCalledWith('session', 19, {
+      followDefault: true,
+    });
+  });
+  it('refuses to overwrite a changed model selection discovered during save', async () => {
+    await act(async () =>
+      root.render(
+        createElement(LlmSessionSettings, {
+          client,
+          sessionId: 'session',
+          readOnly: false,
+          compact: true,
+        }),
+      ),
+    );
+    vi.mocked(client.getLlmSessionSettings).mockResolvedValue({
+      expectedLastSeq: 19,
+      settings: { model: { providerId, modelId: model.modelId } },
+    });
+    const trigger = document.querySelector('[aria-label="Model and reasoning settings"]')!;
+    await click(trigger);
+    await click(button('Apply'));
+    expect(client.setLlmSessionSettings).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain('Model selection changed elsewhere');
+    await click(trigger);
+    await click(trigger);
+    expect(document.querySelector('.ant-select-selection-item')?.textContent).toContain(
+      `${provider.name} / ${model.modelId}`,
+    );
   });
   it('stages new Chat settings without creating a session or writing to the server', async () => {
     const onDraftChange = vi.fn();
@@ -401,5 +484,31 @@ describe('direct provider and model settings', () => {
     expect(document.querySelector('textarea')).toBe(composer);
     expect(document.activeElement).toBe(composer);
     expect(composer.value).toBe('Unsent draft');
+  });
+});
+
+describe('known model defaults', () => {
+  it('supplies MiniMax Flash tool/reasoning metadata without enabling unknown model capabilities', () => {
+    const miniMax = {
+      ...provider,
+      adapter: 'anthropic' as const,
+      endpoint: 'https://api.minimax.cn/anthropic/v1',
+    };
+    expect(knownModelDefaults(miniMax, 'MiniMax-M3.1-Flash')).toMatchObject({
+      contextTokens: 1000000,
+      capabilities: { tools: true, reasoning: true, files: false, images: false },
+      settings: { thinkingType: 'adaptive' },
+    });
+    expect(knownModelDefaults(miniMax, 'Unknown model')).toBeUndefined();
+    expect(
+      knownModelDefaults(
+        { ...miniMax, endpoint: 'https://custom.example/v1' },
+        'MiniMax-M3.1-Flash',
+      ),
+    ).toBeUndefined();
+    expect(knownModelDefaults(provider, 'k3-256k')).toMatchObject({
+      contextTokens: 262144,
+      capabilities: { tools: true, reasoning: true },
+    });
   });
 });

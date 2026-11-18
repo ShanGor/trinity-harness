@@ -23,7 +23,7 @@ Trinity Harness is a multi-user browser ↔ server AI agent platform for coding,
 
 ## 3. Implementation rules
 
-- Advertise tool parameter JSON Schema from Zod inputs, so server defaults stay optional. Keep citation alternatives explicit; rejected notes do not invalidate successful source reads or create research requirements.
+- Advertise tool parameter JSON Schema from Zod inputs, so server defaults stay optional. Object-only unions retain their alternatives and an explicit root object type for provider compatibility. Keep citation alternatives explicit; rejected notes do not invalidate successful source reads or create research requirements.
 - Define cross-process/module DTOs with Zod and infer types using `z.infer`; shared frontend/backend schemas live in `packages/shared`, with port/event contracts in `packages/contracts`. Use discriminated unions for events.
 - Require explicit public return types. Allow `any` only at external JSON boundaries, immediately narrowed with Zod. Use coded errors or Result types for recoverable failures; no empty catches or exceptions for normal control flow.
 - Propagate `AbortSignal` through concurrent work. Give resources deterministic disposal. Use events or `AbortSignal.timeout`, not bare `setTimeout` polling.

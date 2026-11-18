@@ -31,6 +31,10 @@ For a China-region Kimi membership, create an API key in the Kimi Code Console a
 
 The endpoint and model IDs above are from [Kimi's official Kimi Code membership guide](https://www.kimi.com/en/help/kimi-code/membership-guide). Do not use `api.kimi.ai` (overseas Kimi Code), `api.moonshot.cn/v1` (Open Platform billing), or an Open Platform key for this subscription. Membership quota/rate limits are enforced by Kimi. Configure the app's pricing key only if its fixed catalog contains the applicable accounting rate; otherwise usage cost is displayed as unavailable and cost ceilings cannot use it.
 
+## MiniMax model IDs
+
+With an Anthropic-compatible MiniMax connection, enter upstream IDs such as `MiniMax-M3` or `MiniMax-M3.1-Flash`, without an `anthropic/` routing prefix. The connection already selects the adapter. MiniMax rejects prefixed IDs with HTTP 400. Direct configuration saves reject this known MiniMax mismatch with a clear error; custom gateways retain their own namespaced IDs. See [MiniMax's Anthropic API documentation](https://platform.minimax.io/docs/api-reference/text-anthropic-api.md). Provider HTTP 400 errors report the status and a model/settings check without exposing upstream bodies, prompts or credentials.
+
 ## Role and schema cutover
 
 1. Back up PostgreSQL and the private key material. Review migration `packages/db/migrations/0024_high_satana.sql` and the matching schema snapshot.
@@ -60,9 +64,15 @@ The operator-only environment import CLI remains a legacy migration aid for an u
 
 Use the model/reasoning button at the bottom right of the composer in Main, new Chat/Work and existing conversations. Click to open the picker, then Apply to confirm; closing it discards unapplied edits. New-conversation choices stay local until sending the first request, when they are saved before prompt dispatch. Default follows the tenant's current default at each eligible model-request boundary. An explicit provider/model stays selected when the default changes. Members can select enabled models. Experts/Admins see named reasoning effort levels for integrations that expose effort selection. Other models use their configured reasoning defaults. The chat picker has no token budgets, output limits, pinning or advanced/reset controls. Apply saves only model/effort and clears any legacy numeric or pin overrides. Removed/disabled selections remain unavailable. Session settings contains permissions and workspace details; model controls live in the composer.
 
-Legacy profile-bound sessions and used conversations without a managed selection require explicit reselection after conversion. Their messages, usage and route receipts remain unchanged. Existing in-flight streams/tools continue; configuration changes are checked before subsequent dispatch. Old readers must be replaced before new writers store direct selections/snapshots.
+Legacy profile-bound sessions require explicit reselection after conversion. Conversations without any saved model/profile selection follow the managed tenant default, including conversations with earlier environment-model usage. The next routing preparation appends a default-following selection; it never rewrites past messages or usage. The picker refreshes the event sequence before saving so ordinary chat activity cannot strand Apply on a stale sequence, while a changed model selection requires review. Their messages, usage and route receipts remain unchanged. Existing in-flight streams/tools continue; configuration changes are checked before subsequent dispatch. Old readers must be replaced before new writers store direct selections/snapshots.
 
 Child loops inherit the originating authenticated account and model selection. Their receipts/results are journaled to the durable parent log before dispatch. Derived Work inherits its authorized origin where available. Planning reads current model/output/context/pricing metadata without contacting providers. Compaction revalidates the actual purpose-specific request and uses per-request limits. No path regains environment access after activation.
+
+## Tool-bearing requests and known model metadata
+
+A no-tools synthetic test does not establish ordinary Chat/Work readiness. In the 2026-11-18 diagnosis, K3 accepted a simple test but rejected the chat tool catalog because object-only union schemas omitted a root `type: object`. The registry now retains all alternatives/defaults and makes that existing object constraint explicit. Both Responses and Chat Completions rejected the old catalog; changing protocol was not the fix.
+
+An added MiniMax Flash model had all capabilities disabled, so ordinary tool-bearing requests skipped it and reached the configured Kimi fallback. The live Flash metadata was corrected through the audited configuration port. Entering exact known MiniMax M3/Flash or Kimi K3 IDs now supplies curated defaults on the matching provider endpoint, while custom model capabilities remain conservative. Validate tool-bearing synthetic requests and actual route receipts, not only a provider's no-tools test.
 
 ## Outage recovery
 

@@ -225,7 +225,9 @@ export function safeProviderFailure(error: unknown): Error {
     new Error(
       classification === 'overflow'
         ? 'Provider context length exceeded'
-        : 'Provider request failed',
+        : statusCode === 400
+          ? 'Provider rejected the request (HTTP 400). Check the model ID and provider settings.'
+          : 'Provider request failed',
     ),
     {
       ...(statusCode !== undefined ? { statusCode } : {}),

@@ -145,3 +145,18 @@ it.each(['content_policy_violation', 'content_filter', 'safety_refusal'])(
     expect(redacted.message).not.toContain('private');
   },
 );
+
+it('reports a safe actionable HTTP 400 error without leaking provider bodies', () => {
+  const error = Object.assign(new Error('private prompt and private provider body'), {
+    statusCode: 400,
+    isRetryable: true,
+    responseBody: 'private api key',
+  });
+  const redacted = safeProviderFailure(safeProviderFailure(error));
+  expect(redacted.message).toBe(
+    'Provider rejected the request (HTTP 400). Check the model ID and provider settings.',
+  );
+  expect(classifyModelFailure(redacted)).toBe('fatal');
+  expect(JSON.stringify(redacted)).not.toContain('private');
+  expect(redacted).toMatchObject({ statusCode: 400, isRetryable: false });
+});

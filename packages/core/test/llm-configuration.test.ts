@@ -949,6 +949,81 @@ describe('direct model routing', () => {
       f.routing.resolve(f.identity, { profileId: f.profile.id }, f.request, []),
     ).rejects.toThrow('Select a model');
   });
+  it('binds an existing unselected conversation to the managed default without changing history', async () => {
+    const f = direct();
+    await f.store.append(f.sessionId, [
+      {
+        eventId: randomUUID(),
+        at: new Date().toISOString(),
+        type: 'model/usage',
+        usage: {
+          requestId: randomUUID(),
+          promptId: randomUUID(),
+          model: 'environment/model',
+          purpose: 'assistant',
+          tokens: { inputTokens: 2, outputTokens: 1 },
+        },
+      },
+    ]);
+    const original = await f.store.load(f.sessionId);
+    const scope = await f.routing.session(f.sessionId, f.user.id);
+    expect(scope?.settings).toEqual({ followDefault: true });
+    const route = await f.routing.resolve(scope!.identity, scope!.settings, f.request, []);
+    expect(route.receipt.deploymentId).toBe(f.deployments[0]!.id);
+    await f.routing.admit(scope!.identity, route);
+    const events = await f.store.load(f.sessionId);
+    expect(events.slice(0, original.length)).toEqual(original);
+    expect(events.at(-1)).toMatchObject({
+      type: 'llm/settings',
+      settings: { followDefault: true },
+    });
+    await f.routing.session(f.sessionId, f.user.id);
+    expect(await f.store.load(f.sessionId)).toEqual(events);
+  });
+  it('retains explicit and legacy profile bindings instead of silently choosing the default', async () => {
+    const f = direct();
+    await f.store.append(f.sessionId, [
+      {
+        eventId: randomUUID(),
+        at: new Date().toISOString(),
+        type: 'session/created',
+        workspaceUri: '/ws',
+        kind: 'chat',
+        llmProfileId: f.profile.id,
+      },
+    ]);
+    const original = await f.store.load(f.sessionId);
+    const legacy = await f.routing.session(f.sessionId, f.user.id);
+    expect(legacy?.settings).toEqual({ profileId: f.profile.id });
+    await expect(
+      f.routing.resolve(legacy!.identity, legacy!.settings, f.request, []),
+    ).rejects.toThrow('Select a model');
+    expect(await f.store.load(f.sessionId)).toEqual(original);
+    await f.store.append(f.sessionId, [
+      {
+        eventId: randomUUID(),
+        at: new Date().toISOString(),
+        type: 'llm/settings',
+        operationId: randomUUID(),
+        settings: { model: f.second },
+      },
+    ]);
+    expect((await f.routing.session(f.sessionId, f.user.id))?.settings).toEqual({
+      model: f.second,
+    });
+  });
+  it('does not restore environment routing when the managed default is missing', async () => {
+    const f = direct();
+    f.state.published!.routing!.defaultModel = null;
+    f.state.published!.routing!.fallbackModels = [];
+    f.state.published!.routing!.automaticFallback = false;
+    f.updateState(f.state);
+    const scope = await f.routing.session(f.sessionId, f.user.id);
+    expect(scope?.settings).toEqual({ followDefault: true });
+    await expect(
+      f.routing.resolve(scope!.identity, scope!.settings, f.request, []),
+    ).rejects.toThrow('Select an available default model');
+  });
   it('rejects duplicate, disabled and missing routing references', () => {
     const f = direct();
     const config = f.state.published!;

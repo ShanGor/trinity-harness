@@ -107,7 +107,9 @@ export class TenantLlmRouting implements LlmRoutingPort {
         return inherited;
       }
     }
-    if (events.some((event) => event.type === 'model/usage'))
+    // Usage history is not an explicit routing choice. Unbound conversations
+    // follow the managed default just like new ones after direct routing activates.
+    if (!state.published?.routing && events.some((event) => event.type === 'model/usage'))
       throw new LlmConfigurationError(
         'MIGRATION_REQUIRED',
         'Select an enabled model for this existing conversation before continuing',
