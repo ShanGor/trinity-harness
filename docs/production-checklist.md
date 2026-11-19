@@ -4,6 +4,11 @@
 > Walk top to bottom before declaring a release ready; record evidence
 > (command output / screenshot) next to each item.
 
+## Text and source attachments
+
+- [x] Local deterministic coverage verifies source/text recognition, normalized composer uploads, exact original/workspace bytes, invalid UTF-8 rejection and ACP text exclusion from provider media.
+- [ ] Deploy the compatible server before the expanded Web picker. Verify HTML/JSON/Markdown/CSS/source uploads and previews through the configured guest Sandbox; no schema migration or guest image update is required.
+
 ## Account roles and LLM configuration (planned)
 
 Mechanisms are implemented in the checkout. The unchecked gates below concern deployment and production acceptance; local mechanism tests do not certify them. Follow [the plan](improvement-plan-2026-11-17.md), [operations runbook](llm-configuration-operations.md) and [recorded implementation evidence](project-progress.md#account-roles-and-llm-configuration--2026-11-17).
@@ -266,3 +271,7 @@ See the [Steering specification](in-flight-steering-gap-analysis.md#9-implementa
 
 - [x] Deploy the K3 object-union schema/known model metadata repair (2026-11-18). All six services and API/control-worker health checks pass; deployed server/worker exporter hashes match. Both models passed full 17-tool quota-metered tests during diagnosis; deployed registry output verifies explicit object roots. No-tools tests alone do not establish ordinary chat readiness.
 - [ ] Confirm normal post-deployment Chat turn completion for K3 and MiniMax Flash. Immediate repeat probes were blocked before dispatch by the existing ten-probes-per-hour limit; no new user turn had arrived at the final check.
+
+- [x] Apply the Firecracker proxy tunnel ownership fix on the local host. Verified the unmanaged tunnel, restored routes, guest DNS and public HTTPS on the running assignment.
+- [x] Correct semantic extraction under `display: contents`. Verified typed Google Search evidence on the assigned guest and the running Browser Runtime's updated source and health.
+- [ ] Verify the tunnel remains unmanaged and retains both routes through a host suspend/resume cycle. The immediate browser recreation check after handoff also remains open.

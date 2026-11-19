@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -103,6 +103,99 @@ describe('buildServer M4', () => {
     expect(down.status).toBe(200);
     expect(down.headers.get('content-type')).toBe('image/png');
     expect(new Uint8Array(await down.arrayBuffer())).toEqual(png);
+  });
+
+  it.each([
+    ['page.html', 'text/html'],
+    ['data.json', 'application/json'],
+    ['README.md', ''],
+    ['styles.css', 'text/css'],
+    ['source.ts', 'video/mp2t'],
+    ['script.py', 'application/octet-stream'],
+  ])(
+    'uploads %s as UTF-8 workspace text, preserving the original bytes',
+    async (filename, mime) => {
+      const sessionId = await createSession();
+      const body = '  <script>alert("你好")</script>\r\n';
+      const params = new URLSearchParams({ filename, mime });
+      const up = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sessionId}/attachments?${params}`,
+        headers: { 'content-type': 'application/octet-stream' },
+        payload: Buffer.from(body),
+      });
+      expect(up.statusCode).toBe(201);
+      const result = up.json<{ uri: string; mimeType: string; workspacePath: string }>();
+      expect(result.mimeType).toBe('text/plain');
+      expect(result.workspacePath.endsWith(`-${filename}`)).toBe(true);
+      const creation = (await store.load(sessionId))[0]!;
+      if (creation.type !== 'session/created' || !creation.workspaceUri)
+        throw new Error('Missing workspace binding');
+      expect(await readFile(path.join(creation.workspaceUri, result.workspacePath), 'utf8')).toBe(
+        body,
+      );
+      const down = await app.inject({ url: `/api/blobs/${result.uri.slice(7)}` });
+      expect(down.statusCode).toBe(200);
+      expect(down.body).toBe(body);
+      expect(down.headers['content-type']).toContain('text/plain');
+      const receipt = (await store.load(sessionId)).find(
+        (event) => event.type === 'session/attachment',
+      );
+      expect(receipt).toMatchObject({ mimeType: 'text/plain', filename });
+    },
+  );
+
+  it('keeps inline ACP JSON out of provider media', async () => {
+    const sessionId = await createSession();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/acp',
+      payload: {
+        jsonrpc: '2.0',
+        id: 'json-upload',
+        method: 'session/prompt',
+        params: {
+          sessionId,
+          prompt: [
+            { type: 'text', text: 'Review the JSON file' },
+            {
+              type: 'file',
+              resource: {
+                mimeType: 'application/json',
+                data: Buffer.from('{"hello":"你好"}').toString('base64'),
+              },
+            },
+          ],
+        },
+      },
+    });
+    expect(response.json().result?.stopReason).toBe('end_turn');
+    const user = (await store.load(sessionId)).find((event) => event.type === 'message/user');
+    expect(user?.type === 'message/user' && user.content).toEqual([
+      { kind: 'text', text: 'Review the JSON file' },
+      { kind: 'file', mimeType: 'text/plain', uri: expect.stringContaining('blob://attachment/') },
+    ]);
+    const modelUser = lastRequest?.messages.find(
+      (message) => message.role === 'user' && message.content.includes('Review the JSON file'),
+    );
+    expect(modelUser).toBeDefined();
+    expect(modelUser?.blocks).toBeUndefined();
+    expect(modelUser?.content).toContain('[Attachment workspace file: uploads/');
+  });
+
+  it('rejects invalid UTF-8 source before committing an attachment', async () => {
+    const sessionId = await createSession();
+    const up = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${sessionId}/attachments?mime=application/json&filename=data.json`,
+      headers: { 'content-type': 'application/octet-stream' },
+      payload: Buffer.from([0xff, 0xfe]),
+    });
+    expect(up.statusCode).toBe(400);
+    expect(up.json().error).toBe('Invalid UTF-8 text attachment');
+    expect((await store.load(sessionId)).some((event) => event.type === 'session/attachment')).toBe(
+      false,
+    );
   });
 
   it('rejects disallowed MIME types and oversized uploads fail closed', async () => {

@@ -19,6 +19,7 @@ async function install(
     repeat?: boolean;
     disable?: boolean;
     activeVm?: boolean;
+    networkManager?: boolean;
   } = {},
 ) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'trinity-egress-install-'));
@@ -37,6 +38,7 @@ async function install(
     'dnscrypt-proxy': 'exit 0',
     systemctl: `printf '%s\\n' "$*" >> "$INSTALL_CALLS"
 case "$1" in
+ is-active) [[ "$NETWORK_MANAGER" == true && "$*" == 'is-active --quiet NetworkManager.service' ]] ;;
  show) echo active ;;
  reset-failed) touch "$INSTALL_RESET" ;;
  restart)
@@ -48,6 +50,7 @@ case "$1" in
   fi ;;
 esac`,
   };
+  if (settings.networkManager) commands['nmcli'] = `printf 'nmcli %s\\n' "$*" >> "$INSTALL_CALLS"`;
   await Promise.all(
     Object.entries(commands).map(([name, body]) =>
       writeFile(path.join(directory, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 }),
@@ -77,6 +80,7 @@ esac`,
     'deploy/firecracker/trinity-sandbox-route',
     'deploy/firecracker/trinity-sandbox-dns-upstream.conf',
     'deploy/firecracker/trinity-sandbox-egress-config.conf',
+    'deploy/firecracker/trinity-sandbox-networkmanager.conf',
   ])
     await writeFile(path.join(repo, file), await readFile(path.resolve(file)));
   const envFile = path.join(repo, '.env');
@@ -90,6 +94,7 @@ esac`,
     FAIL_DNS: String(settings.failDns ?? false),
     FAIL_GATEWAY: String(settings.failGateway ?? false),
     FAIL_PROXY: String(settings.failProxy ?? false),
+    NETWORK_MANAGER: String(settings.networkManager ?? false),
   };
   let output = '',
     failed = false;
@@ -112,6 +117,13 @@ esac`,
     failed,
     output,
     calls: (await readFile(calls, 'utf8').catch(() => '')).trim().split('\n'),
+    networkManagerConfig: await readFile(
+      path.join(directory, 'etc/NetworkManager/conf.d/90-trinity-sandbox-egress.conf'),
+      'utf8',
+    ).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    }),
   };
 }
 it('starts direct host routing when SANDBOX_PROXY_URL is unset and recovers DNS start limits', async () => {
@@ -142,10 +154,22 @@ it('uses the .env proxy for the whole guest and retains it on normal upgrades', 
   expect(r.calls.some((c) => c.includes('clash'))).toBe(false);
 });
 it('disables proxy services when the configured variable is removed', async () => {
-  const r = await install({ proxy: true, disable: true });
+  const r = await install({ proxy: true, disable: true, networkManager: true });
   expect(r.failed, r.output).toBe(false);
   expect(r.calls).toContain('disable --now trinity-sandbox-egress.service');
   expect(r.output).toContain('SANDBOX_PROXY_URL is unset');
+  expect(r.networkManagerConfig).toBeUndefined();
+  expect(r.calls.filter((call) => call === 'nmcli general reload conf')).toHaveLength(2);
+});
+it('excludes only the Trinity TUN from NetworkManager before starting proxy egress', async () => {
+  const r = await install({ proxy: true, networkManager: true });
+  expect(r.failed, r.output).toBe(false);
+  expect(r.networkManagerConfig).toBe(
+    '[device-trinity-sandbox-egress]\nmatch-device=interface-name:guest-egress0\nmanaged=0\n',
+  );
+  const reload = r.calls.indexOf('nmcli general reload conf');
+  expect(reload).toBeGreaterThanOrEqual(0);
+  expect(reload).toBeLessThan(r.calls.indexOf('restart trinity-sandbox-egress.service'));
 });
 it('keeps the active-VM guard before proxy installation', async () => {
   const r = await install({ proxy: true, activeVm: true });

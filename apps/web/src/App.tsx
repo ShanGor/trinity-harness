@@ -5,7 +5,12 @@ import { saveHistoryTimezone, useHistoryTimezone } from './history-timezone';
 import { publishResponseSpeech } from './response-speech-events';
 import { XDuCompanion, companionState } from './x-du-companion';
 import type { LlmSessionSettings as ModelSettings, PromptDelivery } from '@trinity-harness/shared';
-import { newId, pendingCreationSchema } from '@trinity-harness/shared';
+import {
+  newId,
+  pendingCreationSchema,
+  attachmentMimeType,
+  ATTACHMENT_ACCEPT,
+} from '@trinity-harness/shared';
 import {
   AssistantMemory,
   AssistantHistory,
@@ -827,18 +832,9 @@ export default function App() {
   /** Stage locally; first submit commits the immutable session identity. */
   const onStageFile = useCallback(
     (file: File, origin: 'file' | 'paste' = 'file') => {
-      if (
-        file.size > 20 * 1024 * 1024 ||
-        ![
-          'image/png',
-          'image/jpeg',
-          'image/webp',
-          'image/gif',
-          'application/pdf',
-          'text/plain',
-        ].includes(file.type)
-      ) {
-        message.error('Choose an image, PDF, or UTF-8 text file up to 20 MB.');
+      const mimeType = attachmentMimeType(file.type, file.name);
+      if (file.size > 20 * 1024 * 1024 || !mimeType) {
+        message.error('Choose an image, PDF, or UTF-8 text/source file up to 20 MB.');
         return false;
       }
       const uri = URL.createObjectURL(file);
@@ -847,12 +843,12 @@ export default function App() {
       setStaged((prev) => [
         ...prev,
         {
-          kind: file.type.startsWith('image/') ? 'image' : 'file',
+          kind: mimeType.startsWith('image/') ? 'image' : 'file',
           origin,
           operationId,
           size: file.size,
           uri,
-          mimeType: file.type,
+          mimeType,
           name: file.name,
         },
       ]);
@@ -894,7 +890,7 @@ export default function App() {
               ? await client.uploadAttachment(
                   targetSession,
                   file,
-                  file.type,
+                  attachment.mimeType ?? file.type,
                   file.name,
                   attachment.operationId,
                   attachment.origin,
@@ -934,7 +930,7 @@ export default function App() {
               ? await client.uploadAttachment(
                   mainSessionId,
                   file,
-                  file.type,
+                  attachment.mimeType ?? file.type,
                   file.name,
                   attachment.operationId,
                   attachment.origin,
@@ -1013,12 +1009,13 @@ export default function App() {
             const uploaded = await client.uploadAttachment(
               id,
               file,
-              file.type,
+              attachment.mimeType ?? file.type,
               file.name,
               attachment.operationId,
               attachment.origin,
             );
             attachment.uri = uploaded.uri;
+            attachment.mimeType = uploaded.mimeType;
           }
         }
         const promptId = await client.sendPrompt(
@@ -1416,13 +1413,13 @@ export default function App() {
                 return false; // keep antd from posting the file itself
               }}
               showUploadList={false}
-              accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,.txt"
+              accept={ATTACHMENT_ACCEPT}
               disabled={busy && !isMain}
             >
               <Button
                 icon={<span>＋</span>}
                 disabled={busy && !isMain}
-                aria-label="Attach image or PDF"
+                aria-label="Attach image, PDF, or text/source file"
               />
             </Upload>
             <div className="chat-composer-input">

@@ -20,6 +20,12 @@ const fake = vi.hoisted(() => ({
   setLlmSessionSettings: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
   getTimeline: vi.fn<() => Promise<TimelinePage>>(),
   createSession: vi.fn<(...args: unknown[]) => Promise<string>>(async () => 'new-session'),
+  uploadAttachment: vi.fn(async () => ({
+    uri: 'blob://uploaded',
+    mimeType: 'text/plain',
+    size: 4,
+    workspacePath: 'uploads/source.ts',
+  })),
   sendPrompt: vi.fn(async () => undefined),
   reviseMessage: vi.fn(async () => undefined),
   removeMessage: vi.fn(async () => undefined),
@@ -87,6 +93,7 @@ vi.mock('@trinity-harness/client-acp', () => ({
     createSession = fake.createSession;
     ensureMainChat = async () => 'main-session';
     getTimeline = fake.getTimeline;
+    uploadAttachment = fake.uploadAttachment;
     sendPrompt = fake.sendPrompt;
     reviseMessage = fake.reviseMessage;
     removeMessage = fake.removeMessage;
@@ -174,6 +181,7 @@ beforeEach(async () => {
   });
   fake.setLlmSessionSettings.mockReset().mockResolvedValue(undefined);
   fake.createSession.mockReset().mockResolvedValue('new-session');
+  fake.uploadAttachment.mockClear();
   fake.sendPrompt.mockClear();
   fake.reviseMessage.mockReset().mockResolvedValue(undefined);
   fake.removeMessage.mockReset().mockResolvedValue(undefined);
@@ -243,6 +251,45 @@ describe('chat typing and streaming performance', () => {
     expect(document.body.textContent).toContain('A live update could not be processed');
     expect(document.body.textContent).not.toContain('payload with private data');
     expect(container.querySelector('[aria-label="Live update connection"]')).toBeNull();
+  });
+
+  it.each([
+    ['page.html', 'text/html'],
+    ['data.json', 'application/json'],
+    ['README.md', ''],
+    ['style.css', 'text/css'],
+    ['source.ts', 'video/mp2t'],
+  ])('stages and sends %s as a text file', async (filename, mimeType) => {
+    vi.stubGlobal(
+      'URL',
+      class extends URL {
+        static createObjectURL(): string {
+          return 'blob:staged-source';
+        }
+        static revokeObjectURL(): void {}
+      },
+    );
+    const file = new File(['text'], filename, { type: mimeType });
+    const input = container.querySelector('input[type="file"]')!;
+    expect(input.getAttribute('accept')?.split(',')).toContain(`.${filename.split('.').at(-1)}`);
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })));
+    expect(container.querySelector('.staged-file-tag')?.textContent).toContain(filename);
+    expect(fake.uploadAttachment).not.toHaveBeenCalled();
+    await type(container.querySelector('textarea')!, 'Review the file');
+    await click(container.querySelector('.ant-sender-actions-btn'));
+    expect(fake.uploadAttachment).toHaveBeenCalledWith(
+      'new-session',
+      file,
+      'text/plain',
+      filename,
+      expect.any(String),
+      'file',
+    );
+    expect(fake.sendPrompt).toHaveBeenCalledWith('new-session', 'Review the file', [
+      expect.objectContaining({ uri: 'blob://uploaded', mimeType: 'text/plain' }),
+    ]);
+    expect(container.querySelector('.staged-file-tag')).toBeNull();
   });
 
   it('keeps the text draft, focus and staged attachments separate from a phone prompt', async () => {

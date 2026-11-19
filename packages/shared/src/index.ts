@@ -145,3 +145,5 @@ export type {
   LlmModelReference,
   LlmModelsResponse,
 } from '@trinity-harness/contracts';
+
+export * from './attachments.js';

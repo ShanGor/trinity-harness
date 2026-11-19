@@ -81,6 +81,7 @@ import type {
   UserStore,
 } from '@trinity-harness/contracts';
 import {
+  attachmentMimeType,
   DEFAULT_SPEECH_PREFERENCES,
   speechPreferencesSchema,
   speechSynthesisRequestSchema,
@@ -262,15 +263,6 @@ function blocksToText(content: readonly { kind: string; text?: string; uri?: str
 
 /** M4: attachment byte-size ceiling (images + PDFs, docs/design.md §10). */
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
-/** Blob-served attachment MIME allowlist (mirrors core's ingest list). */
-const ATTACHMENT_MIME_ALLOWLIST = [
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-  'image/gif',
-  'application/pdf',
-  'text/plain',
-];
 
 /**
  * Builds the `message/user` content blocks for a prompt: text first, then
@@ -303,7 +295,7 @@ function promptContent(
 async function acpBlocksToContent(
   blobs: BlobStore | undefined,
   raw: unknown,
-  upload?: (data: Uint8Array, mime: string) => Promise<{ uri: string }>,
+  upload?: (data: Uint8Array, mime: string) => Promise<{ uri: string; mimeType: string }>,
 ): Promise<ContentBlock[] | null> {
   const resourceSchema = z.object({
     uri: z.string().min(1).max(2000).optional(),
@@ -365,7 +357,7 @@ async function acpBlocksToContent(
       const blob = upload
         ? await upload(bytes, mime)
         : await blobs.put(undefined, bytes, { mimeType: mime });
-      blocks.push({ kind, uri: blob.uri, mimeType: mime });
+      blocks.push({ kind, uri: blob.uri, mimeType: blob.mimeType });
     } else if (resource.uri !== undefined) {
       if (resource.uri.startsWith('blob://')) {
         blocks.push({
@@ -2834,16 +2826,19 @@ export async function buildServer(
         }
         const query = z
           .object({
-            mime: z.string().min(1).max(100),
+            mime: z.string().max(100),
             filename: z.string().min(1).max(200).optional(),
             operationId: z.uuid().optional(),
             origin: z.enum(['file', 'paste']).default('file'),
           })
           .safeParse(req.query);
-        if (!query.success || !ATTACHMENT_MIME_ALLOWLIST.includes(query.data.mime)) {
+        const mimeType = query.success
+          ? attachmentMimeType(query.data.mime, query.data.filename)
+          : undefined;
+        if (!query.success || !mimeType) {
           return reply
             .code(400)
-            .send({ error: `mime must be one of: ${ATTACHMENT_MIME_ALLOWLIST.join(', ')}` });
+            .send({ error: 'Choose a supported image, PDF, or UTF-8 text/source file' });
         }
         const data = req.body;
         if (!Buffer.isBuffer(data) || data.byteLength === 0) {
@@ -2855,7 +2850,7 @@ export async function buildServer(
             sessionId,
             operationId: query.data.operationId ?? newId(),
             data: new Uint8Array(data),
-            mimeType: query.data.mime,
+            mimeType,
             filename: query.data.filename ?? 'attachment',
             origin: query.data.origin,
             workspaceRoot,
@@ -2877,7 +2872,7 @@ export async function buildServer(
           return reply.code(201).send(uploaded);
         } catch (error) {
           if (error instanceof TypeError)
-            return reply.code(400).send({ error: 'Invalid UTF-8 paste' });
+            return reply.code(400).send({ error: 'Invalid UTF-8 text attachment' });
           if (
             error instanceof Error &&
             'code' in error &&
@@ -4374,9 +4369,9 @@ export async function buildServer(
             content = null;
           } else {
             try {
-              content = await acpBlocksToContent(deps.blobs, rawBlocks, async (data, mimeType) => {
-                if (!attachments || !ATTACHMENT_MIME_ALLOWLIST.includes(mimeType))
-                  throw new Error('Unsupported attachment');
+              content = await acpBlocksToContent(deps.blobs, rawBlocks, async (data, mime) => {
+                const mimeType = attachmentMimeType(mime);
+                if (!attachments || !mimeType) throw new Error('Unsupported attachment');
                 const workspaceRoot = await workspaceRootFor(granted.meta, sessionId);
                 return attachments.upload({
                   sessionId,

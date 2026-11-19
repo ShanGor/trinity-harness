@@ -8,13 +8,16 @@ export function browserExtractor(
   return `(function extract(document, depth = 0) {
     const mode = ${JSON.stringify(mode)};
     const visible = (el) => {
+      const ownStyle = el.ownerDocument.defaultView.getComputedStyle(el);
       for (let node = el; node && node.nodeType === 1; node = node.parentElement || node.getRootNode()?.host) {
-        const style = node.ownerDocument.defaultView.getComputedStyle(node);
+        const style = node === el ? ownStyle : node.ownerDocument.defaultView.getComputedStyle(node);
         if (node.hidden || node.getAttribute('aria-hidden') === 'true' || style.display === 'none' ||
             style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0' || style.contentVisibility === 'hidden' ||
             (node.tagName === 'DETAILS' && !node.open && el.closest('summary')?.parentElement !== node)) return false;
       }
-      return el.getClientRects().length > 0;
+      // A display: contents container has no box of its own. Its children
+      // still render and are checked individually before text is retained.
+      return ownStyle.display === 'contents' || el.getClientRects().length > 0;
     };
     const roots=[document];
     for(let i=0;i<roots.length;i++) {

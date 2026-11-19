@@ -19,6 +19,20 @@ function extract(html: string, mode: 'article' | 'documentation' = 'article') {
 }
 afterEach(() => vi.restoreAllMocks());
 describe('visible semantic capture', () => {
+  it('captures visible result links under a display: contents main landmark with no layout box', () => {
+    browser.document.documentElement.innerHTML =
+      '<body><div role="main" style="display: contents"><a href="https://example.com/result"><h3>Public result</h3></a><div hidden><p>Hidden content</p></div></div></body>';
+    vi.spyOn(browser.window.Element.prototype, 'getClientRects').mockImplementation(
+      function (this: { getAttribute(name: string): string | null }) {
+        return this.getAttribute('role') === 'main' ? [] : [{}];
+      },
+    );
+    const result = browserCaptureSchema.parse(browser.window.eval(browserExtractor('article')));
+    expect(result.blocks.map((block) => block.text)).toEqual(['Public result']);
+    expect(result.blocks[0]?.links).toEqual([
+      { title: 'Public result', url: 'https://example.com/result' },
+    ]);
+  });
   it('omits oversized link URLs while preserving their visible text and valid links', () => {
     const result = extract(
       `<body><main><p><a href="https://example.com/?q=${'x'.repeat(2000)}">Long redirect</a> and <a href="https://example.com/source">Source</a></p></main></body>`,

@@ -43,12 +43,22 @@ PY
   fi
 }
 install_host_proxy() {
+  local networkmanager_config=/etc/NetworkManager/conf.d/90-trinity-sandbox-egress.conf
   install -d -o root -g root -m 0755 /etc/trinity/sandbox-egress \
     /etc/systemd/system/trinity-firecracker-egress-dns.service.d \
     /etc/systemd/system/trinity-firecracker-egress-config@.service.d
   printf '%s\n' trinity-sandbox-egress-v1 > /etc/trinity/sandbox-egress/.managed
   install -o root -g root -m 0600 "$host_proxy_stage/proxy.json" /etc/trinity/sandbox-egress/proxy.json
   if [[ "$host_proxy_mode" == proxy ]]; then
+    if command -v nmcli >/dev/null; then
+      # NetworkManager can remove the addresses and routes of a managed TUN
+      # when it resumes. Establish ownership before the proxy creates the TUN.
+      install -D -o root -g root -m 0644 \
+        "$repo_root/deploy/firecracker/trinity-sandbox-networkmanager.conf" "$networkmanager_config"
+      if systemctl is-active --quiet NetworkManager.service; then
+        nmcli general reload conf
+      fi
+    fi
     install -o root -g root -m 0755 "$host_proxy_stage/tun2proxy" /usr/local/libexec/trinity-tun2proxy
     install -o root -g root -m 0750 "$repo_root/scripts/sandbox-egress-config.py" /usr/local/libexec/trinity-sandbox-proxy
     install -o root -g root -m 0750 "$repo_root/deploy/firecracker/trinity-sandbox-route" /usr/local/libexec/trinity-sandbox-route
@@ -62,6 +72,12 @@ install_host_proxy() {
   elif [[ "$host_proxy_mode" == direct ]]; then
     if [[ -f /etc/systemd/system/trinity-sandbox-egress.service ]]; then
       systemctl disable --now trinity-sandbox-egress.service
+    fi
+    if [[ -f "$networkmanager_config" ]]; then
+      rm -- "$networkmanager_config"
+      if command -v nmcli >/dev/null && systemctl is-active --quiet NetworkManager.service; then
+        nmcli general reload conf
+      fi
     fi
     if ip -4 rule show | grep -Eq '^4900:.*from 172\.29\.240\.0/20 iif trinity-egress0 lookup 19013'; then
       ip -4 rule del priority 4900 from 172.29.240.0/20 iif trinity-egress0 lookup 19013

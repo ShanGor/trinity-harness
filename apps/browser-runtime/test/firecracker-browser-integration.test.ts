@@ -101,16 +101,17 @@ describe.skipIf(process.env['FIRECRACKER_BROWSER_INTEGRATION'] !== '1')(
         env.NODE_RUNTIME_TOKEN!,
         env.WORKSPACE_ROOT,
       );
+      const browserRouter = env.GUEST_DESKTOP_ENABLED ? router.browser() : router;
       root = await mkdtemp(path.join(os.tmpdir(), 'trinity-guest-public-browser-'));
       const blobs = new LocalBlobStore(root);
       run = async (args): Promise<BrowserResult> => {
         const signal = AbortSignal.timeout(50_000);
-        const sandbox = new RemoteSandbox(router, sessionId);
+        const sandbox = new RemoteSandbox(browserRouter, sessionId);
         const connection = new ZendriverMcpConnection(sandbox.openBrowser(signal));
         try {
           await connection.initialize(signal);
           const driver = new ZendriverBrowserDriver(connection, sessionId, randomUUID(), authorize);
-          await driver.open(signal, env.ZENDRIVER_CHROME_VERSION);
+          await driver.open(signal, env.ZENDRIVER_CHROME_VERSION, !env.GUEST_DESKTOP_ENABLED);
           const store = new MemorySessionStore();
           const tool = createBrowserTool({
             store,
@@ -170,7 +171,7 @@ describe.skipIf(process.env['FIRECRACKER_BROWSER_INTEGRATION'] !== '1')(
         const events = new MemorySessionStore();
         const journal = new PgBrowserRuntimeStore(isolated);
         const controls = new PgBrowserInteractionStore(isolated);
-        const sandbox = new RemoteSandbox(router, sessionId);
+        const sandbox = new RemoteSandbox(browserRouter, sessionId);
         const ctx = { sessionId, sandbox, workspaceRoot: meta.workspaceUri! };
         const makeSupervisor = (): ManagedBrowserSupervisor =>
           new ManagedBrowserSupervisor({
@@ -194,7 +195,7 @@ describe.skipIf(process.env['FIRECRACKER_BROWSER_INTEGRATION'] !== '1')(
                   generation,
                   authorize,
                 );
-                await driver.open(signal, env.ZENDRIVER_CHROME_VERSION);
+                await driver.open(signal, env.ZENDRIVER_CHROME_VERSION, !env.GUEST_DESKTOP_ENABLED);
                 const tool = createBrowserTool({
                   store: events,
                   blobs,
