@@ -5,12 +5,12 @@
   --font-code:
     ui-monospace, 'SFMono-Regular', 'Cascadia Code', 'Segoe UI Mono', Menlo, Consolas,
     'Liberation Mono', monospace;
-  --bg: #f6f7f5;
+  --bg: #f7f8fa;
   --panel: #fff;
-  --panel-muted: #f0f2ef;
-  --border: #e1e5df;
-  --text: #202923;
-  --text-muted: #626e65;
+  --panel-muted: #f0f2f4;
+  --border: #dce1e5;
+  --text: #22292d;
+  --text-muted: #59656d;
   --primary: #24634b;
   --primary-soft: #e8f1eb;
   --shadow: 0 8px 32px rgb(32 41 35 / 5%);

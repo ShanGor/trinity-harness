@@ -49,7 +49,16 @@ import {
   Upload,
 } from 'antd';
 import { Bubble } from '@ant-design/x';
-import { CaretRightOutlined, StopOutlined } from '@ant-design/icons';
+import {
+  CaretRightOutlined,
+  StopOutlined,
+  PlusOutlined,
+  MessageOutlined,
+  AppstoreOutlined,
+  HistoryOutlined,
+  CalendarOutlined,
+  DesktopOutlined,
+} from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -157,6 +166,7 @@ export default function App() {
   const [user, setUser] = useState<MeUser | null>(null);
   const [llmAdministrationOpen, setLlmAdministrationOpen] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
+  const [headerActionsOpen, setHeaderActionsOpen] = useState(false);
   useEffect(() => {
     if (!user) return;
     const controller = new AbortController();
@@ -258,6 +268,7 @@ export default function App() {
 
   useEffect(() => {
     setSettingsOpen(false);
+    setHeaderActionsOpen(false);
   }, [sessionId, page]);
 
   useEffect(() => {
@@ -1480,11 +1491,13 @@ export default function App() {
   if (!user) {
     return (
       <div className="login-screen">
-        <Form className="login-card" layout="vertical" onFinish={onLogin}>
+        <Form className="login-card" layout="vertical" requiredMark={false} onFinish={onLogin}>
           <img className="login-logo" src="/branding/trinity-logo.png" alt="Trinity logo" />
-          <span className="eyebrow">AI WORKSPACE</span>
+          <span className="eyebrow">YOUR PERSONAL AI WORKSPACE</span>
           <Typography.Title level={2}>Welcome to Trinity</Typography.Title>
-          <Typography.Paragraph type="secondary">Sign in to your workspace</Typography.Paragraph>
+          <Typography.Paragraph type="secondary">
+            A little clarity. A world of possibilities.
+          </Typography.Paragraph>
           <Form.Item name="email" label="Email" rules={[{ required: true, type: 'email' }]}>
             <Input autoComplete="username" />
           </Form.Item>
@@ -1516,14 +1529,15 @@ export default function App() {
             disabled={creationPending}
             onClick={newChat}
           >
-            <span aria-hidden="true">＋</span> New
+            <PlusOutlined aria-hidden="true" /> New
           </Button>
           <Button
             type="text"
             onClick={() => mainSessionId && switchSession(mainSessionId)}
             aria-current={isMain && page === 'conversation' ? 'page' : undefined}
           >
-            Main chat
+            <MessageOutlined aria-hidden="true" />
+            {'Main chat'}
           </Button>
           <Button
             type="text"
@@ -1533,7 +1547,7 @@ export default function App() {
             }}
             aria-current={page === 'tasks' ? 'page' : undefined}
           >
-            Tasks{' '}
+            <AppstoreOutlined aria-hidden="true" /> Tasks{' '}
             {sessions.filter(
               (entry) =>
                 entry.kind === 'work' &&
@@ -1545,14 +1559,16 @@ export default function App() {
             onClick={() => setPage('history')}
             aria-current={page === 'history' ? 'page' : undefined}
           >
-            History
+            <HistoryOutlined aria-hidden="true" />
+            {'History'}
           </Button>
           <Button
             type="text"
             aria-current={page === 'scheduled' ? 'page' : undefined}
             onClick={() => setPage('scheduled')}
           >
-            <span aria-hidden="true">◷</span> Scheduled
+            <CalendarOutlined aria-hidden="true" />
+            {'Scheduled'}
           </Button>
           <InboxIndicator client={client} onOpen={() => setPage('scheduled')} />
           <Button
@@ -1563,7 +1579,8 @@ export default function App() {
               setPage('computer');
             }}
           >
-            Browser / VM
+            <DesktopOutlined aria-hidden="true" />
+            {'Browser / VM'}
           </Button>
         </nav>
         <span className="sider-section-label">Recent</span>
@@ -1689,7 +1706,25 @@ export default function App() {
                 </span>
               )}
             </div>
-            <Flex align="center" gap={8} wrap className="workspace-controls">
+            {sessionId && (
+              <Button
+                className="header-actions-toggle"
+                type="text"
+                aria-label="Conversation actions"
+                aria-expanded={headerActionsOpen}
+                aria-controls="conversation-actions"
+                onClick={() => setHeaderActionsOpen((open) => !open)}
+              >
+                •••
+              </Button>
+            )}
+            <Flex
+              id="conversation-actions"
+              align="center"
+              gap={8}
+              wrap
+              className={`workspace-controls${headerActionsOpen ? ' workspace-controls-open' : ''}`}
+            >
               {activeSession?.scheduledRun && page === 'conversation' && (
                 <Button onClick={() => setPage('scheduled')}>Back to Run history</Button>
               )}

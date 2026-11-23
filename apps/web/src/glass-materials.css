@@ -1,0 +1,723 @@
+/* Trinity Soft Glass: luminous backdrop, frosted navigation, clear content. */
+:root {
+  --bg: #f7f8fa;
+  --panel-muted: #f0f2f4;
+  --border: #dce1e5;
+  --text: #22292d;
+  --text-muted: #59656d;
+  --radius-control: 12px;
+  --radius-card: 20px;
+  --radius-floating: 28px;
+  --glass-control: #f9fcff;
+  --glass-border: rgb(255 255 255 / 88%);
+  --glass-shadow: 0 16px 40px rgb(41 65 96 / 12%), 0 2px 6px rgb(41 65 96 / 5%);
+  --glass-navigation: #edf3f8;
+  --glass-edge: inset 0 1px 0 rgb(255 255 255 / 95%), inset 0 -1px 0 rgb(255 255 255 / 45%);
+  --ambient:
+    radial-gradient(ellipse at 2% 5%, #c4d9f4 0, transparent 46%),
+    radial-gradient(ellipse at 95% 95%, #c8e6df 0, transparent 48%),
+    radial-gradient(ellipse at 92% 8%, #ded7ef 0, transparent 40%), #eaf0f7;
+}
+
+.trinity-shell.ant-layout {
+  background: var(--ambient);
+}
+
+.trinity-shell .workspace-frame {
+  height: calc(100% - 24px);
+  margin: 12px 12px 12px 0;
+  border: 1px solid rgb(255 255 255 / 80%);
+  border-radius: 28px;
+  background: rgb(250 252 255 / 76%);
+  box-shadow: 0 12px 40px rgb(48 66 97 / 5%);
+}
+
+.trinity-shell .trinity-sider {
+  height: calc(100% - 24px);
+  margin: 12px 0 12px 12px;
+  background: var(--glass-navigation);
+  border: 1px solid var(--glass-border);
+  border-radius: 26px;
+  box-shadow:
+    var(--glass-edge),
+    0 8px 32px rgb(41 65 96 / 7%);
+}
+
+.trinity-shell .workspace-header {
+  margin: 12px;
+  background: var(--glass-navigation);
+  border: 1px solid var(--glass-border);
+  border-radius: 20px;
+  box-shadow:
+    var(--glass-edge),
+    0 4px 16px rgb(41 65 96 / 4%);
+  min-height: 60px;
+  padding: 8px 16px;
+}
+
+.trinity-shell .workspace-heading {
+  min-width: 0;
+  gap: 16px;
+}
+
+.trinity-shell .workspace-controls {
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.workspace-controls .usage-trigger {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-actions-toggle.ant-btn {
+  display: none;
+}
+
+.trinity-shell .composer-card {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-floating);
+  background: var(--glass-control);
+  box-shadow: var(--glass-edge), var(--glass-shadow);
+}
+
+.trinity-shell .composer-card:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgb(36 99 75 / 18%);
+}
+
+/* Sender can emit its own pseudo-element elevation; only the outer card floats. */
+.trinity-shell .chat-composer .ant-sender,
+.trinity-shell .chat-composer .ant-sender-content,
+.trinity-shell .chat-composer .ant-sender:focus-within {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.trinity-shell .chat-composer .ant-sender::after,
+.trinity-shell .chat-composer .ant-sender::before {
+  display: none;
+}
+
+.trinity-shell .chat-composer {
+  padding: 12px;
+}
+
+.trinity-shell .chat-composer .ant-upload-wrapper .ant-btn {
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+}
+
+.trinity-shell .mode-tabs {
+  padding: 4px;
+  border: 0;
+  border-radius: var(--radius-card);
+  background: rgb(125 150 176 / 12%);
+  box-shadow: none;
+}
+
+.trinity-shell .mode-tabs .ant-btn {
+  border-radius: var(--radius-control);
+}
+
+.trinity-shell .mode-tabs .ant-btn[aria-pressed='true'] {
+  box-shadow: 0 1px 3px rgb(28 39 49 / 8%);
+}
+
+.sidebar-navigation .ant-btn,
+.trinity-shell .history-item.ant-list-item {
+  border-radius: var(--radius-control);
+}
+
+.sidebar-navigation .ant-btn[aria-current='page'],
+.trinity-shell .history-item.ant-list-item.active {
+  color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: none;
+}
+
+.trinity-shell .empty-chat-state {
+  gap: 16px;
+  padding-bottom: 24px;
+}
+
+.trinity-shell .empty-chat-state .eyebrow {
+  display: none;
+}
+
+.trinity-shell .empty-chat-state h2 {
+  font-size: clamp(30px, 3.2vw, 44px);
+  font-weight: 650;
+  letter-spacing: -0.045em;
+}
+
+.trinity-shell .empty-chat-capabilities span {
+  border: 0;
+  border-radius: var(--radius-control);
+  background: rgb(255 255 255 / 72%);
+  box-shadow: 0 2px 8px rgb(41 65 96 / 4%);
+}
+
+.voice-call-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-floating);
+  background: #fff;
+  box-shadow: 0 20px 64px rgb(28 39 49 / 20%);
+}
+
+.trinity-shell :is(.work-setup, .scheduled-empty, .task-progress) {
+  border-radius: var(--radius-card);
+}
+
+.trinity-shell .ant-btn:focus-visible,
+.trinity-shell .usage-trigger:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* A nearly neutral material keeps text stable over supported backdrops. */
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root {
+    --glass-control: rgb(255 255 255 / 72%);
+    --glass-navigation: rgb(245 250 255 / 58%);
+  }
+
+  .trinity-shell .composer-card,
+  .trinity-shell .trinity-sider,
+  .trinity-shell .workspace-header,
+  .login-card,
+  .voice-call-panel {
+    -webkit-backdrop-filter: blur(28px) saturate(145%);
+    backdrop-filter: blur(28px) saturate(145%);
+  }
+}
+
+/* Secondary actions expand in document flow, with the original controls intact. */
+@media (max-width: 1100px) {
+  .header-actions-toggle.ant-btn {
+    display: inline-flex;
+    flex: none;
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .trinity-shell .workspace-header {
+    flex-wrap: wrap;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .trinity-shell .workspace-controls {
+    display: none;
+  }
+
+  .trinity-shell .workspace-controls-open {
+    display: flex;
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    padding: 8px 0;
+  }
+
+  .workspace-controls .usage-trigger {
+    max-width: 100%;
+    white-space: normal;
+    text-align: left;
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 600px) {
+  .trinity-shell .history-divider {
+    position: absolute;
+    left: 8px;
+    top: 20px;
+    width: 44px;
+    height: 44px;
+    z-index: 11;
+  }
+
+  .trinity-shell .history-toggle {
+    top: 0;
+    left: 0;
+    transform: none;
+    width: 44px;
+    height: 44px;
+  }
+
+  .trinity-shell:has(.trinity-sider:not([hidden])) .history-divider {
+    left: 200px;
+    height: 44px;
+  }
+
+  .trinity-shell .workspace-header {
+    padding: 8px 10px 8px 48px;
+    margin: 10px 8px;
+  }
+
+  .trinity-shell .workspace-heading {
+    gap: 8px;
+  }
+
+  .trinity-shell .workspace-heading > .ant-typography {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .trinity-shell .workspace-controls-open {
+    margin-left: -40px;
+    flex-basis: calc(100% + 40px);
+    gap: 8px;
+  }
+
+  .trinity-shell .chat-panel {
+    padding: 0 12px max(12px, env(safe-area-inset-bottom));
+  }
+
+  .trinity-shell .chat-composer {
+    padding: 8px 12px;
+    align-items: flex-start;
+  }
+
+  .trinity-shell .chat-composer .ant-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .trinity-shell .composer-hint {
+    padding-right: 72px;
+    min-height: 32px;
+    text-align: left;
+  }
+
+  .voice-call-panel {
+    border-radius: 20px 20px 0 0;
+  }
+}
+
+/* Shared two-row composer grid keeps attachment and voice actions together. */
+.trinity-shell .composer-card {
+  position: relative;
+}
+
+.trinity-shell .chat-composer {
+  display: grid;
+  grid-template-columns: 44px 44px 44px minmax(0, 1fr);
+  gap: 4px;
+  align-items: center;
+}
+
+.trinity-shell .chat-composer-input,
+.trinity-shell .chat-composer-input > .ant-flex {
+  display: contents;
+}
+
+.trinity-shell .chat-composer-sender {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.trinity-shell .chat-composer > .ant-upload-wrapper {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.trinity-shell .composer-call-button {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.trinity-shell .composer-mic-button {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.trinity-shell .composer-model-toolbar {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  padding: 0;
+  max-width: calc(100% - 176px);
+}
+
+.trinity-shell .chat-composer :is(.ant-select, .ant-btn-dangerous) {
+  grid-column: 1 / -1;
+}
+
+.trinity-shell .composer-model-trigger.ant-btn {
+  border-radius: var(--radius-control);
+}
+
+.trinity-shell .composer-card:has([aria-label='Running task input']) .composer-model-toolbar {
+  position: static;
+  max-width: none;
+  padding: 0 12px 12px;
+}
+
+/* Softly lit onboarding uses the same material as the workspace navigation. */
+.login-screen {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background: var(--ambient);
+  padding: 48px 24px;
+}
+
+.login-screen::before,
+.login-screen::after {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+  width: min(72vw, 820px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+}
+
+.login-screen::before {
+  top: -35%;
+  right: -12%;
+  background: radial-gradient(
+    circle at 35% 65%,
+    rgb(255 255 255 / 85%),
+    rgb(173 199 236 / 20%) 56%,
+    transparent 70%
+  );
+}
+
+.login-screen::after {
+  bottom: -55%;
+  left: -18%;
+  background: radial-gradient(
+    circle at 60% 30%,
+    rgb(255 255 255 / 90%),
+    rgb(144 205 190 / 24%) 55%,
+    transparent 70%
+  );
+}
+
+.login-card {
+  width: min(460px, 100%);
+  padding: 44px;
+  border: 1px solid var(--glass-border);
+  border-radius: 36px;
+  background: var(--glass-control);
+  box-shadow:
+    var(--glass-edge),
+    0 32px 80px rgb(55 75 112 / 16%),
+    0 4px 12px rgb(55 75 112 / 5%);
+}
+
+.login-card .login-logo {
+  display: block;
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 28px;
+  border: 1px solid rgb(255 255 255 / 90%);
+  border-radius: 22px;
+  box-shadow: 0 8px 24px rgb(63 113 160 / 20%);
+}
+
+.login-card > .eyebrow {
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  color: #526a7a;
+}
+
+.login-card h2.ant-typography {
+  margin: 12px 0;
+  text-align: center;
+  font-size: 30px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.login-card > .ant-typography-secondary {
+  text-align: center;
+  margin-bottom: 36px;
+  font-size: 14px;
+  color: #536575;
+}
+
+.login-card .ant-form-item-label > label {
+  color: #43566a;
+  font-weight: 550;
+  font-size: 13px;
+}
+
+.login-card :is(.ant-input, .ant-input-affix-wrapper) {
+  min-height: 52px;
+  border-radius: 16px;
+  background: rgb(255 255 255 / 64%);
+  border-color: rgb(111 140 166 / 26%);
+  box-shadow: inset 0 1px 3px rgb(42 66 88 / 3%);
+}
+
+.login-card .ant-input-affix-wrapper .ant-input {
+  min-height: auto;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.login-card .ant-btn-primary {
+  height: 52px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: linear-gradient(160deg, #337e70, #1e5e52);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 25%),
+    0 8px 20px rgb(33 99 83 / 22%);
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+
+.trinity-shell .sider-brand {
+  padding: 4px 12px 28px;
+}
+
+.trinity-shell .sider-brand img {
+  width: 40px;
+  height: 40px;
+  border-radius: 13px;
+  box-shadow: 0 3px 10px rgb(63 113 160 / 12%);
+}
+
+.trinity-shell .sider-brand span {
+  display: block;
+  font-size: 11px;
+}
+
+.sidebar-navigation .ant-btn {
+  min-height: 46px;
+  padding-inline: 14px;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.sidebar-navigation .ant-btn .anticon {
+  font-size: 18px;
+  color: #50677d;
+}
+
+.sidebar-navigation .new-chat-button.ant-btn {
+  margin-bottom: 12px;
+  border: 1px solid rgb(255 255 255 / 90%);
+  background: rgb(255 255 255 / 65%);
+  box-shadow: 0 2px 8px rgb(41 65 96 / 4%);
+}
+
+.sidebar-navigation .ant-btn[aria-current='page'] {
+  background: rgb(255 255 255 / 88%);
+  box-shadow:
+    var(--glass-edge),
+    0 3px 12px rgb(41 65 96 / 9%);
+  font-weight: 600;
+}
+
+.trinity-shell .workspace-controls > .ant-btn,
+.trinity-shell .workspace-controls .workspace-browser-trigger {
+  border-radius: 999px;
+}
+
+.trinity-shell .mode-tabs {
+  border-radius: 999px;
+}
+
+.trinity-shell .mode-tabs .ant-btn {
+  border-radius: 999px;
+}
+
+.trinity-shell .empty-chat-state img {
+  width: 72px;
+  height: 72px;
+  padding: 6px;
+  border-radius: 24px;
+  background: rgb(255 255 255 / 80%);
+  box-shadow:
+    inset 0 1px 0 white,
+    0 12px 30px rgb(63 113 160 / 14%);
+}
+
+.trinity-shell .empty-chat-description {
+  color: #617181;
+  font-size: 16px;
+}
+
+.trinity-shell .empty-chat-capabilities span {
+  border-radius: 999px;
+  padding: 10px 18px;
+}
+
+.trinity-shell .composer-dock {
+  max-width: 780px;
+}
+
+.trinity-shell .chat-composer .ant-btn-primary:not(:disabled) {
+  background: linear-gradient(150deg, #398679, #1f5e52);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 25%),
+    0 3px 8px rgb(33 99 83 / 20%);
+}
+
+.trinity-shell .history-toggle.ant-btn {
+  border-radius: 999px;
+  background: rgb(255 255 255 / 70%);
+  box-shadow: 0 2px 8px rgb(41 65 96 / 5%);
+}
+
+.voice-call-panel {
+  background: var(--glass-control);
+  box-shadow:
+    var(--glass-edge),
+    0 32px 80px rgb(35 50 80 / 25%);
+}
+
+.ant-modal .ant-modal-content,
+.ant-drawer .ant-drawer-content {
+  background: #f6f9fc;
+}
+
+.ant-modal .ant-modal-content {
+  border-radius: 28px;
+  box-shadow:
+    inset 0 1px 0 white,
+    0 24px 80px rgb(35 50 80 / 20%);
+}
+
+@media (max-width: 600px) {
+  .trinity-shell .workspace-frame {
+    height: 100%;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    background: rgb(250 252 255 / 65%);
+  }
+
+  .trinity-shell .trinity-sider {
+    height: calc(100% - 16px);
+    margin: 8px;
+    box-shadow:
+      var(--glass-edge),
+      12px 0 48px rgb(35 50 80 / 20%);
+  }
+
+  .trinity-shell .workspace-heading {
+    flex-basis: 0;
+  }
+
+  .trinity-shell .empty-chat-state h2 {
+    font-size: 30px;
+  }
+
+  .trinity-shell .empty-chat-state img {
+    width: 64px;
+    height: 64px;
+  }
+
+  .login-screen {
+    padding: 24px 16px;
+  }
+
+  .login-card {
+    padding: 32px 24px;
+    border-radius: 30px;
+  }
+
+  .login-card h2.ant-typography {
+    font-size: 28px;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
+  :root {
+    --glass-control: #fff;
+    --glass-navigation: #eef3f8;
+    --glass-border: #71808a;
+    --glass-edge: inset 0 0 0 transparent;
+    --ambient: #eef3f8;
+  }
+
+  .trinity-shell .composer-card,
+  .trinity-shell .trinity-sider,
+  .trinity-shell .workspace-header,
+  .login-card,
+  .voice-call-panel,
+  .voice-call-overlay {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none;
+  }
+
+  .login-screen::before,
+  .login-screen::after {
+    display: none;
+  }
+}
+
+.login-card .ant-btn-primary,
+.sidebar-navigation .ant-btn {
+  transition:
+    background-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+.login-card .ant-btn-primary:active,
+.sidebar-navigation .ant-btn:active {
+  transform: scale(0.985);
+}
+
+.trinity-shell .chat-composer textarea::placeholder {
+  color: #6a7c8b;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-card .ant-btn-primary,
+  .sidebar-navigation .ant-btn {
+    transition: none;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
+  .trinity-shell .workspace-frame,
+  .login-card :is(.ant-input, .ant-input-affix-wrapper) {
+    background: #fff;
+  }
+
+  .login-card .ant-input-affix-wrapper .ant-input {
+    background: transparent;
+  }
+
+  .trinity-shell .composer-card,
+  .trinity-shell .workspace-header,
+  .trinity-shell .trinity-sider,
+  .login-card {
+    border-color: #71808a;
+  }
+}
+
+.trinity-shell .chat-messages.ant-bubble-list {
+  max-width: 780px;
+  margin-inline: auto;
+  padding-inline: 0;
+}
+
+.trinity-shell .chat-messages .ant-bubble-content {
+  font-size: 16px;
+}
+
+.trinity-shell .chat-messages .ant-bubble-end .ant-bubble-content {
+  border-radius: 20px;
+  background: #e6f0ed;
+}

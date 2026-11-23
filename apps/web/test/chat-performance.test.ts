@@ -640,7 +640,7 @@ describe('chat typing and streaming performance', () => {
     expect(container.querySelector('textarea')).toBe(textarea);
     expect(textarea.value).toBe('A question to keep');
     expect(textarea.placeholder).toBe('Describe a task…');
-    expect(container.querySelector('.new-chat-button')?.textContent).toBe('＋ New');
+    expect(container.querySelector('.new-chat-button')?.textContent?.trim()).toBe('New');
     await click(container.querySelector('.mode-tabs button:first-child'));
     expect(textarea.value).toBe('A question to keep');
     expect(container.textContent).toContain('Where should we begin?');
@@ -966,6 +966,29 @@ describe('chat typing and streaming performance', () => {
     expect(container.querySelector('.turn-activity')?.hasAttribute('open')).toBe(false);
     expect(container.querySelector('.response-streaming')).toBeNull();
   });
+  it('expands conversation actions without replacing the composer or its draft', async () => {
+    await click(container.querySelector('.history-title'));
+    const composer = container.querySelector('textarea')!;
+    await type(composer, 'Keep this draft while opening actions');
+    const toggle = container.querySelector('[aria-label="Conversation actions"]')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    await click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container
+        .querySelector('#conversation-actions')
+        ?.classList.contains('workspace-controls-open'),
+    ).toBe(true);
+    expect(container.querySelector('[aria-label="Session settings"]')).not.toBeNull();
+    expect(container.querySelector('textarea')).toBe(composer);
+    expect(composer.value).toBe('Keep this draft while opening actions');
+    await click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    await click(toggle);
+    await click(container.querySelectorAll('.history-title')[1]!);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('exposes session settings and keyboard accessible history actions', async () => {
     const title = container.querySelector<HTMLButtonElement>('.history-title')!;
     expect(title.tagName).toBe('BUTTON');

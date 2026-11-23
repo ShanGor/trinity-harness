@@ -35,6 +35,14 @@ The earlier [ChatGPT Work reference](https://developers.openai.com/training/walk
 
 ## 3. Navigation and layout
 
+### Glass materials (2026-11-23 requirements)
+
+Use the **Trinity Soft Glass** direction across Login and Main: a luminous blue/lavender/mint backdrop, a quiet reading plane, inset frosted navigation and elevated composer/login sheets. This supersedes the earlier opaque-navigation/flat-canvas revision, whose visual effect was too subtle. Green remains the action accent; system typography and uniform navigation line icons provide consistency.
+
+Materials must have visible depth through their surroundings, white edge highlights and elevation shadows. Use 12px compact controls, 20px toolbar/card corners, 26–28px floating navigation/composer and 36px login corners; grouped toolbar actions use capsules. Login receives the same material system, generous spacing and dimensional primary action. Message text, forms, code and approvals remain readable.
+
+Preserve 44px mobile targets, safe areas, composer nodes/focus/drafts and streaming history. Compact headers retain the accessible expandable action group; collapsed mobile navigation reserves no permanent gutter. Filters stay bounded to navigation, composer/login and voice surfaces. Keep solid fallback and reduced-transparency, increased-contrast, forced-colors and reduced-motion behavior. No animated refraction or per-message filters are required. CSS approximates the visual material without promising native Apple optical fidelity. The [visual strategy](ui-look-and-feel-improvement-plan.md) defines rationale, numerical starting values, acceptance and remaining device gates.
+
 ### Sidebar
 
 Keep the sidebar short, stable, and independent of the current conversation kind:

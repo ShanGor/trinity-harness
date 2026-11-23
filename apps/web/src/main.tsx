@@ -5,6 +5,7 @@ import { App as AntdApp, ConfigProvider } from 'antd';
 import App from './App.js';
 
 import './index.css';
+import './glass-materials.css';
 
 const container = document.getElementById('root');
 if (!container) {
@@ -18,15 +19,17 @@ createRoot(container).render(
         token: {
           colorPrimary: '#24634b',
           colorInfo: '#24634b',
-          colorTextSecondary: '#626e65',
-          colorBorder: '#e1e5df',
-          colorBgLayout: '#f6f7f5',
+          colorTextSecondary: '#59656d',
+          colorBorder: '#dce1e5',
+          colorBgLayout: '#f7f8fa',
           controlHeight: 40,
           controlHeightSM: 32,
           fontSize: 14,
           lineHeight: 1.6,
-          borderRadius: 8,
-          colorText: '#202923',
+          borderRadius: 12,
+          borderRadiusLG: 20,
+          borderRadiusSM: 10,
+          colorText: '#22292d',
           fontFamily: 'var(--font-ui)',
           fontFamilyCode: 'var(--font-code)',
         },

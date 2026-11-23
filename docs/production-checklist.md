@@ -275,3 +275,12 @@ See the [Steering specification](in-flight-steering-gap-analysis.md#9-implementa
 - [x] Apply the Firecracker proxy tunnel ownership fix on the local host. Verified the unmanaged tunnel, restored routes, guest DNS and public HTTPS on the running assignment.
 - [x] Correct semantic extraction under `display: contents`. Verified typed Google Search evidence on the assigned guest and the running Browser Runtime's updated source and health.
 - [ ] Verify the tunnel remains unmanaged and retains both routes through a host suspend/resume cycle. The immediate browser recreation check after handoff also remains open.
+
+- [x] Specify and implement the glass material UI in product requirements and design §11.5. Pass frontend regressions, lint, frontend typecheck and production build. Inspect desktop/mobile React layouts using local mocked APIs, including retained composer draft and sidebar toggling (2026-11-23).
+- [ ] Deploy and accept the glass UI in an authenticated environment. Verify reduced transparency, increased contrast, forced colors, unsupported-filter fallback and scrolling performance on real mobile devices.
+
+- [x] Implement the glass styling revision: neutral canvas, consistent radius roles, unified composer/action grid, compact expandable header and collapsed mobile gutter correction. Pass 334 frontend tests, lint, frontend typecheck/build and inspect mocked desktop/mobile layouts at five viewport widths (2026-11-23).
+- [ ] Deploy the styling revision and visually accept populated/streaming conversations, attachments, approvals, settings and voice mode in an authenticated environment. Measure composited contrast and check accessibility fallbacks plus real-phone keyboard/safe areas. The initial glass-pass captures and automated checks do not close these gates.
+
+- [x] Implement the Soft Glass visual strategy across Login/Main, replacing the flat neutral revision: luminous backdrop, frosted inset navigation, raised composer/login, coherent icons/type/radii and 780px reading width. Pass 334 frontend tests, lint, frontend typecheck/build; inspect empty/populated desktop/mobile fixtures and draft preservation across five viewport widths (2026-11-23).
+- [ ] Deploy and accept Soft Glass with authenticated sessions. Check Safari, real-phone keyboard/safe areas, composited contrast, accessibility/fallback modes and populated attachments/approvals/voice surfaces. Local Chromium and mocked ACP captures do not establish those results.
