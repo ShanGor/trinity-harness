@@ -101,6 +101,24 @@ Local development rollout validation (2026-10-26): the maintenance wrapper drain
 
 ## 启用 Scheduled / Updates
 
+Personal Calendar extends this deployment with migrations `0025`–`0027` and matching
+server/agent-worker/control-worker/Web versions; see
+[the calendar specification](personal-calendar-design.md). Existing scheduling
+availability determines calendar availability. Simple reminders require no Work
+session or guest wake; explicitly authorized agent tasks use an owned personal
+Chat/Work workspace and the existing Work dispatch pipeline. Automatic inferred
+capture defaults off; enable it in Calendar preferences when desired.
+
+Optional closed-app notifications require all of `WEB_PUSH_PUBLIC_KEY`,
+`WEB_PUSH_PRIVATE_KEY`, `WEB_PUSH_SUBJECT` and comma-separated exact
+`WEB_PUSH_ALLOWED_ORIGINS` on the server, agent-worker and control-worker. Use an
+operator-owned VAPID pair and allow those providers through the existing egress
+policy; do not weaken default-deny networking. Browser notification permission and
+service workers require HTTPS or localhost. Calendar preferences offers explicit
+device subscription/disconnection, quiet hours and reminder defaults. The current
+adapter retains one subscription per owner. Without it, reminders stay in Updates;
+an inbox record does not prove a closed-app device notification or user reading.
+
 1. 应用 Drizzle migrations `0012`–`0014`，部署匹配的 server 和 agent-worker。
 2. 配置现有 PostgreSQL / Redis / auth / workspace，server 与 agent-worker 均设置 `SCHEDULING_ENABLED=true`。
 3. 启动 `pnpm start:control`，向该进程提供 `DATABASE_URL` 与 `SCHEDULING_ENABLED=true`。本地从仓库根目录运行，或显式传环境变量；不依赖 VM 内 cron。

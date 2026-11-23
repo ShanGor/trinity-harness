@@ -147,3 +147,39 @@ export type {
 } from '@trinity-harness/contracts';
 
 export * from './attachments.js';
+export {
+  calendarDateSchema,
+  calendarTimingSchema,
+  calendarTimezoneSchema,
+  calendarDefinitionSchema,
+  calendarSaveSchema,
+  calendarRecordSchema,
+  calendarPreferencesSchema,
+  calendarReminderSchema,
+  calendarSnapshotSchema,
+  calendarPushSubscriptionSchema,
+  calendarReminderActionSchema,
+  defaultCalendarPreferences,
+  calendarOccurrences,
+  calendarOccurrenceDate,
+  nextCalendarInstant,
+  calendarDateToGregorian,
+  calendarDateLabel,
+  chineseDate,
+  calendarLocalParts,
+  calendarLocalInstant,
+  nextCalendarDefinitionInstant,
+} from '@trinity-harness/contracts';
+export type {
+  CalendarDate,
+  CalendarTiming,
+  CalendarDefinition,
+  CalendarSave,
+  CalendarRecord,
+  CalendarPreferences,
+  CalendarSnapshot,
+  CalendarReminder,
+  CalendarReminderAction,
+  CalendarPushSubscription,
+  CalendarOccurrence,
+} from '@trinity-harness/contracts';

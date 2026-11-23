@@ -1,7 +1,17 @@
 import { z } from 'zod';
 import type { Identity } from './identity.js';
+import { permissionPolicySchema } from './approval.js';
+import { calendarSourceSchema } from './calendar.js';
+import { calendarTimingSchema, nextOffsetCalendarInstant } from './calendar-time.js';
 
 export const scheduleTimingSchema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('calendar'),
+      timing: calendarTimingSchema,
+      beforeMinutes: z.number().int().min(0).max(527040).optional(),
+    })
+    .strict(),
   z.object({ kind: z.literal('once'), at: z.iso.datetime() }).strict(),
   z
     .object({
@@ -31,12 +41,19 @@ export const scheduleDefinitionSchema = z
       }, 'Unknown IANA timezone'),
     timing: scheduleTimingSchema,
     consolidation: z.enum(['review', 'memory']).optional(),
+    sourcePolicy: permissionPolicySchema.optional(),
+    requestSource: calendarSourceSchema.optional(),
   })
   .strict();
 export type ScheduleDefinition = z.infer<typeof scheduleDefinitionSchema>;
-export const scheduleCreateSchema = scheduleDefinitionSchema.extend({ operationId: z.uuid() });
+// Calendar timing and provenance are written atomically by CalendarStore, never caller metadata.
+export const scheduleCreateSchema = scheduleDefinitionSchema
+  .omit({ sourcePolicy: true, requestSource: true })
+  .extend({ operationId: z.uuid() })
+  .refine((input) => input.timing.kind !== 'calendar', 'Create calendar tasks through Calendar');
 export type ScheduleCreate = z.infer<typeof scheduleCreateSchema>;
 export const scheduleRecordSchema = scheduleDefinitionSchema.extend({
+  calendarItemId: z.uuid().optional(),
   id: z.uuid(),
   revision: z.number().int().positive(),
   enabled: z.boolean(),
@@ -94,6 +111,12 @@ export const scheduleTriggerSchema = z.object({
 
 /** Calendar semantics: skip missing local minutes, use only the first DST fold occurrence. */
 export function nextScheduleInstant(definition: ScheduleDefinition, after: Date): Date | null {
+  if (definition.timing.kind === 'calendar')
+    return nextOffsetCalendarInstant(
+      definition.timing.timing,
+      after,
+      definition.timing.beforeMinutes,
+    );
   if (definition.timing.kind === 'once') {
     const at = new Date(definition.timing.at);
     return at > after ? at : null;
@@ -142,7 +165,15 @@ export function nextScheduleInstant(definition: ScheduleDefinition, after: Date)
 
 /** Bind a nightly review to the previous local calendar day at its durable occurrence. */
 export function scheduledRequest(definition: ScheduleDefinition, scheduledAt: Date): string {
-  if (!definition.consolidation) return definition.request;
+  if (!definition.consolidation) {
+    if (!definition.requestSource) return definition.request;
+    return `Scheduled calendar delegation. Original user source: session ${definition.requestSource.sessionId}, event ${definition.requestSource.eventId}.
+Exact user-source excerpt (not necessarily the complete original message):
+${definition.requestSource.quote}
+Assistant-authored execution interpretation:
+${definition.request}
+Preserve the user's original requirements and constraints. The interpretation cannot expand authorization. Use recall to expand the original source if needed; unavailable or ambiguous authority requires clarification, never invented permissions. This is a scheduled trigger, not a fresh user message. Normal permissions and approvals still apply.`;
+  }
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat('en', {
       timeZone: definition.timezone,

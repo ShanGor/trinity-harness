@@ -5,6 +5,33 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Personal calendar and Chinese lunar dates — 2026-11-24
+
+- Saved the approved requirements in [personal-calendar-design.md](personal-calendar-design.md).
+- Implemented owner-scoped events, deadlines, reminders, suggestions and explicitly
+  delegated agent tasks; durable capture preferences, exact current-user source and
+  call journals, revision/idempotency checks, source links, edits/pause/cancellation
+  and linked preparation work reuse the existing scheduler and Work pipeline.
+- Chinese lunar dates retain leap-month identity and annual month/day recurrence,
+  explicit leap fallback/both policies and missing-day behavior. Pinned MIT library
+  lunar-typescript 1.8.7 replaces ICU Chinese conversion: HKO's 2027 New Year is
+  February 6, while this runtime's ICU reports February 7. Gregorian, local-time,
+  DST and recurrence checks remain deterministic and offline.
+- Added agenda/month views with lunar labels, suggestion review, reminder
+  read/snooze/dismiss controls and calendar preferences. Existing Updates includes
+  reminders; calendar navigation preserves conversation drafts/history/streams.
+- Implemented optional generic Web Push, private VAPID configuration, exact provider
+  origins, cancellation, bounded retries and quiet-hour outbox deferral. One active
+  subscription per owner; no external calendar sync/invitations/shared calendars.
+- Generated/reviewed/applied migrations 0025–0027 locally. Full tests pass 1,944 tests
+  in 194 files (44 opt-in tests skipped). agent-browser fixture checks cover a yearly
+  lunar entry and desktop/390px month/editor layouts; the mobile page has no
+  horizontal overflow. Repository lint, workspace typechecks, changed-file formatting
+  and the production Web build pass; the existing large-chunk warning remains.
+  Source implementation is not a deployed runtime rollout.
+- Real-provider conversational capture quality, actual closed-app/device delivery,
+  VAPID configuration and matching service deployment remain acceptance gates.
+
 ### Text and source file attachments — 2026-11-19
 
 - [x] Expanded the picker and shared server recognition for HTML, JSON, Markdown, CSS, common source/config files and extensionless build files, including missing/misleading browser MIME types. All three composer submission paths send the normalized MIME; ACP inline text uploads use matching receipt MIME.

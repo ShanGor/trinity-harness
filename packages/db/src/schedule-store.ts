@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { and, desc, eq, isNotNull, sql } from 'drizzle-orm';
 import {
   scheduleCreateSchema,
@@ -10,6 +11,8 @@ import {
   reviewWithinCatchupWindow,
   parsePermissionPolicy,
   sessionEventSchema,
+  calendarSourceSchema,
+  removedPromptIds,
   type Identity,
   type ScheduleCreate,
   type ScheduleRecord,
@@ -24,6 +27,7 @@ import {
   sessions,
   sessionEvents,
   users,
+  personalCalendarItems,
 } from './schema.js';
 import { computeEventHash, GENESIS_HASH } from './session-store.js';
 
@@ -61,6 +65,39 @@ export class PgScheduleStore implements ScheduleStore {
       )
       .limit(1);
     if (!run) return;
+    const [calendar] = await this.db
+      .select()
+      .from(personalCalendarItems)
+      .where(eq(personalCalendarItems.scheduleId, run.schedule.id));
+    if (
+      calendar &&
+      (calendar.status !== 'active' ||
+        run.schedule.revision !== run.occurrence.revision ||
+        (calendar.definition as { kind?: unknown }).kind !== 'task')
+    )
+      throw new Error('Scheduled execution authorization changed');
+    if (calendar?.source) {
+      const origin = calendarSourceSchema.parse(calendar.source);
+      const [originSession] = await this.db
+        .select()
+        .from(sessions)
+        .where(eq(sessions.id, origin.sessionId));
+      const sourceRows = await this.db
+        .select()
+        .from(sessionEvents)
+        .where(eq(sessionEvents.sessionId, origin.sessionId))
+        .orderBy(sessionEvents.seq);
+      const sourceEvents = sourceRows.map((row) => sessionEventSchema.parse(row.payload));
+      if (
+        !originSession ||
+        originSession.closedAt ||
+        originSession.scope !== 'personal' ||
+        originSession.userId !== actor ||
+        originSession.tenantId !== run.schedule.tenantId ||
+        removedPromptIds(sourceEvents).has(origin.eventId)
+      )
+        throw new Error('Scheduled execution authorization changed');
+    }
     const definition = scheduleDefinitionSchema.parse(run.schedule.definition);
     const [source] = await this.db
       .select()
@@ -81,12 +118,17 @@ export class PgScheduleStore implements ScheduleStore {
       source.tenantId !== owner.tenantId ||
       source.tenantId !== target.tenantId ||
       source.workspaceUri !== target.workspaceUri ||
+      (definition.sourcePolicy &&
+        !isDeepStrictEqual(
+          definition.sourcePolicy,
+          parsePermissionPolicy(source.policy ?? 'workspace-write'),
+        )) ||
       JSON.stringify(parsePermissionPolicy(source.policy ?? 'workspace-write')) !== target.policy
     )
       throw new Error('Scheduled execution authorization changed');
   }
   async list(identity: Identity): Promise<ScheduleRecord[]> {
-    return (
+    const records = (
       await this.db
         .select()
         .from(assistantSchedules)
@@ -94,6 +136,19 @@ export class PgScheduleStore implements ScheduleStore {
         .orderBy(desc(assistantSchedules.createdAt))
         .limit(200)
     ).map(record);
+    const calendar = await this.db
+      .select({ id: personalCalendarItems.id, scheduleId: personalCalendarItems.scheduleId })
+      .from(personalCalendarItems)
+      .where(
+        and(
+          eq(personalCalendarItems.tenantId, identity.tenantId),
+          eq(personalCalendarItems.userId, identity.userId),
+        ),
+      );
+    return records.map((item) => {
+      const link = calendar.find((c) => c.scheduleId === item.id);
+      return link ? { ...item, calendarItemId: link.id } : item;
+    });
   }
   async create(identity: Identity, raw: ScheduleCreate, at: Date): Promise<ScheduleRecord> {
     if (identity.role === 'viewer') throw new Error('Schedule permission denied');
@@ -179,6 +234,11 @@ export class PgScheduleStore implements ScheduleStore {
         .where(and(owned(identity), eq(assistantSchedules.id, id)))
         .for('update');
       if (!current || current.revision !== revision) return null;
+      const [calendar] = await tx
+        .select({ id: personalCalendarItems.id })
+        .from(personalCalendarItems)
+        .where(eq(personalCalendarItems.scheduleId, id));
+      if (calendar) throw new Error('Manage linked schedules through Calendar');
       const next = enabled
         ? nextScheduleInstant(scheduleDefinitionSchema.parse(current.definition), at)
         : null;
@@ -374,6 +434,12 @@ export class PgScheduleStore implements ScheduleStore {
           source.userId === schedule.userId &&
           source.tenantId === schedule.tenantId &&
           owner.tenantId === schedule.tenantId &&
+          (definition.timing.kind !== 'calendar' || !!definition.sourcePolicy) &&
+          (!definition.sourcePolicy ||
+            isDeepStrictEqual(
+              definition.sourcePolicy,
+              parsePermissionPolicy(source.policy ?? 'workspace-write'),
+            )) &&
           owner.role !== 'viewer';
 
         if (review && previous?.status === 'failed' && previous.sessionId && allowed) {

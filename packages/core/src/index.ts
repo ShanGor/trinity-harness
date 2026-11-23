@@ -20,3 +20,5 @@ export * from './environments/controller.js';
 export * from './environments/guest-router.js';
 
 export * from './personal-assistant/persona-tool.js';
+export * from './personal-assistant/calendar-tool.js';
+export * from './personal-assistant/calendar-push.js';

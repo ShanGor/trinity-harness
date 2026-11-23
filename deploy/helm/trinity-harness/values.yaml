@@ -34,6 +34,10 @@ secrets:
   browserRuntimeToken: '' # private Zendriver supervisor credential, min 32 characters
   nodeRuntimeToken: '' # optional, dedicated host-management credential
   firecrackerMaintenanceToken: '' # host release drain/resume credential, min 32 URL-safe characters
+  webPushPublicKey: ''
+  webPushPrivateKey: ''
+  webPushSubject: ''
+  webPushAllowedOrigins: '' # exact HTTPS origins; retain explicit networkPolicy egress
 
 server:
   image:

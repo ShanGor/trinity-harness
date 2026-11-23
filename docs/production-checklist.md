@@ -9,6 +9,20 @@
 - [x] Local deterministic coverage verifies source/text recognition, normalized composer uploads, exact original/workspace bytes, invalid UTF-8 rejection and ACP text exclusion from provider media.
 - [ ] Deploy the compatible server before the expanded Web picker. Verify HTML/JSON/Markdown/CSS/source uploads and previews through the configured guest Sandbox; no schema migration or guest image update is required.
 
+## Personal calendar and Chinese lunar dates
+
+- [ ] Deploy migrations 0025–0027 and matching server/worker/control-worker/Web
+      readers and writers; retire older scheduler writers before calendar schedules.
+- [ ] Verify owner isolation, original user/call provenance, disabled-capture
+      suggestions, lunar annual/leap/day-30 rules, DST, edits/cancellation and
+      immutable outcomes through the authenticated deployed owner route.
+- [ ] Run configured-model explicit/inferred/ambiguous/correction capture cases in
+      English and Chinese; verify statements do not grant task/external-effect rights.
+- [ ] Configure operator-owned VAPID credentials and exact provider origins under
+      existing egress policy; accept real-device closed-app notification, quiet-hour,
+      snooze, disconnect and expired-subscription behavior. Inbox delivery alone
+      does not satisfy external delivery acceptance.
+
 ## Account roles and LLM configuration (planned)
 
 Mechanisms are implemented in the checkout. The unchecked gates below concern deployment and production acceptance; local mechanism tests do not certify them. Follow [the plan](improvement-plan-2026-11-17.md), [operations runbook](llm-configuration-operations.md) and [recorded implementation evidence](project-progress.md#account-roles-and-llm-configuration--2026-11-17).

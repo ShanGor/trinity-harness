@@ -7,7 +7,7 @@ export const InboxIndicator = memo(function InboxIndicator({
   client,
   onOpen,
 }: {
-  client: Pick<AcpClient, 'getInbox'>;
+  client: Pick<AcpClient, 'getInbox'> & Partial<Pick<AcpClient, 'getCalendar'>>;
   onOpen: () => void;
 }): ReactElement | null {
   const [unread, setUnread] = useState(0);
@@ -20,23 +20,36 @@ export const InboxIndicator = memo(function InboxIndicator({
       while (!cancel.signal.aborted) {
         if (document.visibilityState !== 'hidden') {
           try {
-            const result = await client.getInbox(
-              AbortSignal.any([cancel.signal, AbortSignal.timeout(10_000)]),
-            );
+            const signal = AbortSignal.any([cancel.signal, AbortSignal.timeout(10_000)]);
+            const [taskResult, calendarResult] = await Promise.allSettled([
+              client.getInbox(signal),
+              client.getCalendar?.(signal),
+            ]);
+            const result =
+              taskResult.status === 'fulfilled'
+                ? taskResult.value
+                : { available: false, items: [] };
+            const calendar =
+              calendarResult.status === 'fulfilled' ? calendarResult.value : undefined;
+            const calendarNotices =
+              calendar?.reminders
+                .filter((r) => ['delivered', 'missed'].includes(r.status))
+                .map((r) => ({ id: r.id, readAt: r.readAt, status: r.status })) ?? [];
+            const notices = [...result.items, ...calendarNotices];
             if (cancel.signal.aborted) return;
-            setAvailable(result.available);
-            if (!result.available) return;
-            setUnread(result.items.filter((item) => !item.readAt).length);
+            setAvailable(result.available || !!calendar?.available);
+            if (!result.available && !calendar?.available) return;
+            setUnread(notices.filter((item) => !item.readAt).length);
             if (
               observed &&
-              result.items.some((item) => !item.readAt && observed!.get(item.id) !== item.status)
+              notices.some((item) => !item.readAt && observed!.get(item.id) !== item.status)
             )
               notification.info({
                 key: 'assistant-inbox-update',
-                message: 'Your assistant has a task update',
-                description: 'Open Updates to review the result or task status.',
+                message: 'Your assistant has an update',
+                description: 'Open Updates to review reminders and task status.',
               });
-            observed = new Map(result.items.map((item) => [item.id, item.status]));
+            observed = new Map(notices.map((item) => [item.id, item.status]));
           } catch {
             if (cancel.signal.aborted) return;
             setAvailable(false);

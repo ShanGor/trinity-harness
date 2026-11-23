@@ -49,6 +49,7 @@ The linked documents contain detailed invariants, deployment steps and acceptanc
 | Usage and pricing                                           | [usage-accounting.md](docs/usage-accounting.md), design §17                                                                                                                                                                   |
 | Account roles, LLM configuration and outage routing         | [refactor-as-personal-assistant.md](docs/refactor-as-personal-assistant.md) §14, [improvement-plan-2026-11-17.md](docs/improvement-plan-2026-11-17.md), design §5.4/§12.1; [operations](docs/llm-configuration-operations.md) |
 | Deployment, event delivery and latency diagnostics          | [deployment-guide.md](docs/deployment-guide.md), design §21.5                                                                                                                                                                 |
+| Memory evolution (semantic recall, facts, consolidation)    | [memory-evolution-plan.md](docs/memory-evolution-plan.md) (proposal; not delivered), design §21.10                                                                                                                            |
 
 ### Intent and execution
 
@@ -100,6 +101,8 @@ The linked documents contain detailed invariants, deployment steps and acceptanc
 - Usage derives from append-only `model/usage` events and per-request model/price snapshots. Preserve unavailable buckets/prices, separate cache from uncached input, count reasoning within output and never reprice history. Server and worker share only the fixed `config/models.yaml` catalog.
 
 ## 5. Verification and delivery
+
+- Personal calendar changes follow [personal-calendar-design.md](docs/personal-calendar-design.md). Use pinned lunar-typescript for Chinese date conversion (ICU Chinese dates differ at some year boundaries). Preserve original Chinese lunar dates/leap policies, explicit source provenance, owner/revision fences and distinct reminder versus execution authority. Reuse the existing control-worker and schedule dispatch; calendar capture never grants external-effect permission.
 
 - New/modified logic needs deterministic tests: unit tests for pure functions; jsdom + fake ACP for UI interactions; fakes/testcontainers for ports; fake LLM/tools for loop event streams. Event-sourcing changes must test crash recovery/torn-tail replay. Test focus/draft preservation and stable history while typing/streaming; inline antd/antd-x ESM in Vitest as configured.
 - For code changes, run relevant `pnpm test`, `pnpm lint` and `pnpm typecheck`; report results and material limitations. Backend-only changes may omit frontend unit tests and vice versa; retain relevant end-to-end checks. Documentation-only changes do not require tests.

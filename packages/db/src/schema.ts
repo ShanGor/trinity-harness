@@ -97,6 +97,90 @@ export const assistantSchedules = pgTable(
   ],
 );
 
+export const personalCalendarItems = pgTable(
+  'personal_calendar_items',
+  {
+    id: uuid('id').primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    definition: jsonb('definition').notNull(),
+    status: text('status').notNull(),
+    source: jsonb('source'),
+    scheduleId: uuid('schedule_id'),
+    nextAt: timestamp('next_at', { withTimezone: true, mode: 'string' }),
+    reminderNextAt: timestamp('reminder_next_at', { withTimezone: true, mode: 'string' }),
+    reminderDueAt: timestamp('reminder_due_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull(),
+  },
+  (t) => [
+    index('personal_calendar_owner').on(t.tenantId, t.userId),
+    index('personal_calendar_next').on(t.status, t.nextAt),
+    index('personal_calendar_reminder_cursor').on(t.status, t.reminderDueAt),
+    uniqueIndex('personal_calendar_schedule').on(t.scheduleId),
+  ],
+);
+
+export const personalCalendarChanges = pgTable(
+  'personal_calendar_changes',
+  {
+    id: uuid('id').primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    operationId: uuid('operation_id').notNull(),
+    itemId: uuid('item_id').notNull(),
+    input: jsonb('input').notNull(),
+    snapshot: jsonb('snapshot').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull(),
+  },
+  (t) => [uniqueIndex('personal_calendar_operation').on(t.tenantId, t.userId, t.operationId)],
+);
+
+export const personalCalendarPreferences = pgTable(
+  'personal_calendar_preferences',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    preferences: jsonb('preferences').notNull(),
+    subscription: jsonb('subscription'),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.userId] })],
+);
+
+export const personalCalendarReminders = pgTable(
+  'personal_calendar_reminders',
+  {
+    id: uuid('id').primaryKey(),
+    itemId: uuid('item_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    title: text('title').notNull(),
+    eventAt: timestamp('event_at', { withTimezone: true, mode: 'string' }).notNull(),
+    dueAt: timestamp('due_at', { withTimezone: true, mode: 'string' }).notNull(),
+    offset: bigint('offset_minutes', { mode: 'number' }).notNull(),
+    status: text('status').notNull(),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true, mode: 'string' }),
+    readAt: timestamp('read_at', { withTimezone: true, mode: 'string' }),
+    pushStatus: text('push_status').notNull(),
+    pushAttempts: bigint('push_attempts', { mode: 'number' }).notNull().default(0),
+    pushAfter: timestamp('push_after', { withTimezone: true, mode: 'string' }),
+  },
+  (t) => [
+    uniqueIndex('personal_calendar_reminder_occurrence').on(
+      t.itemId,
+      t.revision,
+      t.eventAt,
+      t.offset,
+    ),
+    index('personal_calendar_reminder_due').on(t.status, t.dueAt),
+    index('personal_calendar_push_due').on(t.status, t.pushStatus, t.pushAfter, t.dueAt),
+    index('personal_calendar_reminder_owner').on(t.tenantId, t.userId, t.eventAt),
+  ],
+);
+
 export const scheduleOccurrences = pgTable(
   'schedule_occurrences',
   {

@@ -24,6 +24,8 @@ export interface ToolResult<V = unknown> {
 }
 
 export interface ToolContext {
+  /** Owning personal loop only; never inherited by delegated children. */
+  personalCalendarAllowed?: boolean;
   /** Authenticated originating account, inherited by children; never model input. */
   authenticatedActor?: string | undefined;
   /** Current committed user message's text, supplied by the Loop, never tool arguments. */

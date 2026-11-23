@@ -37,3 +37,5 @@ export * from './browser-document-presentation.js';
 
 export * from './steering.js';
 export * from './llm-configuration.js';
+export * from './calendar.js';
+export * from './calendar-time.js';

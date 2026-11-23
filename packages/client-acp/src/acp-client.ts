@@ -1,4 +1,15 @@
 import {
+  calendarSnapshotSchema,
+  calendarRecordSchema,
+  calendarPreferencesSchema,
+  type CalendarSave,
+  type CalendarRecord,
+  type CalendarSnapshot,
+  type CalendarPreferences,
+  type CalendarReminderAction,
+  type CalendarPushSubscription,
+} from '@trinity-harness/shared';
+import {
   llmProviderSettingsWriteSchema,
   llmProviderSettingsResponseSchema,
   llmModelsResponseSchema,
@@ -287,6 +298,27 @@ export class AcpClient {
         status: response.status,
       });
     return browserInteractionResultSchema.parse(await response.json());
+  }
+  async getCalendar(signal?: AbortSignal): Promise<CalendarSnapshot> {
+    return calendarSnapshotSchema.parse(
+      await this.assistantRequest('/api/calendar', 'GET', undefined, signal),
+    );
+  }
+  async saveCalendar(input: CalendarSave): Promise<CalendarRecord> {
+    return calendarRecordSchema.parse(
+      await this.assistantRequest('/api/calendar/items', 'POST', input),
+    );
+  }
+  async saveCalendarPreferences(input: CalendarPreferences): Promise<CalendarPreferences> {
+    return calendarPreferencesSchema.parse(
+      await this.assistantRequest('/api/calendar/preferences', 'PUT', input),
+    );
+  }
+  async calendarReminderAction(id: string, action: CalendarReminderAction): Promise<void> {
+    await this.assistantRequest(`/api/calendar/reminders/${id}`, 'POST', action);
+  }
+  async subscribeCalendarPush(subscription: CalendarPushSubscription | null): Promise<void> {
+    await this.assistantRequest('/api/calendar/push', 'PUT', subscription);
   }
   async getSchedules(): Promise<ReturnType<typeof scheduleListSchema.parse>> {
     return scheduleListSchema.parse(await this.assistantRequest('/api/schedules'));

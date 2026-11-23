@@ -1,3 +1,4 @@
+import { CalendarUpdates } from './personal-calendar';
 import { readHistoryTimezone } from './history-timezone';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { Alert, Button, Form, Input, InputNumber, List, Modal, Select, Typography } from 'antd';
@@ -13,10 +14,12 @@ export function ScheduledTasks({
   client,
   sessions,
   onOpen,
+  onOpenCalendar,
 }: {
   client: AcpClient;
   sessions: SessionSummary[];
   onOpen: (id: string) => void;
+  onOpenCalendar?: () => void;
 }): ReactElement {
   const [available, setAvailable] = useState(false);
   const [schedules, setSchedules] = useState<ScheduleRecord[]>([]);
@@ -78,6 +81,7 @@ export function ScheduledTasks({
   };
   return (
     <section className="scheduled-page" aria-labelledby="scheduled-title">
+      <CalendarUpdates client={client} />
       <Typography.Title id="scheduled-title" level={2}>
         Scheduled tasks
       </Typography.Title>
@@ -149,8 +153,17 @@ export function ScheduledTasks({
             renderItem={(schedule) => (
               <List.Item
                 actions={[
-                  <Button key="toggle" onClick={() => void change(schedule)}>
-                    {schedule.enabled ? 'Pause' : 'Resume'}
+                  <Button
+                    key="toggle"
+                    onClick={() =>
+                      schedule.calendarItemId ? onOpenCalendar?.() : void change(schedule)
+                    }
+                  >
+                    {schedule.calendarItemId
+                      ? 'Manage in Calendar'
+                      : schedule.enabled
+                        ? 'Pause'
+                        : 'Resume'}
                   </Button>,
                 ]}
               >

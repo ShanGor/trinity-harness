@@ -191,6 +191,11 @@ export function hasTaskEffects(events: readonly SessionEvent[], promptId: string
   const turn = events.slice(start + 1, next < 0 ? undefined : next);
   return turn.some((event) => {
     if (event.type !== 'tool/call' || event.name === 'persona') return false;
+    if (
+      event.name === 'calendar' &&
+      (event.args as { definition?: { kind?: string } }).definition?.kind !== 'task'
+    )
+      return false;
     const result = turn.find((item) => item.type === 'tool/result' && item.callId === event.callId);
     const effect = recordedEffect(event, result?.type === 'tool/result' ? result : undefined);
     return effect.kind === 'unknown' || effect.kind === 'mutation';

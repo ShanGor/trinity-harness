@@ -1,0 +1,2 @@
+CREATE INDEX "personal_calendar_reminder_cursor" ON "personal_calendar_items" USING btree ("status","reminder_due_at");--> statement-breakpoint
+CREATE INDEX "personal_calendar_push_due" ON "personal_calendar_reminders" USING btree ("status","push_status","push_after","due_at");

@@ -1,4 +1,6 @@
 import { registerLlmConfigurationApi } from './llm-configuration-api.js';
+import { registerCalendarApi } from './calendar-api.js';
+import type { CalendarStore } from '@trinity-harness/contracts';
 import type {
   LlmConfigurationPort,
   LlmCredentialPort,
@@ -648,6 +650,7 @@ export interface ServerDeps {
   browserPreview?: BrowserPreviewPort;
   browserInteraction?: BrowserInteractionPort;
   schedules?: ScheduleStore;
+  calendar?: CalendarStore | undefined;
   environments?: EnvironmentPort;
   environmentMaintenance?: EnvironmentMaintenancePort;
   firecrackerMaintenanceToken?: string;
@@ -1053,6 +1056,7 @@ export async function buildServer(
         reply.raw.removeListener('close', abort);
       }
     });
+  registerCalendarApi(app, deps.calendar);
   app.get('/api/schedules', async (req) =>
     scheduleListSchema.parse({
       available: !!deps.schedules && !!req.identity,

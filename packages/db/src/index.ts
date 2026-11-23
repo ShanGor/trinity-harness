@@ -18,3 +18,4 @@ export * from './environment-store.js';
 export * from './attachment-catalog.js';
 export * from './llm-configuration-store.js';
 export * from './llm-provider-operations.js';
+export * from './calendar-store.js';

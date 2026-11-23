@@ -188,7 +188,9 @@ trinity-harness/
 | `Browser Preview`          | 个人 owner 的临时只读画面；不产生模型证据或输入能力                                                                                                                        | `BrowserPreviewPort`、既有 browser access / driver / runtime                                           |
 | `Browser Interaction`      | Authenticated user-only browser frames and bounded pointer/keyboard/navigation commands; durable controller epochs, leases and at-most-once input dispatch                 | `BrowserInteractionPort`, `BrowserInteractionStore`, existing managed runtime/driver/session ports     |
 | `Workflow Scheduling`      | Opt-in PG once/daily occurrence、Work prompt outbox、Inbox outcome reconciliation                                                                                          | `ScheduleStore`、既有 session / queue ports                                                            |
+| `Personal Calendar`        | Owner-scoped commitments, Chinese lunar recurrence, reminders and authorized linked Work schedules                                                                         | `CalendarStore`, `ScheduleStore`, existing session and notification ports                              |
 | `Environment Control`      | 实验性用户 VM 容量 / 电源管理；opt-in guest Sandbox / browser routing                                                                                                      | `EnvironmentPort`、`EnvironmentStore`、`NodeRuntimePort`                                               |
+| `Memory Evolution`         | （提案，未交付）开关式独立模块：混合语义检索、分层事实与提案制巩固；见 [memory evolution plan](memory-evolution-plan.md)，交付前不形成任何运行时行为                       | `EmbeddingPort`、`SemanticRecallPort`、`FactStorePort`、`MemoryCandidatePort`（均为提案端口）          |
 
 ### 5.1.1 个人 runtime 候选模块（提案）
 
@@ -926,6 +928,36 @@ Uploads keep the original blob reference and a writable copy at `uploads/<genera
 
 ### 21.2 Durable assistant data and dispatch
 
+Personal Calendar follows [personal-calendar-design.md](personal-calendar-design.md).
+`CalendarStore` owns tenant/user-scoped, revisioned commitments, append-only change
+receipts, reminder occurrences and capture/delivery preferences. Chinese lunar dates
+use pinned `lunar-typescript` 1.8.7; preserve leap-month/day-30 rules rather than a
+converted Gregorian anniversary. Gregorian delivery hours use IANA timezones and
+the existing first-fold/skip-gap rules. The ordinary personal loop receives a
+source-journaled `calendar` tool; original user quotes and owner/capture-policy
+checks are repeated in the PG transaction. Non-task calendar calls are their own
+minimal pre-effect plan, like Persona; they grant no execution rights. Team,
+scheduled-review and delegated child turns cannot capture personal commitments.
+
+Calendar tasks reuse `assistant_schedules`, Work prompt outbox and normal approval
+checks, with a pinned source permission snapshot and linked calendar revision
+fences. Relative preparation tasks follow a related event/deadline's date and
+recorded time; changes revise their future triggers and cancellation pauses them.
+Existing run outcomes are retained. The same control-worker reconciles reminder
+cursors and inbox deliveries independently of the guest and browser. Bounded
+lookahead materializes recurring lead-time reminders; unique occurrence keys and
+PG row locks make restart/concurrent ticks recoverable. Read, snooze, dismiss,
+obligation completion and external delivery remain separate states.
+
+Optional `CalendarPushPort` delivery uses server-side VAPID credentials, exact
+configured HTTPS provider origins, bounded cancellable requests, durable backoff
+and quiet-hour deferral. Push payloads are generic, never calendar text. Missing
+credentials leave durable in-app Updates available and external push unavailable.
+No new deployment enable switch, VM cron, provider LLM client or conversation/SSE
+protocol is introduced. Migrations 0025–0027 and matching readers/writers precede
+activation. Real-model capture and real-device closed-app delivery acceptance are
+separate from deterministic implementation checks.
+
 `memory_events` is an append-only tenant/owner revision stream; explicit updates use expected revisions and idempotent operation IDs. Completed personal Chat/Work turns transactionally add source-linked `conversation_episodes`; append-only `episode_changes` retain manual topic/exclusion changes. New request context uses bounded same-session dialogue and active preferences; cross-session history expansion is model-directed through lexical recall and exact source reads. There is no semantic classifier or unconditional account-wide recent-episode injection. Correction/forgetting fences earlier policy generations; new episodes can be recalled under the current generation. Exact source expansion remains bounded and rechecks access. Team Work receives no personal memory.
 
 The delivered context selection and source expansion are detailed in [intent-execution-design.md](intent-execution-design.md) §4. Receipts include exact bounded local source ranges and explicit truncation; `recall eventId` expands authorized same-session user/final text and can deliver original image/file blocks; historical dialogue carries metadata rather than eagerly replaying media. Source exclusions and memory revisions fence both selected dialogue and actively recalled episodes before further dispatch/effects.
@@ -1133,6 +1165,10 @@ Behavioral inferences (including preferred reply language inferred from message
 language), task wording and unsupported declaration forms remain proposals. This
 is conservative source admission, not semantic truth/completeness certification;
 foreground source-backed edits and manual Markdown editing remain available.
+
+### 21.10 Memory evolution module (proposal, 2026-11-24)
+
+The [memory evolution implementation plan](memory-evolution-plan.md) proposes an independent, switchable module (`packages/memory`, ports in `contracts/memory-evolution.ts`) that strengthens recall and learning **inside** the existing provenance fences without changing the baseline: hybrid semantic episode retrieval (pgvector ∪ lexical with fused ranking), tiered facts with per-item invalidation instead of suppression-only correction, and proposal-based nightly consolidation with user adjudication. The whole module is gated by `MEMORY_EVOLUTION_ENABLED` (default false, consistent across server/agent-worker/control-worker); embedding capability degrades to the lexical baseline when `MEMORY_EMBEDDING_MODEL` is unconfigured. Turning the flag off restores current behavior with stored data dormant; all receipt/schema changes are additive. Nothing in the plan is delivered yet; an evaluation harness (Phase 0) gates every later phase. Registration in §5.1 is a candidate entry until Phase 1 ships.
 
 ### Scheduled run navigation
 

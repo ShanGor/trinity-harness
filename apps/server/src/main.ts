@@ -1,3 +1,6 @@
+import { createCalendarPush } from '@trinity-harness/core';
+import { createCalendarTool } from '@trinity-harness/core';
+import { PgCalendarStore } from '@trinity-harness/db';
 import { createPersonaTool } from '@trinity-harness/core';
 import { PgAttachmentCatalog } from '@trinity-harness/db';
 import {
@@ -212,6 +215,10 @@ async function main(): Promise<void> {
         registry.register(tool);
       }
       registry.register(createReadBlobTool(blobStore, attachmentReader, store));
+      if (calendar && auth)
+        registry.register(
+          createCalendarTool({ calendar, metas: auth.metas, store, users: auth.users }),
+        );
       if (memory && auth)
         registry.register(
           createPersonaTool({
@@ -452,6 +459,7 @@ async function main(): Promise<void> {
   let runPool: ReturnType<typeof createPool> | undefined;
   let sessionRuns: PgSessionRuns | undefined;
   let schedules: PgScheduleStore | undefined;
+  let calendar: PgCalendarStore | undefined;
   let environments: EnvironmentController | undefined;
   let promptDispatcher: PgPromptDispatcher | undefined;
   let memory: PgMemoryStore | undefined;
@@ -464,7 +472,10 @@ async function main(): Promise<void> {
     runPool = createPool(databaseUrl);
     attachmentCatalog = new PgAttachmentCatalog(db, runPool);
     sessionRuns = new PgSessionRuns(runPool);
-    if (env.SCHEDULING_ENABLED && env.REDIS_URL) schedules = new PgScheduleStore(db);
+    if (env.SCHEDULING_ENABLED && env.REDIS_URL) {
+      schedules = new PgScheduleStore(db);
+      calendar = new PgCalendarStore(db, createCalendarPush(process.env));
+    }
     if (env.FIRECRACKER_NODES.length) {
       if (!env.NODE_RUNTIME_TOKEN)
         throw new Error('NODE_RUNTIME_TOKEN required for Firecracker hosts');
@@ -643,6 +654,7 @@ async function main(): Promise<void> {
             }
           : undefined),
       schedules,
+      calendar,
       environments,
       environmentMaintenance: environments,
       firecrackerMaintenanceToken: env.FIRECRACKER_MAINTENANCE_TOKEN,

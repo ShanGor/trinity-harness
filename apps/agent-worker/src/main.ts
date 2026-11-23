@@ -1,3 +1,5 @@
+import { createCalendarTool, createCalendarPush } from '@trinity-harness/core';
+import { PgCalendarStore } from '@trinity-harness/db';
 import { createPersonaTool } from '@trinity-harness/core';
 import { PgAttachmentCatalog } from '@trinity-harness/db';
 import { AttachmentService, readAttachmentBlob } from '@trinity-harness/core';
@@ -122,6 +124,9 @@ async function main(): Promise<void> {
   });
   const metas = new PgSessionMetaStore(db);
   const memory = new PgMemoryStore(db);
+  const calendar = env.SCHEDULING_ENABLED
+    ? new PgCalendarStore(db, createCalendarPush(process.env))
+    : undefined;
   const conversationIndex = new PgConversationIndex(db);
   const personalContext = new PersonalContext(memory, conversationIndex, store);
   const browserUsers = new PgUserStore(db, new ScryptPasswordHasher());
@@ -266,6 +271,8 @@ async function main(): Promise<void> {
       registry.register(tool);
     }
     registry.register(createReadBlobTool(blobStore, attachmentReader, store));
+    if (calendar)
+      registry.register(createCalendarTool({ calendar, metas, store, users: browserUsers }));
     registry.register(createRecallTool({ memory, index: conversationIndex, metas, store }));
     registry.register(
       createPersonaTool({ memory, metas, store, users: browserUsers, index: conversationIndex }),

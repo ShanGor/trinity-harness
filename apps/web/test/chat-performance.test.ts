@@ -1,3 +1,4 @@
+import { defaultCalendarPreferences } from '@trinity-harness/shared';
 // @vitest-environment jsdom
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -83,6 +84,14 @@ vi.mock('@trinity-harness/client-acp', () => ({
     listTeams = async () => [];
     getSchedules = async () => ({ available: false, schedules: [] });
     getInbox = async () => ({ available: false, items: [] });
+    getCalendar = async () => ({
+      available: false,
+      items: [],
+      reminders: [],
+      preferences: defaultCalendarPreferences,
+      pushAvailable: false,
+      pushPublicKey: null,
+    });
     getBrowserPreview = fake.getBrowserPreview;
     getEnvironment = fake.getEnvironment;
     getLlmProfiles = async () => ({ available: false, profiles: [] });
@@ -666,6 +675,28 @@ describe('chat typing and streaming performance', () => {
     expect(container.textContent).toContain('Still running');
     expect(container.querySelector('textarea')).toBe(textarea);
     expect(textarea.value).toBe('Keep the next question');
+  });
+
+  it('returns from Calendar with the same draft, history nodes and live response', async () => {
+    await click(container.querySelector('.history-item'));
+    const textarea = container.querySelector('textarea')!;
+    const history = container.querySelector('.history-item');
+    await type(textarea, 'Keep my calendar question');
+    await click(
+      Array.from(container.querySelectorAll('.sidebar-navigation button')).find(
+        (b) => b.textContent?.trim() === 'Calendar',
+      ) ?? null,
+    );
+    expect(container.textContent).toContain('Calendar is unavailable');
+    await emit({
+      type: 'session/update',
+      update: { kind: 'agent_message_chunk', text: 'Calendar background response' },
+    });
+    await click(container.querySelector('.history-item'));
+    expect(container.querySelector('textarea')).toBe(textarea);
+    expect(container.querySelector('.history-item')).toBe(history);
+    expect(textarea.value).toBe('Keep my calendar question');
+    expect(container.textContent).toContain('Calendar background response');
   });
 
   it('puts Work setup in New and audit in the account menu', async () => {

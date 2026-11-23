@@ -1,3 +1,4 @@
+import { PersonalCalendar } from './personal-calendar';
 import { recentConversations } from './history-sidebar';
 import { workspaceLinkPath, openWorkspaceDocument } from './workspace-links';
 import { chatDateHeadings } from './chat-dates';
@@ -188,7 +189,14 @@ export default function App() {
   const [historyWidthRatio, setHistoryWidthRatio] = useState(0.18);
   const [mode, setMode] = useState<'chat' | 'work'>('chat');
   const [page, setPage] = useState<
-    'conversation' | 'tasks' | 'history' | 'memory' | 'scheduled' | 'computer' | 'audit'
+    | 'conversation'
+    | 'tasks'
+    | 'history'
+    | 'memory'
+    | 'scheduled'
+    | 'calendar'
+    | 'computer'
+    | 'audit'
   >('conversation');
   const activityBySession = useRef(
     new Map<string, { sourceSessionId: string; sourceEventId: string; kind: 'chat' | 'work' }[]>(),
@@ -234,6 +242,9 @@ export default function App() {
     approval: null as PendingApproval | null,
     staged: [] as (AttachmentView & { name: string })[],
   });
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('calendar') === '1') setPage('calendar');
+  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [speechSettingsOpen, setSpeechSettingsOpen] = useState(false);
   const [items, setItems] = useState<ChatItem[]>([]);
@@ -1564,6 +1575,14 @@ export default function App() {
           </Button>
           <Button
             type="text"
+            aria-current={page === 'calendar' ? 'page' : undefined}
+            onClick={() => setPage('calendar')}
+          >
+            <CalendarOutlined aria-hidden="true" />
+            {'Calendar'}
+          </Button>
+          <Button
+            type="text"
             aria-current={page === 'scheduled' ? 'page' : undefined}
             onClick={() => setPage('scheduled')}
           >
@@ -1900,8 +1919,21 @@ export default function App() {
             />
           )}
 
+          {page === 'calendar' && (
+            <PersonalCalendar
+              client={client}
+              sessions={sessions}
+              onOpen={switchSession}
+              onOpenScheduled={() => setPage('scheduled')}
+            />
+          )}
           {page === 'scheduled' && (
-            <ScheduledTasks client={client} sessions={sessions} onOpen={switchSession} />
+            <ScheduledTasks
+              client={client}
+              sessions={sessions}
+              onOpen={switchSession}
+              onOpenCalendar={() => setPage('calendar')}
+            />
           )}
           {page === 'computer' && (
             <PersonalComputer

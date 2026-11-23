@@ -1,3 +1,5 @@
+import { createCalendarPush } from '@trinity-harness/core';
+import { PgCalendarStore } from '@trinity-harness/db';
 import 'dotenv/config';
 import Fastify from 'fastify';
 import { z } from 'zod';
@@ -20,7 +22,9 @@ async function main(): Promise<void> {
   const controller = new AbortController();
   const app = Fastify({ logger: false });
   let lastSuccess = 0;
-  const store = new PgScheduleStore(createDb(pool));
+  const db = createDb(pool);
+  const store = new PgScheduleStore(db);
+  const calendar = new PgCalendarStore(db, createCalendarPush(process.env));
   app.get('/health', async (_req, reply) =>
     lastSuccess && Date.now() - lastSuccess < 60_000
       ? { ok: true }
@@ -30,6 +34,7 @@ async function main(): Promise<void> {
     {
       tick: async (at, signal) => {
         await store.tick(at, signal);
+        await calendar.tick(at, signal);
         lastSuccess = Date.now();
       },
     },
