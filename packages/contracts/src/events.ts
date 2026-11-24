@@ -307,7 +307,13 @@ export const sessionEventSchema = z.discriminatedUnion('type', [
     promptId: z.uuid(),
     requestId: z.uuid(),
     logicalRequestId: z.uuid(),
-    purpose: z.enum(['assistant', 'compaction', 'subagent']),
+    purpose: z.enum([
+      'assistant',
+      'compaction',
+      'subagent',
+      'memory-embedding',
+      'memory-consolidation',
+    ]),
     receipt: llmRouteReceiptSchema,
   }),
   z.object({

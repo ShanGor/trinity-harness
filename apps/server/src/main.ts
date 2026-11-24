@@ -1,3 +1,11 @@
+import {
+  EvolutionPersonalContext,
+  SemanticRecall,
+  createMemoryProposalTool,
+} from '@trinity-harness/memory';
+import { AiSdkEmbeddingGateway } from '@trinity-harness/core';
+import { PgMemoryEvolutionStore, PgEpisodeVectorStore } from '@trinity-harness/db';
+import type { PersonalContextPort, SemanticRecallPort } from '@trinity-harness/contracts';
 import { createCalendarPush } from '@trinity-harness/core';
 import { createCalendarTool } from '@trinity-harness/core';
 import { PgCalendarStore } from '@trinity-harness/db';
@@ -229,9 +237,25 @@ async function main(): Promise<void> {
             index: conversationIndex,
           }),
         );
+      if (memoryEvolution && memory && auth)
+        registry.register(
+          createMemoryProposalTool({
+            evolution: memoryEvolution,
+            memory,
+            metas: auth.metas,
+            users: auth.users,
+          }),
+        );
       if (memory && conversationIndex && auth)
         registry.register(
-          createRecallTool({ memory, index: conversationIndex, metas: auth.metas, store }),
+          createRecallTool({
+            memory,
+            index: conversationIndex,
+            metas: auth.metas,
+            store,
+            evolution: memoryEvolution,
+            semantic: semanticRecall,
+          }),
         );
       if (sessionLsp) {
         for (const tool of createLspTools(sessionLsp)) {
@@ -464,7 +488,9 @@ async function main(): Promise<void> {
   let promptDispatcher: PgPromptDispatcher | undefined;
   let memory: PgMemoryStore | undefined;
   let conversationIndex: PgConversationIndex | undefined;
-  let personalContext: PersonalContext | undefined;
+  let personalContext: PersonalContextPort | undefined;
+  let memoryEvolution: PgMemoryEvolutionStore | undefined;
+  let semanticRecall: SemanticRecallPort | undefined;
 
   if (databaseUrl) {
     const pool = createPool(databaseUrl);
@@ -580,6 +606,31 @@ async function main(): Promise<void> {
       teams,
       llmOperations,
     );
+    if (env.MEMORY_EVOLUTION_ENABLED) {
+      memoryEvolution = new PgMemoryEvolutionStore(db);
+      personalContext = new EvolutionPersonalContext(
+        new PersonalContext(memory, conversationIndex, store, memoryEvolution),
+        memoryEvolution,
+        store,
+      );
+      const embedding = env.MEMORY_EMBEDDING_MODEL
+        ? new AiSdkEmbeddingGateway(env.MEMORY_EMBEDDING_MODEL, {
+            configuration: llmConfiguration,
+            credentials: providerCredentials,
+            policy: providerPolicy,
+            store,
+            metas,
+            usage: usage!,
+            users,
+            pricing: env.modelPricing,
+          })
+        : undefined;
+      semanticRecall = new SemanticRecall(
+        conversationIndex!,
+        embedding ? new PgEpisodeVectorStore(db) : undefined,
+        embedding,
+      );
+    }
     auth = { tokens: new HmacTokenService(env.TOKEN_SECRET), users, metas, hasher };
   } else if (env.REDIS_URL) {
     throw new Error('REDIS_URL requires DATABASE_URL (distributed mode needs the PG event log)');
@@ -595,6 +646,7 @@ async function main(): Promise<void> {
       llmCredentials: providerCredentials,
       llmEndpointPolicy: providerPolicy,
       memory,
+      memoryEvolution,
       sessionRuns,
       conversationIndex,
       workspaceRoot: env.WORKSPACE_ROOT,

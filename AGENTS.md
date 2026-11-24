@@ -49,7 +49,7 @@ The linked documents contain detailed invariants, deployment steps and acceptanc
 | Usage and pricing                                           | [usage-accounting.md](docs/usage-accounting.md), design §17                                                                                                                                                                   |
 | Account roles, LLM configuration and outage routing         | [refactor-as-personal-assistant.md](docs/refactor-as-personal-assistant.md) §14, [improvement-plan-2026-11-17.md](docs/improvement-plan-2026-11-17.md), design §5.4/§12.1; [operations](docs/llm-configuration-operations.md) |
 | Deployment, event delivery and latency diagnostics          | [deployment-guide.md](docs/deployment-guide.md), design §21.5                                                                                                                                                                 |
-| Memory evolution (semantic recall, facts, consolidation)    | [memory-evolution-plan.md](docs/memory-evolution-plan.md) (proposal; not delivered), design §21.10                                                                                                                            |
+| Memory evolution (semantic recall, facts, consolidation)    | [memory-evolution-plan.md](docs/memory-evolution-plan.md) (opt-in mechanisms; semantic/deployment gates remain open), design §21.10                                                                                           |
 
 ### Intent and execution
 
@@ -195,3 +195,19 @@ Applied content must survive replay/compaction; completed and interrupted contex
 uses bounded original source excerpts. Do not repurpose phone `PromptDelivery`,
 retry uncertain effects, or imply immediate interruption of running tools. See
 [Steering specification](docs/in-flight-steering-gap-analysis.md#9-implementation-specification-and-delivered-scope).
+
+### Memory Evolution
+
+`packages/memory` depends only on contracts; assemble its ports in app roots. Keep
+`MEMORY_EVOLUTION_ENABLED` consistent across server/agent-worker/control-worker and
+default false. Off restores baseline behavior without deleting evolution data.
+Embedding is an explicit provider data flow through the existing SDK/credentials,
+egress/quota/usage infrastructure; no configured model means lexical recall.
+Preserve transactionally rechecked source/occurrence/call provenance, candidate
+owner adjudication, active-memory revision fences and append-only journals. Candidate
+submission never activates memory or grants permissions. Fact correction is atomic
+invalidate+create and does not change episode suppression behavior. Reviewed
+playbooks remain reference only. Keep v2/v3 receipt replay and complete tool pairs.
+Do not claim fake-vector evaluation establishes real-provider quality or enable
+automatic injection/merging without their separate semantic/poisoning gates. See
+[recorded evaluation](docs/memory-evaluation-results.md).

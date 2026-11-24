@@ -5,6 +5,35 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Memory Evolution — 2026-11-24
+
+- Implemented independent `packages/memory` and Zod contracts, additive migration
+  0028, PG vectors/claims and fact/candidate/playbook projections with immutable
+  journals; wired strict default-off configuration in all three composition roots.
+- Hybrid recall fuses owner-filtered lexical/vector candidates with RRF/time decay;
+  unset/failed embedding returns the baseline lexical page. SDK embedding follows
+  tenant credential/egress/quota/usage infrastructure and foreground task budgets.
+- Archival facts support source-backed creation, per-fact invalidation and atomic
+  correction without changing the Persona or historical episode suppression floor.
+  Scheduled candidates require exact recalled source/occurrence/call provenance;
+  owner acceptance commits memory and decision atomically. Playbooks also require
+  review and grant no execution authority. Existing explicit memory grammar stays.
+- Added Suggestions, fact timeline/replacement comparison, source inspection,
+  invalidation, search and reviewed playbooks to Memory settings; independent state
+  preserves unsaved Persona drafts. No automatic fact injection or merging exists.
+- Generated/reviewed migration 0028 and applied it to a disposable PostgreSQL 16 +
+  pgvector container. The current configured database migration failed without a
+  diagnostic; no running service was upgraded or feature enabled. Source readers
+  must deploy before v3 writers, with consistent three-service configuration.
+- Final verification: 1,980 tests passed and 45 optional/gated tests skipped with
+  isolated PG/Redis; lint, typecheck, formatting and Web production build passed.
+  Browser fixture acceptance preserved the Persona draft; slow embedding cannot
+  block scheduling, and cancellation drains both loops before PG disposal.
+- PostgreSQL ILIKE synthetic retrieval baseline: 3/6. Gold fake-vector mechanism:
+  6/6; this is not measured real semantic quality. Real-provider runner is opt-in,
+  requires an empty disposable database and emits counts only. See
+  [evaluation evidence and open gates](memory-evaluation-results.md).
+
 ### Personal calendar and Chinese lunar dates — 2026-11-24
 
 - Saved the approved requirements in [personal-calendar-design.md](personal-calendar-design.md).

@@ -1,3 +1,5 @@
+import { registerMemoryEvolutionApi } from './memory-evolution-api.js';
+import type { MemoryEvolutionStorePort } from '@trinity-harness/contracts';
 import { registerLlmConfigurationApi } from './llm-configuration-api.js';
 import { registerCalendarApi } from './calendar-api.js';
 import type { CalendarStore } from '@trinity-harness/contracts';
@@ -656,6 +658,7 @@ export interface ServerDeps {
   firecrackerMaintenanceToken?: string;
   sessionRuns?: SessionRunPort | undefined;
   memory?: MemoryStorePort | undefined;
+  memoryEvolution?: MemoryEvolutionStorePort | undefined;
   conversationIndex?: ConversationIndexPort | undefined;
   store: SessionStore;
   workspaceRoot: string;
@@ -1788,6 +1791,7 @@ export async function buildServer(
     }
   }
 
+  registerMemoryEvolutionApi(app, { evolution: deps.memoryEvolution, memory: deps.memory });
   app.get('/api/persona/history', async (req, reply) => {
     if (!req.identity || !deps.memory?.personaHistory)
       return reply.code(503).send({ error: 'Persona history unavailable' });

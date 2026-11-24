@@ -59,3 +59,8 @@ data:
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.otelExporterOtlpEndpoint | quote }}
   OTEL_PROMETHEUS_PORT: {{ .Values.config.otelPrometheusPort | quote }}
   ACP_SERVER_URL: {{ .Values.acpGateway.acpServerUrl | quote }}
+
+  MEMORY_EVOLUTION_ENABLED: {{ .Values.config.memoryEvolutionEnabled | quote }}
+  {{- if .Values.config.memoryEmbeddingModel }}
+  MEMORY_EMBEDDING_MODEL: {{ .Values.config.memoryEmbeddingModel | quote }}
+  {{- end }}

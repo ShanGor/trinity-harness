@@ -1,3 +1,4 @@
+import { MemoryEvolution } from './memory-evolution';
 import { readHistoryTimezone, saveHistoryTimezone, validTimezone } from './history-timezone';
 import { useCallback, useEffect, useState, type ReactElement } from 'react';
 import {
@@ -235,6 +236,7 @@ export function AssistantMemory({
         Clearing Persona removes it from future context. Original conversations and revision history
         remain retained; exclude source conversations in History to prevent historical recall.
       </Typography.Paragraph>
+      <MemoryEvolution client={client} />
     </section>
   );
 }
@@ -510,7 +512,7 @@ export function MemoryContextDisclosure({ receipt }: { receipt: RecallReceipt })
       items={[
         {
           key: 'memory',
-          label: `Memory context · ${receipt.memories.length} saved · ${receipt.episodes.length} episodes`,
+          label: `Memory context · ${receipt.memories.length} saved · ${receipt.episodes.length} episodes${receipt.facts?.length ? ` · ${receipt.facts.length} archival facts` : ''}${receipt.playbooks?.length ? ` · ${receipt.playbooks.length} playbooks` : ''}`,
           children: (
             <>
               {receipt.persona && (
@@ -536,6 +538,32 @@ export function MemoryContextDisclosure({ receipt }: { receipt: RecallReceipt })
                   </List.Item>
                 )}
               />
+              {receipt.recallMode === 'hybrid' && (
+                <Typography.Paragraph type="secondary">
+                  Semantic and keyword episode recall
+                </Typography.Paragraph>
+              )}
+              {receipt.facts?.map((fact) => (
+                <details key={fact.factId}>
+                  <summary>
+                    {fact.text} · revision {fact.revision}
+                  </summary>
+                  <Typography.Paragraph>
+                    Original source: {fact.source.sourceQuote}
+                  </Typography.Paragraph>
+                </details>
+              ))}
+              {receipt.playbooks?.map((book) => (
+                <details key={book.playbookId}>
+                  <summary>{book.taskType} · reference only</summary>
+                  <Typography.Paragraph>{book.approach}</Typography.Paragraph>
+                  {book.sources.map((source, i) => (
+                    <Typography.Paragraph key={i}>
+                      Original source: {source.sourceQuote}
+                    </Typography.Paragraph>
+                  ))}
+                </details>
+              ))}
               {receipt.episodes.map((episode) => (
                 <details key={episode.episodeId}>
                   <summary>

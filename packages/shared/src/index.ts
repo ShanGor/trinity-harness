@@ -183,3 +183,20 @@ export type {
   CalendarPushSubscription,
   CalendarOccurrence,
 } from '@trinity-harness/contracts';
+
+export {
+  memoryEvolutionResponseSchema,
+  candidateDecisionSchema,
+  factInvalidationSchema,
+  memoryEvolutionPageSchema,
+} from '@trinity-harness/contracts';
+export type {
+  MemoryEvolutionResponse,
+  MemoryEvolutionPage,
+  CandidateDecision,
+  FactInvalidation,
+  EvolutionPageQuery,
+  MemoryFact,
+  MemoryCandidate,
+  Playbook,
+} from '@trinity-harness/contracts';

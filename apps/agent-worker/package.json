@@ -24,6 +24,7 @@
     "@trinity-harness/shared": "*",
     "dotenv": "^18.0.4",
     "tsx": "^4.23.15",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "@trinity-harness/memory": "*"
   }
 }

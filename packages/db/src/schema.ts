@@ -1,8 +1,11 @@
 import { sql } from 'drizzle-orm';
+import { z } from 'zod';
 import {
   bigint,
   boolean,
   check,
+  customType,
+  integer,
   index,
   jsonb,
   pgTable,
@@ -623,4 +626,81 @@ export const llmHealthObservations = pgTable(
     requestId: uuid('request_id').notNull(),
   },
   (t) => [primaryKey({ columns: [t.tenantId, t.requestId] })],
+);
+
+/** Memory evolution projections are dormant when the deployment switch is off. */
+export const memoryEvolutionOwners = pgTable(
+  'memory_evolution_owners',
+  {
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.tenantId, t.userId] })],
+);
+function evolutionProjection(name: string) {
+  return pgTable(
+    name,
+    {
+      tenantId: uuid('tenant_id').notNull(),
+      userId: uuid('user_id').notNull(),
+      id: uuid('id').notNull(),
+      revision: bigint('revision', { mode: 'number' }).notNull(),
+      payload: jsonb('payload').notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.tenantId, t.userId, t.id] }),
+      index(`${name}_owner_revision`).on(t.tenantId, t.userId, t.revision),
+    ],
+  );
+}
+function evolutionEvents(name: string) {
+  return pgTable(
+    name,
+    {
+      tenantId: uuid('tenant_id').notNull(),
+      userId: uuid('user_id').notNull(),
+      revision: bigint('revision', { mode: 'number' }).notNull(),
+      operationId: uuid('operation_id').notNull(),
+      payload: jsonb('payload').notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.tenantId, t.userId, t.revision] }),
+      uniqueIndex(`${name}_operation`).on(t.tenantId, t.userId, t.operationId),
+    ],
+  );
+}
+export const memoryFacts = evolutionProjection('memory_facts');
+export const memoryFactEvents = evolutionEvents('memory_fact_events');
+export const memoryCandidates = evolutionProjection('memory_candidates');
+export const memoryCandidateEvents = evolutionEvents('memory_candidate_events');
+export const memoryPlaybooks = evolutionProjection('memory_playbooks');
+export const memoryPlaybookEvents = evolutionEvents('memory_playbook_events');
+
+const memoryVector = customType<{ data: number[]; driverData: string }>({
+  dataType: () => 'vector',
+  toDriver: (value) => `[${value.join(',')}]`,
+  fromDriver: (value) => z.array(z.number().finite()).min(1).max(16000).parse(JSON.parse(value)),
+});
+export const episodeEmbeddings = pgTable(
+  'episode_embeddings',
+  {
+    episodeId: uuid('episode_id').notNull(),
+    embeddingModel: text('embedding_model').notNull(),
+    tenantId: uuid('tenant_id').notNull(),
+    userId: uuid('user_id').notNull(),
+    contentSha256: text('content_sha256').notNull(),
+    policyRevision: bigint('policy_revision', { mode: 'number' }).notNull(),
+    embedding: memoryVector('embedding'),
+    dimensions: integer('dimensions'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.episodeId, t.embeddingModel] }),
+    index('episode_embeddings_owner_model').on(t.tenantId, t.userId, t.embeddingModel),
+  ],
 );

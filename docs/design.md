@@ -90,6 +90,7 @@ trinity-harness/
 │   └── acp-gateway/            # ACP 协议网关（stdio ↔ /acp HTTP binding，M3，官方 SDK）
 ├── packages/
 │   ├── contracts/              # ★ 全局接口契约（所有模块边界的唯一定义处）
+│   ├── memory/                 # Opt-in memory evolution: hybrid recall and reviewed archival memory
 │   ├── core/                   # 模块实现：loop、tools、session、llm、auth（token/password）…
 │   ├── redis/                  # Redis 适配层（EventBus/Stream/PubSub/BullMQ，M2）
 │   ├── otel/                   # OTel SDK 引导层（OTLP/Prometheus 导出，M5）
@@ -190,7 +191,7 @@ trinity-harness/
 | `Workflow Scheduling`      | Opt-in PG once/daily occurrence、Work prompt outbox、Inbox outcome reconciliation                                                                                          | `ScheduleStore`、既有 session / queue ports                                                            |
 | `Personal Calendar`        | Owner-scoped commitments, Chinese lunar recurrence, reminders and authorized linked Work schedules                                                                         | `CalendarStore`, `ScheduleStore`, existing session and notification ports                              |
 | `Environment Control`      | 实验性用户 VM 容量 / 电源管理；opt-in guest Sandbox / browser routing                                                                                                      | `EnvironmentPort`、`EnvironmentStore`、`NodeRuntimePort`                                               |
-| `Memory Evolution`         | （提案，未交付）开关式独立模块：混合语义检索、分层事实与提案制巩固；见 [memory evolution plan](memory-evolution-plan.md)，交付前不形成任何运行时行为                       | `EmbeddingPort`、`SemanticRecallPort`、`FactStorePort`、`MemoryCandidatePort`（均为提案端口）          |
+| `Memory Evolution`         | 默认关闭的独立模块：混合召回、分层事实、来源候选与用户裁决；源码机制已实现，语义与部署门槛见 [memory evolution plan](memory-evolution-plan.md)                             | `EmbeddingPort`、`SemanticRecallPort`、`FactStorePort`、`MemoryCandidatePort`、`PlaybookStorePort`     |
 
 ### 5.1.1 个人 runtime 候选模块（提案）
 
@@ -1166,9 +1167,52 @@ language), task wording and unsupported declaration forms remain proposals. This
 is conservative source admission, not semantic truth/completeness certification;
 foreground source-backed edits and manual Markdown editing remain available.
 
-### 21.10 Memory evolution module (proposal, 2026-11-24)
+### 21.10 Memory evolution module (opt-in mechanisms, 2026-11-24)
 
-The [memory evolution implementation plan](memory-evolution-plan.md) proposes an independent, switchable module (`packages/memory`, ports in `contracts/memory-evolution.ts`) that strengthens recall and learning **inside** the existing provenance fences without changing the baseline: hybrid semantic episode retrieval (pgvector ∪ lexical with fused ranking), tiered facts with per-item invalidation instead of suppression-only correction, and proposal-based nightly consolidation with user adjudication. The whole module is gated by `MEMORY_EVOLUTION_ENABLED` (default false, consistent across server/agent-worker/control-worker); embedding capability degrades to the lexical baseline when `MEMORY_EMBEDDING_MODEL` is unconfigured. Turning the flag off restores current behavior with stored data dormant; all receipt/schema changes are additive. Nothing in the plan is delivered yet; an evaluation harness (Phase 0) gates every later phase. Registration in §5.1 is a candidate entry until Phase 1 ships.
+The independent `packages/memory` module depends only on contracts and is assembled
+in server/agent-worker/control-worker roots. `MEMORY_EVOLUTION_ENABLED=false` keeps
+baseline ILIKE, Persona, explicit command grammar and nightly behavior; stored
+vectors/facts/candidates/playbooks remain dormant. The three services parse one
+shared strict env shape. `MEMORY_EMBEDDING_MODEL` supplies capability without a
+second switch. No configuration or provider failure broadens recall permissions.
+
+Migration 0028 adds variable-dimension pgvector projections, persistent bounded
+embedding claims, owner CAS state and separate fact/candidate/playbook projections
+and append-only journals. Control-worker derives vectors asynchronously, with source
+revalidation immediately before SDK dispatch, five-minute leases and at most three
+attempts. Its independently cancellable reconciliation loop never blocks schedule/calendar ticks and drains before PG closes. Foreground query embedding uses the current task budget; all embedding
+uses tenant credentials, constrained transport, quotas and `model/usage` snapshots.
+Database-activated providers never fall back to environment credentials. Unset or
+failed embedding returns the exact lexical page. Successful results fuse authorized
+lexical/vector candidates with RRF k=60 and a 90-day half-life. Ranking materializes
+eligible candidates first and uses exact cosine search; the 1536-D partial HNSW
+index is reserved, not a claim of accelerated or scale-accepted retrieval.
+
+Persona remains Core; archival facts and reviewed playbooks enter model context
+only through typed recall. Corrections atomically invalidate/create facts without
+raising episode suppression floors. Current source/exclusion/removal/policy and
+active-memory revisions are rechecked before later model calls. After successful
+recall pairs, additive v3 selection receipts record hybrid mode and exact delivered
+facts; v2/v3 logs replay together. Evolution-store failure affects a model request
+only when it uses evolution memory. Complete legacy tool pairs and historical
+records remain immutable.
+
+Scheduled memory consolidation may use `memory_propose` to submit exact-source
+fact/correction/playbook candidates. Admission requires original unquoted owner
+statements, current recalled ranges, occurrence and call journals, auto-save and
+revision fences. Candidates never activate automatically. Owner-only Memory settings
+accept/reject candidates, inspect source-backed fact timelines and replacement
+comparisons, invalidate facts and search reviewed playbooks. Accepting a correction
+commits its retirement, replacement and decision together. Playbooks are reference
+only and grant no execution rights. Review-only schedules retain baseline behavior.
+
+[The implementation plan](memory-evolution-plan.md) and [evaluation results](memory-evaluation-results.md)
+record actual mechanisms and remaining gates. Deterministic fake-vector scores do
+not establish real semantic quality. Real-provider retrieval/poisoning, consenting
+account acceptance rates, deployment and performance acceptance remain open.
+Automatic fact injection and sleep-time merging remain unevaluated, unimplemented
+experiments. Matching readers must precede writers; production rollout is not
+implied by this checkout.
 
 ### Scheduled run navigation
 

@@ -27,7 +27,8 @@
     "@trinity-harness/shared": "*",
     "fastify": "^5.12.5",
     "ws": "^8.22.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "@trinity-harness/memory": "*"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1",

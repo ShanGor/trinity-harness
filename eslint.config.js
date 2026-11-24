@@ -27,6 +27,16 @@ export default tseslint.config(
         {
           zones: [
             {
+              target: './packages/memory',
+              from: ['./packages/core', './packages/db', './packages/shared'],
+              message: 'Memory Evolution depends only on contracts; assemble adapters in apps.',
+            },
+            {
+              target: './packages/contracts',
+              from: './packages/memory',
+              message: 'contracts must not import implementation packages (AGENTS.md §3.1)',
+            },
+            {
               // packages/contracts must not import implementation packages.
               target: './packages/contracts',
               from: './packages/db',

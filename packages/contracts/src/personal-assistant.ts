@@ -1,3 +1,4 @@
+import { memoryFactSchema, playbookSchema } from './memory-evolution.js';
 import { z } from 'zod';
 import type { Identity, SessionMeta } from './identity.js';
 import type { ConversationMessage } from './llm.js';
@@ -161,7 +162,12 @@ export interface ConversationIndexPort {
   ): Promise<void>;
 }
 export const recallReceiptSchema = z.object({
-  version: z.literal(2).optional(),
+  version: z.union([z.literal(2), z.literal(3)]).optional(),
+  recallMode: z.enum(['lexical', 'hybrid']).optional(),
+  evolutionRevision: z.number().int().nonnegative().optional(),
+  facts: z.array(memoryFactSchema).max(50).optional(),
+  playbooks: z.array(playbookSchema).max(50).optional(),
+  candidatesDelivered: z.array(z.uuid()).max(50).optional(),
   query: z.string().max(200).optional(),
   dialogue: z
     .array(
@@ -208,6 +214,10 @@ export const recallReceiptSchema = z.object({
 });
 export type RecallReceipt = z.infer<typeof recallReceiptSchema>;
 export const recallResultSchema = z.object({
+  evolutionRevision: z.number().int().nonnegative().optional(),
+  recallMode: z.enum(['lexical', 'hybrid']).optional(),
+  facts: z.array(memoryFactSchema).max(50).optional(),
+  playbooks: z.array(playbookSchema).max(50).optional(),
   attachmentsOmitted: z.boolean().optional(),
   policyRevision: z.number().int().nonnegative(),
   episodes: z.array(topicEpisodeSchema).max(10).optional(),
@@ -224,6 +234,7 @@ export const recallResultSchema = z.object({
     .optional(),
 });
 export interface PersonalContextPort {
+  observeRecall?(receipt: RecallReceipt, results: readonly unknown[]): RecallReceipt;
   validate?(meta: SessionMeta, receipt: RecallReceipt, signal?: AbortSignal): Promise<void>;
   select(
     meta: SessionMeta,

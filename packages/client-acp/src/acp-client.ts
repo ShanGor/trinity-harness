@@ -1,4 +1,13 @@
 import {
+  memoryEvolutionResponseSchema,
+  candidateDecisionSchema,
+  factInvalidationSchema,
+  type MemoryEvolutionResponse,
+  type CandidateDecision,
+  type FactInvalidation,
+  type EvolutionPageQuery,
+} from '@trinity-harness/shared';
+import {
   calendarSnapshotSchema,
   calendarRecordSchema,
   calendarPreferencesSchema,
@@ -650,6 +659,33 @@ export class AcpClient {
   }
   async changeMemory(command: MemoryCommand): Promise<void> {
     await this.assistantRequest('/api/memory', 'POST', command);
+  }
+  async getMemoryEvolution(
+    view: 'facts' | 'candidates' | 'playbooks' = 'facts',
+    query: Partial<EvolutionPageQuery> = {},
+  ): Promise<MemoryEvolutionResponse> {
+    const params = new URLSearchParams(
+      Object.entries({ ...query, view })
+        .filter(([, value]) => value !== undefined)
+        .map(([key, value]) => [key, String(value)]),
+    );
+    return memoryEvolutionResponseSchema.parse(
+      await this.assistantRequest(`/api/memory/evolution?${params}`),
+    );
+  }
+  async decideMemoryCandidate(command: CandidateDecision): Promise<void> {
+    await this.assistantRequest(
+      '/api/memory/evolution/candidates/decide',
+      'POST',
+      candidateDecisionSchema.parse(command),
+    );
+  }
+  async invalidateMemoryFact(command: FactInvalidation): Promise<void> {
+    await this.assistantRequest(
+      '/api/memory/evolution/facts/invalidate',
+      'POST',
+      factInvalidationSchema.parse(command),
+    );
   }
   async getHistory(query: Partial<HistoryQuery> = {}): Promise<HistoryPage> {
     const params = new URLSearchParams(

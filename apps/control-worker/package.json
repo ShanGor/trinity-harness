@@ -15,6 +15,7 @@
     "fastify": "^5.12.5",
     "tsx": "^4.23.15",
     "zod": "^4.6.5",
-    "@trinity-harness/core": "*"
+    "@trinity-harness/core": "*",
+    "@trinity-harness/memory": "*"
   }
 }

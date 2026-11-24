@@ -1,3 +1,11 @@
+import {
+  EvolutionPersonalContext,
+  SemanticRecall,
+  createMemoryProposalTool,
+} from '@trinity-harness/memory';
+import { AiSdkEmbeddingGateway } from '@trinity-harness/core';
+import { PgMemoryEvolutionStore, PgEpisodeVectorStore } from '@trinity-harness/db';
+import type { PersonalContextPort, SemanticRecallPort } from '@trinity-harness/contracts';
 import { createCalendarTool, createCalendarPush } from '@trinity-harness/core';
 import { PgCalendarStore } from '@trinity-harness/db';
 import { createPersonaTool } from '@trinity-harness/core';
@@ -128,7 +136,15 @@ async function main(): Promise<void> {
     ? new PgCalendarStore(db, createCalendarPush(process.env))
     : undefined;
   const conversationIndex = new PgConversationIndex(db);
-  const personalContext = new PersonalContext(memory, conversationIndex, store);
+  let personalContext: PersonalContextPort = new PersonalContext(memory, conversationIndex, store);
+  const memoryEvolution = env.MEMORY_EVOLUTION_ENABLED ? new PgMemoryEvolutionStore(db) : undefined;
+  let semanticRecall: SemanticRecallPort | undefined;
+  if (memoryEvolution)
+    personalContext = new EvolutionPersonalContext(
+      new PersonalContext(memory, conversationIndex, store, memoryEvolution),
+      memoryEvolution,
+      store,
+    );
   const browserUsers = new PgUserStore(db, new ScryptPasswordHasher());
   // M5: token metering — the loop records usage and gates model calls on the
   // tenant quota before every request (docs/design.md §17).
@@ -273,7 +289,25 @@ async function main(): Promise<void> {
     registry.register(createReadBlobTool(blobStore, attachmentReader, store));
     if (calendar)
       registry.register(createCalendarTool({ calendar, metas, store, users: browserUsers }));
-    registry.register(createRecallTool({ memory, index: conversationIndex, metas, store }));
+    registry.register(
+      createRecallTool({
+        memory,
+        index: conversationIndex,
+        metas,
+        store,
+        evolution: memoryEvolution,
+        semantic: semanticRecall,
+      }),
+    );
+    if (memoryEvolution)
+      registry.register(
+        createMemoryProposalTool({
+          evolution: memoryEvolution,
+          memory,
+          metas,
+          users: browserUsers,
+        }),
+      );
     registry.register(
       createPersonaTool({ memory, metas, store, users: browserUsers, index: conversationIndex }),
     );
@@ -379,6 +413,25 @@ async function main(): Promise<void> {
     new PgTeamStore(db),
     llmOperations,
   );
+  if (memoryEvolution) {
+    const embedding = env.MEMORY_EMBEDDING_MODEL
+      ? new AiSdkEmbeddingGateway(env.MEMORY_EMBEDDING_MODEL, {
+          configuration: llmConfiguration,
+          credentials: providerCredentials,
+          policy: providerPolicy,
+          store,
+          metas,
+          usage,
+          users: browserUsers,
+          pricing: env.modelPricing,
+        })
+      : undefined;
+    semanticRecall = new SemanticRecall(
+      conversationIndex,
+      embedding ? new PgEpisodeVectorStore(db) : undefined,
+      embedding,
+    );
+  }
   const llm = new AiSdkGateway(undefined, {
     providerFetch: providerPolicy.fetch,
     reasoningBudgetTokens: env.REASONING_BUDGET_TOKENS,

@@ -88,3 +88,16 @@ cache reads, retrieval calls and output. Reusable source-character/prefix estima
 are diagnostic only and must never be counted as actual cache hits or billed tokens.
 Absent provider cache detail or price stays unavailable. The default remains off
 pending [provider evaluation](main-chat-context-plan.md#cost-and-latency-criteria).
+
+## Memory Evolution usage
+
+When the opt-in memory module is enabled, query and background embeddings emit
+`model/usage` with purpose `memory-embedding`; scheduled extraction through the
+ordinary Agent loop uses `memory-consolidation`. Embedding input is reported from
+the SDK, output is zero, and absent catalog prices remain unavailable. The selected
+price snapshot is immutable. Foreground query embeddings reserve the current task
+request/token/cost budget; background work uses tenant quota checks, bounded claims,
+attempts and cancellation rather than reopening a completed source task's budget.
+Credential/configuration failures never enable environment fallback after database
+activation. This is an additional explicitly configured provider data flow, not a
+free local computation. Real-provider/accounting acceptance remains a rollout gate.

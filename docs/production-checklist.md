@@ -4,6 +4,26 @@
 > Walk top to bottom before declaring a release ready; record evidence
 > (command output / screenshot) next to each item.
 
+## Memory Evolution (default off)
+
+- [x] Independent contracts/module, default-off wiring, v2/v3 receipt readers,
+      source-bound candidates, atomic fact corrections and owner adjudication UI.
+- [x] Migration 0028 applied in disposable PostgreSQL 16 + pgvector; deterministic
+      provenance, exclusion/removal, CAS/idempotency, rollback and SDK transport tests.
+- [ ] Provision pgvector and apply 0028 to the intended deployment. Deploy readers
+      before writers and match server/agent-worker/control-worker configuration.
+- [ ] Run `scripts/evaluate-memory.sh` with an explicitly selected provider on an
+      empty disposable database. Record retrieval correctness separately from answer
+      quality; fake gold vectors do not satisfy this gate.
+- [ ] Measure cross-language/paraphrase/temporal quality, negative recall, candidate
+      acceptance and false positives on consenting accounts; check poisoning and
+      source revocation against the configured real model.
+- [ ] Accept deployed Memory governance and background reconciliation, foreground
+      task budgets, usage/pricing and rollback to dormant data. Establish realistic
+      latency at scale; current ranking is exact over materialized eligible rows.
+- [ ] Automatic fact injection and sleep-time merging require independent evaluation
+      and implementation. They are not delivered or enabled by the deployment flag.
+
 ## Text and source attachments
 
 - [x] Local deterministic coverage verifies source/text recognition, normalized composer uploads, exact original/workspace bytes, invalid UTF-8 rejection and ACP text exclusion from provider media.

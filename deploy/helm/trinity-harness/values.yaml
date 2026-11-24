@@ -135,6 +135,8 @@ config:
   taskMaxTokens: null
   taskMaxDurationMs: null
   taskMaxCost: '' # Optional currency ceiling, e.g. USD:1.50; never model rates.
+  memoryEvolutionEnabled: false # Apply migration 0028 and deploy matching readers/writers first.
+  memoryEmbeddingModel: '' # Configured OpenAI-compatible provider/model; empty retains lexical recall.
   contextSegmentsEnabled: false # Opt-in after compatible readers and provider evaluation.
   contextMaxTokens: 160000
   contextKeepTokens: 40000

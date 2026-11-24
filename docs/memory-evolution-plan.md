@@ -1,8 +1,28 @@
-# Memory Evolution 实施计划（2026-11-24，提案）
+# Memory Evolution 实施计划（2026-11-24）
 
-> 状态：**提案，未交付**。本文定义独立 Memory Evolution 模块的目标、边界、分阶段实施与验收门槛。
+> 状态：**源码机制已实现，默认关闭；真实 provider、部署与语义验收尚未完成**。本文保留分阶段目标与门槛；实际验证见 [memory-evaluation-results.md](memory-evaluation-results.md)。
 > 前置阅读：design §21.7/§21.8/§21.9（Persona、记忆自动化、nightly review）、[refactor-as-personal-assistant.md](refactor-as-personal-assistant.md) §6。
-> 本文不代表任何已交付能力；各阶段交付后须同步更新 [project-progress.md](project-progress.md) 与本文状态。
+> 源码实现不等于生产交付；各阶段验收后须同步更新 [project-progress.md](project-progress.md) 与本文状态。
+
+## 当前实现与边界
+
+- P0：已建立六题合成检索 harness，实际 PostgreSQL ILIKE 基线为 3/6；fake 向量融合为 6/6，仅证明机制。提供显式 opt-in 真实 provider runner。
+- P1：独立 `packages/memory`、contracts、SDK embedding gateway、异步 control-worker、持久 claim/retry、pgvector 存储、RRF/90 天半衰期与收据 v3 已接线。未配置/失败保留原词法结果和分页。
+- P2：facts/append-only events、owner CAS、来源重审、原子 invalidate+create、历史与 recall type=facts 已实现。Persona 和显式语法沿用基线，不自动注入 facts。
+- P3：`memory_propose` 仅在授权 memory consolidation 中提交带来源候选；Suggestions 用户接受/拒绝，接受事务创建 fact。候选绝不自动生效。
+- P4：playbook 同样先作为候选，经用户接受后才经 recall type=playbooks 提供；实现事实时间线、替换前后比较、失效、搜索和分层视图。自动注入与自动重组仍是未通过 eval 的实验目标，未实现/未开启。
+
+具体实现选择：
+
+1. 事实/候选/playbook 共享 owner CAS 序号；仅 active fact/playbook 事件推进模型上下文围栏。提交未生效候选不会打断 nightly turn。成功 recall 的完整工具对之后追加 v3 selection 诊断/事实快照，并在下一次 dispatch 前重审；未使用 archival memory 时适配器故障不影响基线。
+2. 为覆盖模型维度切换，使用无固定维度的 `vector` 列和 dimensions/model 字段。迁移提供 1536 维 partial HNSW 索引；当前查询先物化已授权候选集，再做精确 cosine 排序，**不宣称使用 HNSW 加速**。其他维度也精确检索。大规模性能与更进一步的围栏内索引优化仍需独立验收。
+3. embedding claims 持久保存五分钟 lease 和至多三次尝试；一次失败不阻断同批其他来源；独立可取消循环不阻塞调度/calendar tick，退出时先 drain 再关闭 PG。成功发布的同 hash/model 不重嵌；进程在 provider 返回后、投影提交前崩溃时，未持久化结果可能在 lease 过期后重算，不声称跨外部 provider 的 exactly-once。
+4. 所有模型调用仍经 gateway/配额/usage；前台 query embedding 额外占用当前 task request/token 预算，后台重建受批次、租约、重试、取消和 provider 超时约束。嵌入不会记录明文凭据。
+5. 关闭开关不装配新工具、适配器或 selection writer，数据休眠。已使用 archival 内容的未完成回合在继续 dispatch 前失败关闭，需用新请求进入基线。三端使用同一个 contracts env shape；Helm/Podman 必须一致部署，不能混跑相反设置的 writer。
+
+事实的 validFrom/validTo 记录记忆创建/裁决与失效时间，不从正文猜测现实世界的生效日期。带日期的原文和历史版本均保留；更精细的事实有效时间推理仍须真实语义评测。
+
+真实语义、用户候选接受率、投毒行为、部署和生产性能门槛保持未勾选；不应据机制测试跳过阶段 rollout 门槛。
 
 ## 1. 背景与动机
 
@@ -78,7 +98,7 @@ apps/server|agent-worker|control-worker      # composition root：仅当开关�
 | 配置                       | 默认    | 作用域                                 | 说明                                                                                                                                                                       |
 | -------------------------- | ------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MEMORY_EVOLUTION_ENABLED` | `false` | server + agent-worker + control-worker | 模块总开关（用户明确要求的功能开关，属具体需求，非冗余 rollout 控制）。三端必须一致；解析规则同 `CONTEXT_SEGMENTS_ENABLED`（非法值启动即抛错）                             |
-| `MEMORY_EMBEDDING_MODEL`   | 未设置  | server + agent-worker                  | `provider/model` 引用，经既有 LLM Gateway 以 `memory-embedding` purpose 解析（Vercel AI SDK `embed`）。**未配置 ≠ 报错**：混合检索降级为词法，其余不依赖向量的阶段功能照常 |
+| `MEMORY_EMBEDDING_MODEL`   | 未设置  | server + agent-worker + control-worker | `provider/model` 引用，经既有 LLM Gateway 以 `memory-embedding` purpose 解析（Vercel AI SDK `embed`）。**未配置 ≠ 报错**：混合检索降级为词法，其余不依赖向量的阶段功能照常 |
 
 能力协商原则：**配置决定能力**。总开关是用户要求的部署级启停；开关开启后，各子能力由对应配置/适配器是否存在决定，不再加第二层开关。
 

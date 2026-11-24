@@ -1,3 +1,4 @@
+import { memoryEvolutionEnvShape } from '@trinity-harness/contracts';
 import {
   browserCdpEndpointSchema,
   skillDirectoriesEnvSchema,
@@ -60,6 +61,7 @@ const workerEnvSchema = z.object({
   REASONING_BUDGET_TOKENS: z.coerce.number().int().positive().optional(),
   REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
   /** M4: context manager budget (docs/design.md §5.1 Context Manager). */
+  ...memoryEvolutionEnvShape,
   CONTEXT_SEGMENTS_ENABLED: z
     .enum(['true', 'false'])
     .default('false')

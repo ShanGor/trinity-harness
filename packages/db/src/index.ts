@@ -19,3 +19,5 @@ export * from './attachment-catalog.js';
 export * from './llm-configuration-store.js';
 export * from './llm-provider-operations.js';
 export * from './calendar-store.js';
+export { PgMemoryEvolutionStore } from './memory-evolution-store.js';
+export { PgEpisodeVectorStore } from './episode-vector-store.js';

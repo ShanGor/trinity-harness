@@ -1,3 +1,4 @@
+import { memoryEvolutionEnvShape } from '@trinity-harness/contracts';
 import {
   browserCdpEndpointSchema,
   skillDirectoriesEnvSchema,
@@ -89,6 +90,7 @@ const serverEnvSchema = z.object({
    */
   DEFAULT_PERMISSION_POLICY: z.string().min(1).max(4000).optional(),
   /** M4: context manager budget for inline-mode loops (§5.1). */
+  ...memoryEvolutionEnvShape,
   CONTEXT_SEGMENTS_ENABLED: z
     .enum(['true', 'false'])
     .default('false')

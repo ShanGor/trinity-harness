@@ -5,3 +5,4 @@ export * from './endpoint-policy.js';
 export * from './tenant-routing.js';
 export * from './infrastructure.js';
 export * from './usage.js';
+export { AiSdkEmbeddingGateway } from './embedding-gateway.js';

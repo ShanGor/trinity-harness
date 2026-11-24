@@ -50,7 +50,13 @@ export const modelUsageSchema = z.object({
   requestId: z.uuid(),
   promptId: z.uuid(),
   model: z.string().min(1).max(200),
-  purpose: z.enum(['assistant', 'compaction', 'subagent']),
+  purpose: z.enum([
+    'assistant',
+    'compaction',
+    'subagent',
+    'memory-embedding',
+    'memory-consolidation',
+  ]),
   /** Wall-clock duration of this model request, when measured by the loop. */
   durationMs: z.number().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   tokens: tokenUsageSchema,

@@ -2,6 +2,7 @@ import { selectContextSegment } from './context-segment.js';
 import { createHash } from 'node:crypto';
 import type {
   ConversationIndexPort,
+  MemoryEvolutionStorePort,
   Identity,
   MemoryCommand,
   MemoryStorePort,
@@ -102,6 +103,7 @@ export class PersonalContext implements PersonalContextPort {
     private readonly memory: MemoryStorePort,
     private readonly index: ConversationIndexPort,
     private readonly store?: SessionStore,
+    private readonly archival?: MemoryEvolutionStorePort,
   ) {}
   async validate(meta: SessionMeta, receipt: RecallReceipt, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
@@ -116,6 +118,10 @@ export class PersonalContext implements PersonalContextPort {
       );
     };
     if (
+      (!this.archival &&
+        (receipt.evolutionRevision !== undefined ||
+          !!receipt.facts?.length ||
+          !!receipt.playbooks?.length)) ||
       snapshot.revision !== receipt.policyRevision ||
       (snapshot.persona?.revision ?? 0) !== (receipt.persona?.revision ?? 0)
     )
@@ -166,6 +172,13 @@ export class PersonalContext implements PersonalContextPort {
         const parsed = recallResultSchema.safeParse(event.value);
         if (!parsed.success || parsed.data.policyRevision !== snapshot.revision) fail();
         if (!parsed.success) continue;
+        if (
+          !this.archival &&
+          (parsed.data.evolutionRevision !== undefined ||
+            parsed.data.facts?.length ||
+            parsed.data.playbooks?.length)
+        )
+          fail();
         for (const source of parsed.data.episodes ?? []) {
           const current = await this.index.evidence?.(identity, source.episodeId);
           if (

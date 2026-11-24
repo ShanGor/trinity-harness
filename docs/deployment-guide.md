@@ -347,3 +347,43 @@ Behavioral inferences (including preferred reply language inferred from message
 language), task wording and unsupported declaration forms remain proposals. This
 is conservative source admission, not semantic truth/completeness certification;
 foreground source-backed edits and manual Markdown editing remain available.
+
+## Memory Evolution deployment
+
+This checkout adds opt-in source mechanisms; it does not enable them on the running
+node. Apply migration 0028 with pgvector installed and extension-creation permission
+available to the migration role. `pnpm db:migrate` fails if the extension is missing;
+startup never installs schemas or falls back to a different datastore. Production
+and local baseline databases remain separate from disposable evaluation databases.
+
+Deploy matching contracts/readers, then server, agent-worker, control-worker and Web
+before enabling `MEMORY_EVOLUTION_ENABLED=true` consistently in all three services.
+Helm supplies `config.memoryEvolutionEnabled` and `config.memoryEmbeddingModel` to
+all services through the shared ConfigMap; rootless Podman passes the same env file.
+Do not mix opposite flag values across writers. Control-worker must be deployed and
+running for asynchronous embedding and scheduled consolidation; its existing
+scheduling gate remains required. Its image now includes the fixed pricing catalog.
+
+An unset `MEMORY_EMBEDDING_MODEL` leaves recall lexical. A configured `provider/model`
+sends eligible historical episode text and foreground search queries to that provider.
+Environment mode supports `openai/model`; database mode selects an enabled tenant
+OpenAI-compatible connection by UUID (preferred) or unique exact name and an enabled
+model, with tenant-scoped encrypted credentials and constrained destination policy.
+Database activation never falls back to an environment key. Self-hosted endpoints
+use the existing explicit provider destination policy; no additional provider path
+or automatic network allowance is introduced.
+
+Embeddings are rebuildable, model/hash-bound and asynchronously claimed with a
+five-minute lease and three attempts. A published matching vector is not recomputed;
+an unpersisted response can be recomputed after a crash. Unsupported/failed embedding
+returns lexical recall. Variable dimensions use exact search after materialized
+owner/policy filtering; the partial 1536-D HNSW index is not currently used for
+ranking. Measure scale before rollout rather than assuming an index implies an ANN
+latency guarantee. Provider usage is recorded with unavailable price when the fixed
+catalog lacks a rate; configure prices before relying on money budgets.
+
+Rollback sets `MEMORY_EVOLUTION_ENABLED=false` on the same three services. Existing
+facts/candidates/playbooks/vectors remain dormant, baseline tools/Persona/receipts
+resume and no historical event is rewritten. An unfinished turn that already read archival memory refuses further dispatch after disabling; a new prompt uses the baseline. Unsetting only the embedding model
+retains reviewed archival memory with lexical episode recall. Keep automatic
+injection/merging deferred; see [evaluation gates](memory-evaluation-results.md).

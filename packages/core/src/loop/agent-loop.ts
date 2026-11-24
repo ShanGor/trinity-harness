@@ -408,6 +408,12 @@ export class CoreAgentLoop implements AgentLoop {
         purpose: ModelUsage['purpose'],
         clock?: RuntimeClock,
       ): Promise<AsyncIterable<StreamChunk>> => {
+        if (
+          purpose === 'assistant' &&
+          committedPrompt.trigger?.consolidation === 'memory' &&
+          this.opts.personalContext?.observeRecall
+        )
+          purpose = 'memory-consolidation';
         const preparationStarted = performance.now();
         if (await checkCancellation()) throw new DOMException('cancelled', 'AbortError');
         await ctx.contextGuard?.();
@@ -1898,6 +1904,28 @@ export class CoreAgentLoop implements AgentLoop {
               }),
               appendOpts,
             );
+            if (this.opts.personalContext?.observeRecall) {
+              const recalled = wave.flatMap((call, i) =>
+                call.name === 'recall' && !stored[i]!.isError ? [stored[i]!.value] : [],
+              );
+              if (recalled.length) {
+                const current = await store.load(sessionId);
+                const previous = current.findLast(
+                  (e) => e.type === 'memory/selection' && e.receipt.promptId === promptId,
+                );
+                if (previous?.type === 'memory/selection') {
+                  const receipt = this.opts.personalContext.observeRecall(
+                    previous.receipt,
+                    recalled,
+                  );
+                  await store.append(
+                    sessionId,
+                    [{ ...meta(), type: 'memory/selection', receipt }],
+                    appendOpts,
+                  );
+                }
+              }
+            }
             if (personalMemoryChange) {
               const change = personalMemoryChange;
               personalMemoryChange = undefined;

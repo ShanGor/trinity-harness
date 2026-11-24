@@ -38,7 +38,7 @@ export function observedInputAdjustment(events: readonly SessionEvent[], model: 
     .findLast(
       (event) =>
         event.type === 'model/usage' &&
-        event.usage.purpose === 'assistant' &&
+        (event.usage.purpose === 'assistant' || event.usage.purpose === 'memory-consolidation') &&
         event.usage.model === model,
     );
   if (usage?.type !== 'model/usage' || usage.usage.tokens.inputTokens === undefined) return 0;
