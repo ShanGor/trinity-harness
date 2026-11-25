@@ -62,6 +62,25 @@ function result(callId: string, value: unknown): SessionEvent {
 }
 
 describe('toModelMessages', () => {
+  it('marks skill catalogs and loaded instructions as runtime context before the user request', () => {
+    expect(
+      toModelMessages([
+        { type: 'skill/catalog', eventId: id(), at: now(), skills: [], instructions: 'Catalog' },
+        {
+          type: 'skill/loaded',
+          eventId: id(),
+          at: now(),
+          snapshot: { name: 'example', version: '1', instructions: 'Loaded instructions' },
+        },
+        user('Current request'),
+      ]),
+    ).toEqual([
+      { role: 'user', context: 'control', content: 'Catalog' },
+      { role: 'user', context: 'control', content: 'Loaded instructions' },
+      { role: 'user', content: 'Current request' },
+    ]);
+  });
+
   it('folds a plain conversation', () => {
     const messages = toModelMessages([
       user('hi'),

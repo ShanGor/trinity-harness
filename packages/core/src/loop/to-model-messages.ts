@@ -129,7 +129,7 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
     }
   });
   // Durable instruction context precedes history, including compacted loads.
-  if (catalog) messages.push({ role: 'user', content: catalog.instructions });
+  if (catalog) messages.push({ role: 'user', context: 'control', content: catalog.instructions });
   // Keep recently used instruction snapshots within a reserved context budget.
   // Older snapshots remain in the log and can be loaded again via the catalog.
   let pinnedBytes = 0;
@@ -141,7 +141,8 @@ function assembleModelMessages(events: readonly SessionEvent[]): ConversationMes
     if (explicit || closed.has(seq - 1) || isCompacted(seq, ranges))
       pinned.push(snapshot.instructions);
   }
-  for (const content of pinned.reverse()) messages.push({ role: 'user', content });
+  for (const content of pinned.reverse())
+    messages.push({ role: 'user', context: 'control', content });
   const selection = events.findLast(
     (event) => event.type === 'memory/selection' && event.receipt.promptId === promptId,
   );

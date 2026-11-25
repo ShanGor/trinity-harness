@@ -1045,6 +1045,17 @@ presentation of reference data, not enforcement of semantic relevance. Small
 provider trials and residual failures are recorded in
 [intent evaluation results](intent-evaluation-results.md#memory-relevance-presentation-trials-2026-11-25).
 
+The gateway closes and separates each reference/control section so providers that
+concatenate consecutive user-role content retain visible boundaries around the
+actual user wording. Skill catalogs and pinned instruction snapshots carry the
+same runtime-control label. These are presentation boundaries, not an enforcement
+mechanism or a change to instruction authority. Foreground Persona guidance uses
+the already delivered Markdown and revision for a direct exact-patch update;
+an additional read is needed only for missing context or a known no-effect
+revision conflict. Source, revision, ownership and context-refresh checks remain
+mandatory, and successful writes are never repeated to repair bookkeeping.
+Real-provider latency and redundant-call reduction require separate acceptance.
+
 Migration 0019 copies current active legacy facts into Markdown when within the document bound and retains all original memory events. Oversized profiles remain readable through legacy fallback until edited; they are never silently truncated. Once a Persona exists, its document replaces legacy facts in model context, and old fact-write commands direct users to Memory settings instead of changing hidden values. Existing fact APIs remain readable for compatibility. Natural-language extraction and automatic assistant editing are not added by this change: merely mentioning a name or an assistant promising to remember it does not save it. Users edit and save the document explicitly.
 
 ### 21.8 Personal memory automation and history (2026-11-09)

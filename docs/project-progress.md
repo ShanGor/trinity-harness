@@ -5,6 +5,29 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Short-turn latency diagnosis and context boundaries — 2026-11-25
+
+The latest observed personal turn used three MiniMax-M3.1-Flash assistant requests:
+13.327s, 3.309s and 1.737s (18.373s combined). The first request reported 16,680
+input tokens, no cache reads and 2,669 reasoning tokens. Persona read/update event
+pairs took 27ms/56ms; committed user-to-terminal elapsed time was 20.015s. The Web
+execution total sums recorded model/tool durations rather than wall-clock turn
+latency. All three model requests succeeded without fallback or retry. These
+measurements locate most elapsed time inside model streams, not Persona storage;
+they do not separate provider queueing, prefill and generation.
+
+Foreground guidance now uses already delivered Persona Markdown/revision directly
+instead of encouraging a duplicate read. Missing context and known no-effect
+revision conflicts still permit reads. The gateway explicitly closes and separates
+reference/control blocks, including skill catalogs and pinned instructions, to
+retain boundaries when providers concatenate consecutive user messages. No profile,
+model configuration, background-write mechanism or live deployment was changed.
+Deterministic tests cover provider-facing concatenation and direct source-backed
+updates without a read; measured real-provider latency improvement remains open.
+Validation: 1,311 relevant core/contracts/memory/server tests passed (23 opt-in
+tests skipped), plus repository lint, workspace typecheck, changed-file formatting
+and diff checks. No live user turn or memory mutation was replayed.
+
 ### Persona foreground source identity — 2026-11-25
 
 Fixed a source-validation branch that classified any `sourceEventId` as historical,

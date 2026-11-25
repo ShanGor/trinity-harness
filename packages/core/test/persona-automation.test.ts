@@ -169,6 +169,22 @@ it('automatically saves a name, recalls it across sessions, corrects it and forg
   );
   expect((await f.run(second, '更正一下，我现在叫小李。', correct)).reason).toBe('completed');
   expect(f.persona?.content).toContain('小李');
+  expect(correct.requests).toHaveLength(2);
+  expect(correct.requests[0]?.messages).toContainEqual(
+    expect.objectContaining({ content: expect.stringContaining('Personal Persona, revision 1') }),
+  );
+  expect(
+    (await f.store.load(second.id))
+      .filter((event) => event.type === 'tool/call')
+      .map((event) => event.args),
+  ).toEqual([
+    {
+      operation: 'update',
+      expectedRevision: 1,
+      sourceQuote: '我现在叫小李',
+      edits: [{ oldText: '小张', newText: '小李' }],
+    },
+  ]);
   const forget = new FakeLLM(
     () =>
       toolCallThenFinish('forget-name', 'persona', {

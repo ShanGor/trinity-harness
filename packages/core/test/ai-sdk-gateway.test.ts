@@ -71,6 +71,34 @@ const MINIMAL_OUTPUT = [
 ];
 
 describe('AiSdkGateway configuration', () => {
+  it('delimits adjacent harness sections without absorbing the original user text', async () => {
+    const captured: CapturedCall = {};
+    const gateway = new AiSdkGateway({ fake: () => fakeModel(MINIMAL_OUTPUT, captured) });
+    const request: LLMRequest = {
+      ...baseRequest,
+      model: 'fake/model',
+      messages: [
+        { role: 'user', context: 'reference', content: 'Persona revision 5' },
+        { role: 'user', context: 'control', content: 'Available runtime skills' },
+        { role: 'user', content: '好吧，下次记住了' },
+        { role: 'user', context: 'control', content: 'Runtime clock' },
+      ],
+    };
+    for await (const chunk of await gateway.stream(request)) void chunk;
+    const prompt = captured.options?.prompt as {
+      role: string;
+      content: { type: string; text: string }[];
+    }[];
+    // Compatible providers may concatenate consecutive user messages/parts.
+    const combined = prompt.flatMap((message) => message.content.map((part) => part.text)).join('');
+    expect(combined).toContain('Persona revision 5\n[End harness reference data]\n\n');
+    expect(combined).toContain(
+      'Available runtime skills\n[End harness control data]\n\n好吧，下次记住了\n\n[Harness control data;',
+    );
+    expect(combined).toContain('Runtime clock\n[End harness control data]\n\n');
+    expect(request.messages[2]?.content).toBe('好吧，下次记住了');
+  });
+
   it('does not emit SDK warning payloads containing private model text', async () => {
     const emit = vi.spyOn(process, 'emitWarning').mockImplementation(() => undefined);
     const gateway = new AiSdkGateway({

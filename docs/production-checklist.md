@@ -6,6 +6,12 @@
 
 ## Memory Evolution (locally enabled 2026-11-24; broader acceptance open)
 
+- [ ] Deploy and measure the short-turn latency changes (2026-11-25): closed
+      reference/control boundaries, labeled skill context and direct Persona updates
+      from delivered Markdown/revision. Check redundant reads, reasoning tokens,
+      model-call counts and user-to-final latency across repeated synthetic turns;
+      deterministic regressions do not establish real-provider improvement.
+
 - [ ] Deploy the foreground Persona source-ID fix: omitted or matching-current
       IDs are accepted, historical/foreign IDs remain denied, and failed attempts
       are not replayed. Verify a newly authorized save in the deployed runtime;
