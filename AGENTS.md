@@ -135,6 +135,17 @@ runtime drivers, same-path workspace mounts and private credential handling.
 
 ### Markdown Persona
 
+For foreground Persona updates, an optional `sourceEventId` must match the current
+authenticated committed prompt; field presence alone does not make it historical.
+Keep earlier sources and `sourceEpisodeId` restricted to scheduled consolidation,
+and retain exact unquoted source checks and all owner/revision/auto-save fences.
+
+Keep personal memory explicitly bounded as background reference data, distinct
+from user messages and conversation topics. Apply only relevant facts/preferences;
+one requested fact is not a profile-inventory request. Preserve the exact saved
+Markdown, source/revision fences and dialogue order; presentation guidance does
+not certify semantic relevance or justify discarding arbitrary Markdown preferences.
+
 Personal Persona is owner-scoped Markdown in `user_personas.content` with append-only `persona_events` revisions (design §21.7). Keep saves transactional, bounded, idempotent and revision-checked. Deliver exact Markdown as reference data through memory-selection events; never treat it as execution authority. Preserve team isolation, draft conflict recovery, legacy migration fallback and context-generation fencing. Model-directed `persona` updates may save stable current-user facts when automatic memory is enabled; explicit remember/correct/forget remains available when disabled. Require current-user source provenance, exact patches, current owner/profile/policy fences and an originating call journal; reject team/child writes. The committed profile patch call is its minimal pre-effect plan and does not require or replace a workspace task plan. Refresh only the exact acknowledged own-write generation after committing the tool result, retire earlier active recall pairs using `recallAfterSeq`, and preserve independent destructive-edit suppression floors. See design §21.8.
 
 ### Nightly memory review
@@ -208,6 +219,15 @@ owner adjudication, active-memory revision fences and append-only journals. Cand
 submission never activates memory or grants permissions. Fact correction is atomic
 invalidate+create and does not change episode suppression behavior. Reviewed
 playbooks remain reference only. Keep v2/v3 receipt replay and complete tool pairs.
+Automatic fact selection is lexical, personal-only and bounded to five snapshots /
+8 KiB, committed before dispatch; validate selected facts by ID and all original
+sources. Nightly `memory_merge` requires an explicit schedule delegation, current
+accepted/recalled inputs and identical same-kind NFC/whitespace-normalized wording.
+Preserve all source anchors and atomic retirement/replacement; new prose, paraphrases
+and contradictions remain reviewed proposals. Its committed exact call is the
+minimal reference-edit plan. Refresh only the acknowledged archival generation after
+the complete result, retire old recall pairs and never repeat a successful/uncertain
+merge to repair bookkeeping. Existing schedules gain no automatic mutation rights.
 Do not claim fake-vector evaluation establishes real-provider quality or enable
 automatic injection/merging without their separate semantic/poisoning gates. See
 [recorded evaluation](docs/memory-evaluation-results.md).

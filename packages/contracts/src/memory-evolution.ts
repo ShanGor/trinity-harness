@@ -41,6 +41,8 @@ export const newFactSchema = z
   .strict();
 export type NewFact = z.infer<typeof newFactSchema>;
 export const memoryFactSchema = newFactSchema.extend({
+  /** Merges retain every original source; source remains the canonical primary anchor. */
+  sources: z.array(evolutionSourceSchema).min(2).max(10).optional(),
   factId: z.uuid(),
   validFrom: z.iso.datetime(),
   validTo: z.iso.datetime().nullable(),
@@ -64,6 +66,24 @@ export const consolidationJournalSchema = z
   })
   .strict();
 export type ConsolidationJournal = z.infer<typeof consolidationJournalSchema>;
+export const memoryMergeParametersSchema = z
+  .object({
+    factIds: z
+      .array(z.uuid())
+      .min(2)
+      .max(10)
+      .refine((ids) => new Set(ids).size === ids.length),
+    expectedRevision: z.number().int().nonnegative(),
+  })
+  .strict();
+export const factMergeSchema = memoryMergeParametersSchema
+  .extend({
+    operationId: z.uuid(),
+    expectedPolicyRevision: z.number().int().nonnegative(),
+    journal: consolidationJournalSchema,
+  })
+  .strict();
+export type FactMerge = z.infer<typeof factMergeSchema>;
 export const playbookDraftSchema = z
   .object({
     taskType: z.string().trim().min(1).max(200),
@@ -100,6 +120,7 @@ export const memoryCandidateSchema = z.object({
 export type MemoryCandidate = z.infer<typeof memoryCandidateSchema>;
 export const evolutionPageQuerySchema = z
   .object({
+    factId: z.uuid().optional(),
     before: z.coerce.number().int().positive().optional(),
     query: z.string().max(200).optional(),
     kind: factKindSchema.optional(),
@@ -143,6 +164,7 @@ export const memoryProposalParametersSchema = z
   })
   .strict();
 export interface FactStorePort {
+  merge?(owner: Identity, command: FactMerge, signal?: AbortSignal): Promise<MemoryFact>;
   revision(owner: Identity): Promise<number>;
   contextRevision(owner: Identity): Promise<number>;
   activeFacts(owner: Identity, query: EvolutionPageQuery): Promise<MemoryFact[]>;

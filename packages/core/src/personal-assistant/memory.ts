@@ -121,6 +121,7 @@ export class PersonalContext implements PersonalContextPort {
       (!this.archival &&
         (receipt.evolutionRevision !== undefined ||
           !!receipt.facts?.length ||
+          !!receipt.injectedFacts?.length ||
           !!receipt.playbooks?.length)) ||
       snapshot.revision !== receipt.policyRevision ||
       (snapshot.persona?.revision ?? 0) !== (receipt.persona?.revision ?? 0)

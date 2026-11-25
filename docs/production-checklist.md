@@ -4,25 +4,51 @@
 > Walk top to bottom before declaring a release ready; record evidence
 > (command output / screenshot) next to each item.
 
-## Memory Evolution (default off)
+## Memory Evolution (locally enabled 2026-11-24; broader acceptance open)
+
+- [ ] Deploy the foreground Persona source-ID fix: omitted or matching-current
+      IDs are accepted, historical/foreign IDs remain denied, and failed attempts
+      are not replayed. Verify a newly authorized save in the deployed runtime;
+      synthetic regressions do not establish live persistence or semantic extraction.
+
+- [x] Source-level personal-reference boundaries preserve exact Persona, receipts,
+      dialogue order and source fences. Limited synthetic MiniMax-M3 trials reduced
+      narrow-question unrelated disclosure; see [conditions and failures](intent-evaluation-results.md#memory-relevance-presentation-trials-2026-11-25).
+- [ ] Establish broader memory-relevance acceptance and deploy the reference-boundary
+      candidate. Missing-fact disclosure, quiet-preference failures, unnecessary
+      recall/file probes and metadata confusion remain open; no overall semantic
+      quality pass or deployment is implied by the source change.
 
 - [x] Independent contracts/module, default-off wiring, v2/v3 receipt readers,
       source-bound candidates, atomic fact corrections and owner adjudication UI.
 - [x] Migration 0028 applied in disposable PostgreSQL 16 + pgvector; deterministic
       provenance, exclusion/removal, CAS/idempotency, rollback and SDK transport tests.
-- [ ] Provision pgvector and apply 0028 to the intended deployment. Deploy readers
-      before writers and match server/agent-worker/control-worker configuration.
-- [ ] Run `scripts/evaluate-memory.sh` with an explicitly selected provider on an
-      empty disposable database. Record retrieval correctness separately from answer
-      quality; fake gold vectors do not satisfy this gate.
+- [x] Configured local PostgreSQL 18.6 now has human-installed pgvector 0.8.1 and
+      migrations through 0028 (29 records). This does not deploy application code.
+- [x] Deploy matching readers before writers on the local Podman node; server,
+      agent-worker and control-worker all run `MEMORY_EVOLUTION_ENABLED=true`.
+      API, scheduler health and all six service containers passed after rollout.
+- [x] Run `scripts/evaluate-memory.sh` with selected local Ollama models on empty
+      disposable databases: BGE-M3 17/17, Qwen3-embedding 16/17, lexical 6/17.
+      Fixed-clock/category reporting and real-vector source revocation passed.
+- [x] Implement bounded personal automatic fact selection and explicit schedule-owner
+      delegation for equivalent accepted-fact merging; deterministic source, CAS,
+      rollback, unknown-result and complete-pair refresh checks passed. Existing
+      schedules gain no merge authority. Multi-source governance/390px fixture passed.
+- [x] Narrow local Qwen3.5 9B poisoning response matrix: 6/6 exposed and correct across
+      English/Chinese episode/fact/automatic references after guidance repair. Retain
+      the earlier 5/6 over-refusal and autonomous-read failures in the evidence report.
 - [ ] Measure cross-language/paraphrase/temporal quality, negative recall, candidate
       acceptance and false positives on consenting accounts; check poisoning and
       source revocation against the configured real model.
 - [ ] Accept deployed Memory governance and background reconciliation, foreground
       task budgets, usage/pricing and rollback to dormant data. Establish realistic
       latency at scale; current ranking is exact over materialized eligible rows.
-- [ ] Automatic fact injection and sleep-time merging require independent evaluation
-      and implementation. They are not delivered or enabled by the deployment flag.
+- [ ] Complete authenticated owner-route acceptance for automatic selection and
+      delegated merging, including pressure fitting, replay, revocation and rollback.
+      Expand adversarial evaluation before broader rollout; six synthetic read-only-tool
+      cases do not certify exfiltration or unrestricted tool behavior. Semantic
+      paraphrase merging/contradiction resolution remains reviewed proposals.
 
 ## Text and source attachments
 

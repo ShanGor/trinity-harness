@@ -71,6 +71,29 @@ const MINIMAL_OUTPUT = [
 ];
 
 describe('AiSdkGateway configuration', () => {
+  it('does not emit SDK warning payloads containing private model text', async () => {
+    const emit = vi.spyOn(process, 'emitWarning').mockImplementation(() => undefined);
+    const gateway = new AiSdkGateway({
+      fake: () =>
+        fakeModel(
+          [
+            {
+              type: 'stream-start',
+              warnings: [{ type: 'other', message: 'PRIVATE_REASONING_CONTENT' }],
+            },
+            ...MINIMAL_OUTPUT,
+          ],
+          {},
+        ),
+    });
+    for await (const chunk of await gateway.stream({
+      ...baseRequest,
+      model: 'fake/model',
+      messages: [{ role: 'user', content: 'Test' }],
+    }))
+      void chunk;
+    expect(emit).not.toHaveBeenCalled();
+  });
   it('explicitly disables provider tool selection when no tools are available', async () => {
     const captured: CapturedCall = {};
     const gateway = new AiSdkGateway({ fake: () => fakeModel(MINIMAL_OUTPUT, captured) });

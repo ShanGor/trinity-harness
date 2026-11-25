@@ -287,20 +287,24 @@ export const ChatComposer = memo(function ChatComposer({
         />
       </div>
       {busy && canSteer && (
-        <Button danger icon={<StopOutlined />} aria-label="Stop active task" onClick={onCancel}>
-          Stop
-        </Button>
-      )}
-      {busy && canSteer && (
-        <Select
-          aria-label="Running task input"
-          value={canQueue ? inputMode : 'steer'}
-          onChange={setInputMode}
-          options={[
-            { value: 'steer', label: 'Supplement current task' },
-            ...(canQueue ? [{ value: 'queue', label: 'Queue for later' }] : []),
-          ]}
-        />
+        <div className="composer-running-controls" role="group" aria-label="Active task controls">
+          {canQueue ? (
+            <Select
+              aria-label="Running task input"
+              value={inputMode}
+              onChange={setInputMode}
+              options={[
+                { value: 'steer', label: 'Add to task' },
+                { value: 'queue', label: 'Queue for later' },
+              ]}
+            />
+          ) : (
+            <span className="composer-running-label">Supplement current task</span>
+          )}
+          <Button danger icon={<StopOutlined />} aria-label="Stop active task" onClick={onCancel}>
+            Stop
+          </Button>
+        </div>
       )}
       {onStartVoiceCall && (
         <Button

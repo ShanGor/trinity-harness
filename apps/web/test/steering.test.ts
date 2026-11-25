@@ -83,6 +83,44 @@ it('keeps a rejected steering draft and its retry ID, preserves focus, and disti
   }
 });
 
+it('keeps side-chat supplements and Stop available without a redundant mode picker', async () => {
+  const container = document.createElement('div');
+  document.body.append(container);
+  const root = createRoot(container);
+  const cancel = vi.fn();
+  const submit = vi.fn(async () => false);
+  try {
+    await act(async () =>
+      root.render(
+        createElement(ChatComposer, {
+          busy: true,
+          canSteer: true,
+          canQueue: false,
+          draftStore: new Map([['new', 'Keep it concise']]),
+          resetVersion: 0,
+          onSubmit: submit,
+          onCancel: cancel,
+        }),
+      ),
+    );
+    expect(container.querySelector('select')).toBeNull();
+    expect(container.textContent).toContain('Supplement current task');
+    await act(async () =>
+      container
+        .querySelector('textarea')!
+        .dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' })),
+    );
+    expect(submit.mock.calls[0]?.slice(0, 2)).toEqual(['Keep it concise', 'steer']);
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Stop active task"]')!.click(),
+    );
+    expect(cancel).toHaveBeenCalledOnce();
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+  }
+});
+
 it('attaches supplement states to the original request without creating a second answer or changing stable history', () => {
   const promptId = crypto.randomUUID();
   const inputId = crypto.randomUUID();

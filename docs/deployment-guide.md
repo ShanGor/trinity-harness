@@ -350,14 +350,19 @@ foreground source-backed edits and manual Markdown editing remain available.
 
 ## Memory Evolution deployment
 
-This checkout adds opt-in source mechanisms; it does not enable them on the running
-node. Apply migration 0028 with pgvector installed and extension-creation permission
-available to the migration role. `pnpm db:migrate` fails if the extension is missing;
-startup never installs schemas or falls back to a different datastore. Production
-and local baseline databases remain separate from disposable evaluation databases.
+The local Podman node deployed the matching readers and enabled these mechanisms
+on 2026-11-24 at the user’s request. Migration 0028 is applied with pgvector 0.8.1.
+`pnpm db:migrate` fails if the extension is missing; startup never installs schemas
+or falls back to a different datastore. Production and local baseline databases
+remain separate from disposable evaluation databases.
 
 Deploy matching contracts/readers, then server, agent-worker, control-worker and Web
 before enabling `MEMORY_EVOLUTION_ENABLED=true` consistently in all three services.
+Readers must understand `injectedFacts`, multi-source merged facts and schedule
+`mergeAcceptedFacts` before writers. Older fact readers cannot enforce every merged
+source, so do not run them after merged facts are written. Existing schedules do not
+gain merge authority: the owner must explicitly authorize it when creating a memory
+consolidation schedule. No additional SQL migration is needed for these additive JSON fields.
 Helm supplies `config.memoryEvolutionEnabled` and `config.memoryEmbeddingModel` to
 all services through the shared ConfigMap; rootless Podman passes the same env file.
 Do not mix opposite flag values across writers. Control-worker must be deployed and
@@ -382,8 +387,33 @@ ranking. Measure scale before rollout rather than assuming an index implies an A
 latency guarantee. Provider usage is recorded with unavailable price when the fixed
 catalog lacks a rate; configure prices before relying on money budgets.
 
-Rollback sets `MEMORY_EVOLUTION_ENABLED=false` on the same three services. Existing
+The local node has `MEMORY_EVOLUTION_ENABLED=true` consistently in server,
+agent-worker and control-worker. `MEMORY_EMBEDDING_MODEL` remains unset, so episode
+recall is lexical; Ollama evaluation did not configure a durable provider endpoint.
+Automatic fact selection is enabled for personal owners with active accepted facts.
+Nightly merging remains per-schedule: only a newly created memory-consolidation
+schedule with the explicit owner consent can merge equivalent accepted facts.
+Existing schedules gain no authority and deployment does not enroll accounts.
+The user requested this narrow local enablement while broader poisoning, owner-route
+and scale gates remain open; see [evaluation evidence](memory-evaluation-results.md).
+Rollback sets `MEMORY_EVOLUTION_ENABLED=false` on all three services. Existing
 facts/candidates/playbooks/vectors remain dormant, baseline tools/Persona/receipts
-resume and no historical event is rewritten. An unfinished turn that already read archival memory refuses further dispatch after disabling; a new prompt uses the baseline. Unsetting only the embedding model
-retains reviewed archival memory with lexical episode recall. Keep automatic
-injection/merging deferred; see [evaluation gates](memory-evaluation-results.md).
+resume and no historical event is rewritten. A turn that already read archival
+memory refuses further dispatch after disabling; a new prompt uses the baseline.
+
+When enabled, automatic fact selection is bounded lexical relevance (five facts,
+eight terms, 8 KiB snapshots), not a new embedding request or semantic fact index.
+Nightly `memory_merge` can retire only already accepted/recalled same-kind facts with
+NFC/whitespace-equivalent wording under an explicitly delegated, current enabled
+schedule. It retains every original source and historical input; any contributing
+source revocation hides the derived fact. New prose, paraphrases and contradictions
+still require owner-reviewed proposals. The aggregate feature flag does not add this
+permission to older schedules. Persona and external-effect permissions remain unchanged.
+
+The local configured PostgreSQL 18.6 prerequisite was resolved by human installation
+of pgvector 0.8.1 and a successful `pnpm db:migrate` through 0028. The application
+containers were not replaced. Local Ollama synthetic evaluation used a temporary
+loopback TLS forwarder; configure a lasting HTTPS endpoint and exact operator-origin
+policy before a real deployment. Do not weaken endpoint checks or copy live credentials
+to a disposable evaluation database. The runner now checks database identity and
+emptiness before migration, then rechecks before seeding.

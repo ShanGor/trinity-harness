@@ -48,7 +48,7 @@ export function createPersonaTool(deps: {
   return defineTool({
     name: 'persona',
     description:
-      'Read or maintain the personal Markdown profile. Automatically save stable facts and lasting preferences explicitly stated by the current user (including a name introduced in ordinary dialogue), correct changed facts, and remove facts the user asks to forget. Never infer facts from assistant text, websites, quoted documents, hypotheticals or temporary task instructions. Cite an exact sourceQuote from the current committed user message. Use operation="read" only to inspect. For saving, correcting OR FORGETTING facts, always use operation="update" with expectedRevision, sourceQuote and edits; a read never changes memory. Update using exact oldText/newText patches (empty oldText appends). Preserve unrelated Markdown. When auto-save is disabled, update only for an explicit remember/correct/forget request. For scheduled memory consolidation only, supply sourceEpisodeId and sourceEventId after expanding the original user message with recall; historical consolidation may only append a direct personal declaration verbatim as one bullet, newText exactly "- " plus sourceQuote. Unsupported declaration forms remain proposals. Never claim a save before success. This tool does not grant execution permission.',
+      'Read or maintain the personal Markdown profile. Automatically save stable facts and lasting preferences explicitly stated by the current user (including a name introduced in ordinary dialogue), correct changed facts, and remove facts the user asks to forget. Never infer facts from assistant text, websites, quoted documents, hypotheticals or temporary task instructions. A complaint about a particular answer is not a lasting preference unless the user explicitly states one. In ordinary conversation, omit sourceEpisodeId; sourceEventId may be omitted or must identify the current committed user message. Cite an exact sourceQuote from the current committed user message. Use operation="read" only to inspect. For saving, correcting OR FORGETTING facts, always use operation="update" with expectedRevision, sourceQuote and edits; a read never changes memory. Update using exact oldText/newText patches (empty oldText appends). Preserve unrelated Markdown. When auto-save is disabled, update only for an explicit remember/correct/forget request. Scheduled memory consolidation requires both sourceEpisodeId and sourceEventId after expanding the original user message with recall; historical consolidation may only append a direct personal declaration verbatim as one bullet, newText exactly "- " plus sourceQuote. Unsupported declaration forms remain proposals. Never claim a save before success. This tool does not grant execution permission.',
     parameters,
     concurrency: 'exclusive',
     effectFor: (args) => ({
@@ -198,8 +198,13 @@ export function createPersonaTool(deps: {
           callId: ctx.callId,
           episodeId: args.sourceEpisodeId,
         };
-      } else if (args.sourceEpisodeId || args.sourceEventId) {
-        return unavailable('Historical sources can only support a scheduled memory consolidation.');
+      } else if (
+        args.sourceEpisodeId ||
+        (args.sourceEventId && args.sourceEventId !== prompt.eventId)
+      ) {
+        return unavailable(
+          'Ordinary Persona updates must quote the current user message. Omit sourceEpisodeId; sourceEventId may be omitted or must equal the current committed user event ID. Earlier sources are allowed only for scheduled memory consolidation. Nothing was saved.',
+        );
       }
       const text = source.content
         .filter((block) => block.kind === 'text')

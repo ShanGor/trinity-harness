@@ -5,7 +5,100 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Persona foreground source identity — 2026-11-25
+
+Fixed a source-validation branch that classified any `sourceEventId` as historical,
+rejecting a normal write even when the ID identified the authenticated current user
+message. Foreground writes now accept an omitted or matching current ID, while
+older/other-session IDs and episode references remain unavailable outside scheduled
+consolidation. Parameter descriptions and rejection feedback explain this distinction.
+Runtime/tool guidance also distinguishes feedback on an answer from an explicitly
+stated lasting preference. No real user profile was edited or failed write replayed.
+Regression coverage exercises older-source rejection followed by a successful
+current-source retry, exactly one persisted write, context refresh and retained
+quote/auto-save/source boundaries. Source fix only; live deployment remains pending.
+Validation: 1,143 core/contracts/memory/server tests passed, 23 skipped; workspace
+lint and typecheck passed. The regression persists exactly one fake-store write
+after the corrected source ID and replays its refreshed context; live persistence
+was not exercised against the real user's profile.
+
+### Personal memory relevance presentation — 2026-11-25
+
+Traced Core Persona versus bounded lexical archival selection; retained an explicit
+background-reference boundary without pruning saved Markdown or changing owner,
+source/revision fences or conversation order. Sixty synthetic MiniMax-M3 trials
+compared baseline, reference boundaries, extra system guidance, profile omission
+and fresh missing-fact/directive cases. Narrow-question unrelated disclosure fell
+from 5/5 to 0/5 across two small case families; explicit profile review remained
+available. Missing-fact disclosure, overlong preference responses and unnecessary
+probes remain failures, so there is no overall semantic-quality pass. Extra system
+guidance was reverted. The limited presentation candidate remains source-only,
+not deployed. See [full evidence and limits](intent-evaluation-results.md#memory-relevance-presentation-trials-2026-11-25).
+Core/memory/server integration tests: 1,118 passing, 23 skipped; workspace lint
+and typecheck passed. Deterministic checks preserve exact Persona and replayed
+reference blocks, independent current corrections and existing source fences.
+
+### Conversational relevance diagnostics — 2026-11-25
+
+Inspected exact model inputs confirmed that an irrelevant Persona disclosure and
+failure to honor a correction occurred with the needed conversation intact. Added
+four synthetic personal-runtime evaluation cases, optional recorded Anthropic
+thinking settings and a deterministic Persona/dialogue/correction delivery check.
+Sixteen real MiniMax-M3 trials compared the default prompt with targeted relevance
+and correction wording. Results were mixed, including a new metadata hallucination;
+the candidate was reverted. No production behavior or deployment changed. See
+[conditions, response review and limits](intent-evaluation-results.md#conversational-relevance-and-correction-diagnostics-2026-11-25).
+Relevant unit tests: 90 passing; workspace lint and typecheck passed.
+
 ### Memory Evolution — 2026-11-24
+
+Continuation completed automatic lexical selection of at most five active facts
+(8 KiB receipts) and explicitly delegated nightly equivalent-fact merging. Old
+schedules keep their original authority. Merges retain every original source,
+atomically retire/create facts and refresh only the acknowledged active generation
+after complete tool results; revocation, concurrent changes and lost responses fail
+closed without repeating effects. Semantic rewriting/contradiction resolution still
+requires reviewed proposals. Governance displays every contributing source.
+
+Real local Ollama retrieval: BGE-M3 **17/17**, Qwen3-embedding 0.6B **16/17**, lexical
+baseline **6/17**. The original six remain separately scored. Hybrid-only functional
+term filtering fixed accidental OR-ILIKE matches; source exclusion and cross-owner
+checks passed. Final Qwen3.5 9B English/Chinese poisoning matrix: **6/6** across
+episodes, facts and automatic selection. Earlier missing reads and a 5/6 over-refusal
+run remain recorded; the final run followed a specific authorized-memory guidance
+repair. These synthetic local results do not certify broad poisoning resistance,
+candidate acceptance rates or representative-scale deployment.
+
+Configured PostgreSQL 18.6 migration now succeeded through 0028 after the human
+installed pgvector 0.8.1 with administrator authentication. No feature setting,
+application image or live schedule was changed. Final continuation checks:
+**2,006 passing / 46 skipped** tests, four separate preflight tests, lint/typecheck,
+formatting, Web build and 390px fake-client browser acceptance. The evaluation runner
+now rejects configured/nonempty targets before migration. Raw SDK default warning
+logging is disabled because compatibility warnings can contain model reasoning.
+See [updated evidence](memory-evaluation-results.md). At this implementation checkpoint
+the deployment was still off; the explicit local rollout is recorded below.
+
+### Memory Evolution local rollout — 2026-11-24
+
+At the user’s request, built and deployed the compatible Web/server/agent-worker/
+control-worker code through `scripts/deploy-podman.sh`; migration 0028 rechecked
+successfully. `MEMORY_EVOLUTION_ENABLED=true` is present in all three backend
+containers, and `MEMORY_EMBEDDING_MODEL` is unset, so episode retrieval currently
+uses the lexical path. All six Podman services are running; API and control-worker
+health checks return healthy. Container source hashes match the checkout. No
+owner-specific schedule was created or modified; owners must explicitly select the
+merge-consent option on a new memory-consolidation schedule.
+
+Before deployment, there were no running turns or queued prompts. The old server
+had an open long-lived SSE connection and did not stop after its 60-second graceful
+window; Podman completed the authorized replacement with SIGKILL. The reconnecting
+client can resume from PostgreSQL. No schema/data reset, deployment key change,
+provider endpoint change, or Git commit was made. Broader adversarial, authenticated
+owner-route and scale acceptance remain open; this is the user-authorized local
+rollout, not general production certification.
+
+Initial implementation record (superseded above where specified):
 
 - Implemented independent `packages/memory` and Zod contracts, additive migration
   0028, PG vectors/claims and fact/candidate/playbook projections with immutable
@@ -20,7 +113,7 @@
   review and grant no execution authority. Existing explicit memory grammar stays.
 - Added Suggestions, fact timeline/replacement comparison, source inspection,
   invalidation, search and reviewed playbooks to Memory settings; independent state
-  preserves unsaved Persona drafts. No automatic fact injection or merging exists.
+  preserves unsaved Persona drafts. Automatic selection/merging was added by the continuation above.
 - Generated/reviewed migration 0028 and applied it to a disposable PostgreSQL 16 +
   pgvector container. The current configured database migration failed without a
   diagnostic; no running service was upgraded or feature enabled. Source readers

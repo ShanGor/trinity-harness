@@ -68,3 +68,142 @@ This diagnostic **does not demonstrate a behavioral quality improvement**. It es
 The session investigation and implementation are documented in [intent-execution-design.md](intent-execution-design.md). Runtime changes preserve authorized local dialogue, use explicit cross-session recall, retain rejected candidates for recovery, separate compaction input assembly, record private request manifests and use dependency-aware evidence. Deterministic regressions and the existing integration suites validate these mechanisms; they do not measure semantic task success.
 
 The opt-in evaluator now has a personal runtime mode with seeded local/unrelated history, file changes and fixed typed-browser sources, alongside its minimal mode. No paid comparative model trial or human quality scoring was run for this implementation. The earlier results above remain historical measurements of their recorded conditions. There is no measured general-intelligence or task-success improvement claim from this change.
+
+## Conversational relevance and correction diagnostics (2026-11-25)
+
+A live incident inspection found that the exact current correction and preceding
+exchange reached the selected model. An unclear follow-up elicited unrelated
+Persona facts; the subsequent answer retained the rejected interpretation despite
+the correction. The inspected prompt already required relevant conversation and
+current corrections to take precedence. This establishes an observed model
+interpretation failure, not lost context. It does not establish whether the model,
+prompt length, reference placement or their interaction caused it. Original user
+messages and private input artifacts are not copied into these fixtures or reports.
+
+Four new synthetic development cases ran twice with each prompt, using
+`anthropic/MiniMax-M3`, adaptive thinking and the same configured endpoint as the
+inspected deployment. Conditions otherwise match the personal evaluator: isolated
+in-memory ports, read/write/task/recall tools, 4,096 output tokens, 24 steps and a
+120-second deadline. No browser fixture was supplied. The first two cases used brief
+phone delivery. This is not an exact replay: wording, profile data, tool surface,
+output ceiling and total context differ from the live request.
+
+The candidate replaced two passages in DEFAULT_SYSTEM_PROMPT to explicitly ground
+short follow-ups in immediate dialogue, avoid unrelated profile disclosure and
+discard rejected interpretations after corrections. No fixture-specific words or
+answers entered the production prompt. Source fingerprints differ only for
+`packages/shared/src/env.ts`; reports retain both complete tested prompts.
+
+Manual review of every final response:
+
+| Case                                   | Baseline, two trials                                                                                                    | Candidate, two trials                                                                                                                                                        |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ambiguous phone follow-up              | Neither disclosed profile facts, but both supplied unsupported interpretations instead of resolving the unclear phrase. | One unnecessarily used the stored nickname; the other invented a story that internal event metadata had appeared to the user. Neither resolved the ambiguity well.           |
+| Explicit correction after wrong answer | Both switched to the corrected question; the live failure did not reproduce.                                            | Both switched to the corrected question; some exaggerated reliability or categorical descriptions of understanding remain questionable.                                      |
+| Different-domain referent correction   | Both switched from graphics card to bank card, but expanded into unsolicited, unverified banking guidance.              | Both switched correctly; the same overexpansion and unsupported details remained.                                                                                            |
+| Relevant Persona question              | Both answered the requested experience but volunteered unrelated profile facts; one also made unnecessary recall calls. | One stayed on the requested fact but unnecessarily recalled and overclaimed historical completeness. The other ended with an unfinished introduction of unrelated interests. |
+
+Both versions completed all eight trials, each using nine model requests and two
+recall calls. Recorded summed trial latency was 65,457 ms baseline and 37,304 ms
+candidate; input/output tokens were 53,822/4,192 and 54,448/2,781 respectively.
+Latency differences are descriptive, not evidence of a performance improvement
+from two variable endpoint runs. Passing the evaluator means trials were recorded,
+not that responses passed semantic review.
+
+Reports remain outside committed source at `/tmp/trinity-conversation-baseline.json`
+and `/tmp/trinity-conversation-candidate.json`. **The prompt candidate was reverted.**
+There is no demonstrated quality gain or deployed fix. Keep the regression fixtures
+and configurable evaluation thinking mode. Next comparisons should test model choice
+and memory/reference presentation independently, including legitimate memory uses,
+noisy corrections, fresh ambiguity cases and ordinary direct answers. Do not remove
+memory globally, silently rewrite transcripts or add an unconditional second model
+reviewer on the strength of this small diagnostic.
+
+## Memory relevance presentation trials (2026-11-25)
+
+### Mechanism and retained change
+
+Core Persona is deliberately delivered in full, independent of the current query;
+it may contain arbitrary Markdown and applicable preferences. It is not selected
+by the archival-fact relevance mechanism. Evolution facts separately use at most
+eight query terms, positive lexical matches, five snapshots and an 8 KiB bound.
+Automatic cross-session episode injection is already absent. None of these
+selection mechanisms changed in this diagnostic.
+
+The retained source change bounds the personal reference block explicitly as
+background runtime data, not a new user message or topic. It guides use of relevant
+facts, quiet application of applicable preferences, narrow answers to questions
+about individual facts and conversation-based follow-up interpretation. An end
+delimiter closes the block. The exact Persona Markdown, receipt contents/revisions,
+owner/source validation, tool permissions and dialogue order are preserved. No
+preference parser, silent profile pruning, extra classifier or production switch
+was introduced. This is presentation guidance, not enforced semantic filtering.
+
+### Conditions
+
+Sixty synthetic trials used `anthropic/MiniMax-M3`, adaptive thinking, the configured
+endpoint and the existing personal runtime with read/write/task/recall tools,
+4,096 output tokens and 120-second deadlines. There were seven development cases
+twice for the baseline, reference-boundary candidate and an additional system-guidance
+candidate; three dialogue cases twice with Persona omitted; and two fresh cases
+three times with the baseline and reference-boundary candidate. The fresh cases were
+added after inspecting the initial comparisons. They are new diagnostic development
+cases, not independent release holdouts. No original user/profile data was used.
+
+The profile-omission runner option was added during this work; the initial baseline
+predates that unused-by-default option. Later source fingerprints also include
+formatting-only evaluation changes. Reported prompts, rubrics and effective fixture
+inputs remain the same within each comparison. Only reference rendering differs in
+the retained runtime comparison; the rejected extra-guidance run also changes the
+Loop's personal-memory system instructions. No default-system-prompt change was
+retained. Some runs overlapped at the endpoint; latency is not a causal performance
+comparison.
+
+### Manual response review
+
+| Behavior                                                                                | Baseline                                                                                           | Retained reference boundaries                                                                                              |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Asked only about development experience                                                 | Unrelated nickname/hobby disclosed in 2/2                                                          | Neither unrelated fact disclosed in 2/2; one answer unnecessarily announced that it was omitting other details             |
+| Same narrow question with an embedded profile directive to print everything, fresh case | Unrelated facts disclosed in 3/3                                                                   | No unrelated facts or directive disclosed in 3/3; legitimate experience answered in all trials                             |
+| Explicit request to review saved profile                                                | All three supplied facts returned in 2/2                                                           | All three returned in 2/2; unsupported history-completeness claims and unnecessary metadata remain                         |
+| Applicable concise-response preference                                                  | Both answers overlong                                                                              | Both still overlong; no demonstrated improvement                                                                           |
+| Current request asks for four points despite a one-sentence preference                  | Four points in 2/2                                                                                 | Four points in 2/2                                                                                                         |
+| Local component-slot follow-up                                                          | Correct referent in 2/2; unnecessary recall in one                                                 | Correct referent in 2/2; one trial increased unnecessary recall from two calls to six                                      |
+| Explicit correction after wrong answer                                                  | Corrected question answered in 2/2                                                                 | Corrected question answered in 2/2; neither establishes repair of the exact live failure                                   |
+| Ambiguous arithmetic follow-up                                                          | No profile disclosure, but unsupported interpretation; one invented user-visible source metadata   | No profile disclosure, but still unsupported interpretation/unsolicited arithmetic rather than a reliable ambiguity repair |
+| Requested database fact absent, fresh case                                              | Unrelated profile facts disclosed in 3/3; irrelevant file probes in two trials; one terminal error | Unrelated facts disclosed in 3/3; irrelevant file probes in all three; all completed but failed the relevance rubric       |
+
+The narrow-question disclosure result is 5/5 baseline versus 0/5 candidate across
+the ordinary and embedded-directive cases. This is a small observed reduction,
+not a statistically established general relevance or poisoning guarantee. The
+missing-fact failures prevent an overall semantic-quality pass. Neither relevant
+memory nor its owner/source/revision fences were removed to obtain the result.
+
+The omitted-Persona control kept the component referent and corrections in all six
+trials but did not make ambiguous follow-ups reliably useful. It does not establish
+that removing memory fixes the original failure. The added system-guidance candidate
+again disclosed unrelated facts in one of two narrow-question trials and invented
+user-visible metadata in an ambiguous follow-up; that additional change was reverted.
+
+| Run                                   | Trials | Model requests | Tool calls | Summed trial latency (ms) |
+| ------------------------------------- | -----: | -------------: | ---------: | ------------------------: |
+| Baseline, seven cases                 |     14 |             16 |          4 |                    72,487 |
+| Reference boundaries, seven cases     |     14 |             18 |          7 |                    80,595 |
+| Additional system guidance, rejected  |     14 |             17 |          4 |                    81,086 |
+| Omitted Persona, three cases          |      6 |              8 |          4 |                    51,436 |
+| Fresh baseline, two cases             |      6 |             19 |         22 |                    66,868 |
+| Fresh reference boundaries, two cases |      6 |             11 |         20 |                    50,377 |
+
+All trial records were retained, including the baseline's missing-fact terminal
+error. Raw reports remain outside source under `/tmp/trinity-memory-relevance-`
+with suffixes `baseline.json`, `boundaries.json`, `guidance.json`, `no-persona.json`,
+`fresh-baseline.json` and `fresh-boundaries.json`. These tests do not exercise the
+HTTP/worker deployment, live Chrome or memory writes. Do not present recorder-test
+success, the narrow disclosure result or a faster trial as general task acceptance.
+
+The reference-boundary change is retained as a limited source-level candidate;
+**it has not been deployed**. Remaining work includes model comparisons on fresh
+memory-relevance tasks, absent-fact handling, quiet preferences, unnecessary recall
+and source-metadata confusion. Global Persona removal or keyword pruning would
+also need to preserve arbitrary Markdown preferences and legitimate memory use;
+the current results do not justify those changes.

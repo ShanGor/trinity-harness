@@ -117,9 +117,13 @@ it('offers explicit source-backed consolidation and reports missing enrollment',
   )!;
   await act(async () => preset.click());
   expect(document.body.textContent).toContain('Enable nightly memory consolidation');
-  expect(document.body.textContent).toContain('Existing facts are preserved');
+  expect(document.body.textContent).toContain('Existing Persona content is preserved');
   expect(document.body.textContent).toContain('personal declarations are saved verbatim');
   expect(document.body.textContent).toContain('Requires automatic memory');
+  const merging = document.querySelector('input[id="mergeAcceptedFacts"]') as HTMLInputElement;
+  expect(merging.checked).toBe(false);
+  await act(async () => merging.click());
+  expect(merging.checked).toBe(true);
   expect(create).not.toHaveBeenCalled();
 });
 

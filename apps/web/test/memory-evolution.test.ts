@@ -134,6 +134,14 @@ it('discloses exact v3 fact/playbook snapshots and sources used for an answer', 
                 kind: 'preference',
                 text: 'Prefers tea.',
                 source,
+                sources: [
+                  source,
+                  {
+                    ...source,
+                    sourceEventId: '00000000-0000-4000-8000-000000000002',
+                    sourceQuote: 'Tea is my lasting preference.',
+                  },
+                ],
                 revision: 1,
                 validFrom: '2026-11-24T00:00:00.000Z',
                 validTo: null,
@@ -159,6 +167,7 @@ it('discloses exact v3 fact/playbook snapshots and sources used for an answer', 
     expect(container.textContent).toContain('1 playbooks');
     await act(async () => (container.querySelector('[role="button"]') as HTMLElement).click());
     expect(container.textContent).toContain('Original source: I prefer tea.');
+    expect(container.textContent).toContain('Original source: Tea is my lasting preference.');
     expect(container.textContent).toContain('Check the original preference.');
     expect(container.textContent).toContain('Semantic and keyword episode recall');
   } finally {

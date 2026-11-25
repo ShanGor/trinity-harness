@@ -22,7 +22,7 @@ import {
   textChunks,
   toolCallThenFinish,
 } from '@trinity-harness/core/testing';
-import { EvolutionPersonalContext } from '@trinity-harness/memory';
+import { EvolutionPersonalContext, createMemoryMergeTool } from '@trinity-harness/memory';
 
 export function fakeEvolution(): MemoryEvolutionStorePort {
   return {
@@ -57,6 +57,144 @@ it('validates the shared switch identically and defaults off', () => {
   for (const value of ['TRUE', 'yes', '1', ''])
     expect(() => schema.parse({ MEMORY_EVOLUTION_ENABLED: value })).toThrow();
 });
+it.each(['confirmed', 'concurrent', 'uncertain', 'source-revoked'] as const)(
+  'refreshes an acknowledged archival merge after its complete result and fences concurrent changes (%s)',
+  async (mode) => {
+    const concurrent = mode === 'concurrent';
+    const store = new MemorySessionStore();
+    const at = new Date().toISOString();
+    const meta: SessionMeta = {
+      id: randomUUID(),
+      tenantId: randomUUID(),
+      userId: randomUUID(),
+      scope: 'personal',
+      kind: 'work',
+      sessionRole: 'task',
+      workspaceUri: '/workspace',
+      title: 'Nightly',
+      createdAt: at,
+    };
+    const metas: SessionMetaStore = {
+      get: async () => meta,
+      create: vi.fn(),
+      listForIdentity: async () => [meta],
+      setTitleIfEmpty: vi.fn(),
+      close: vi.fn(),
+      setPolicy: vi.fn(),
+    };
+    const memory: MemoryStorePort = {
+      snapshot: async () => ({ revision: 0, hasSuppression: false, items: [] }),
+      change: vi.fn(),
+    };
+    const index = { history: async () => ({ episodes: [], nextBefore: null }), revise: vi.fn() };
+    const source = {
+      sourceEpisodeId: randomUUID(),
+      sourceEventId: randomUUID(),
+      sourceSessionId: randomUUID(),
+      sourceQuote: 'I prefer tea.',
+    };
+    const first: MemoryFact = {
+      factId: randomUUID(),
+      kind: 'preference',
+      text: 'Prefers tea.',
+      revision: 1,
+      validFrom: at,
+      validTo: null,
+      source,
+    };
+    const second: MemoryFact = { ...first, factId: randomUUID(), revision: 2 };
+    const merged: MemoryFact = { ...first, factId: randomUUID(), revision: 3 };
+    let revision = 2;
+    let active = [first, second];
+    const evolution = fakeEvolution();
+    evolution.contextRevision = async () => revision;
+    evolution.revision = async () => revision;
+    evolution.activeFacts = async () => active;
+    evolution.merge = vi.fn(async () => {
+      active = mode === 'source-revoked' ? [] : [merged];
+      revision = concurrent ? 4 : 3;
+      if (mode === 'uncertain') throw new Error('Lost response after durable merge');
+      return merged;
+    });
+    const tools = new CoreToolRegistry(new FakeSandbox());
+    tools.register(createRecallTool({ memory, index, metas, store, evolution }));
+    tools.register(
+      createMemoryMergeTool({
+        evolution,
+        memory,
+        metas,
+        users: {
+          findById: async () => ({
+            id: meta.userId,
+            tenantId: meta.tenantId,
+            role: 'member',
+            email: 'synthetic@example.test',
+            createdAt: at,
+          }),
+        },
+      }),
+    );
+    const model = new FakeLLM(
+      () => toolCallThenFinish('facts', 'recall', { type: 'facts' }),
+      () =>
+        toolCallThenFinish('merge', 'memory_merge', {
+          factIds: [first.factId, second.factId],
+          expectedRevision: 2,
+        }),
+      () => textChunks('Merged the duplicate facts.'),
+    );
+    await store.append(meta.id, [
+      {
+        type: 'session/created',
+        eventId: randomUUID(),
+        at,
+        kind: 'work',
+        sessionRole: 'task',
+        workspaceUri: '/workspace',
+      },
+    ]);
+    const result = await new CoreAgentLoop({
+      llm: model,
+      model: 'fake/model',
+      tools,
+      store,
+      workspaceRoot: '/workspace',
+      sessionMetas: metas,
+      personalContext: new EvolutionPersonalContext(
+        new PersonalContext(memory, index, store, evolution),
+        evolution,
+        store,
+      ),
+    }).run(meta.id, 'Merge equivalent facts.', { emit: () => undefined }, { actor: meta.userId });
+    expect(result.reason).toBe(mode === 'confirmed' ? 'completed' : 'error');
+    expect(evolution.merge).toHaveBeenCalledTimes(1);
+    const logs = await store.load(meta.id);
+    const resultIndex = logs.findIndex(
+      (event) => event.type === 'tool/result' && event.callId === 'merge',
+    );
+    expect(logs[resultIndex]).toMatchObject(
+      mode === 'uncertain' ? { isError: true } : { isError: false, value: { status: 'merged' } },
+    );
+    if (mode === 'confirmed') {
+      expect(model.requests).toHaveLength(3);
+      const selectionIndex = logs.findLastIndex((event) => event.type === 'memory/selection');
+      expect(selectionIndex).toBeGreaterThan(resultIndex);
+      expect(logs[selectionIndex]).toMatchObject({
+        receipt: { evolutionRevision: 3, policyRevision: 0 },
+      });
+      expect(
+        model.requests[2]!.messages.some(
+          (message) => message.role === 'tool' && message.toolCallId === 'facts',
+        ),
+      ).toBe(false);
+      expect(
+        model.requests[2]!.messages.some(
+          (message) => message.role === 'tool' && message.toolCallId === 'merge',
+        ),
+      ).toBe(true);
+    } else expect(model.requests).toHaveLength(2);
+  },
+);
 it.each([false, true])(
   'commits v3 fact snapshots before dispatch and fences source/revision changes (%s)',
   async (invalidate) => {
@@ -201,7 +339,9 @@ it('keeps ordinary baseline chat available while the unused fact adapter is down
   const context = new EvolutionPersonalContext(baseline, evolution, store);
   const receipt = await context.select(meta, randomUUID(), 'hello');
   await context.validate(meta, receipt);
-  expect(evolution.contextRevision).not.toHaveBeenCalled();
+  expect(receipt.injectedFacts).toBeUndefined();
+  expect(receipt.evolutionRevision).toBeUndefined();
+  expect(evolution.contextRevision).toHaveBeenCalledTimes(1);
 });
 
 it('retires old archival recall pairs after a committed own-Persona correction', async () => {

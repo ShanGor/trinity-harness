@@ -303,63 +303,112 @@
   }
 }
 
-/* Shared two-row composer grid keeps attachment and voice actions together. */
+/* A shared footer prevents running-task controls from becoming full-width rows. */
 .trinity-shell .composer-card {
-  position: relative;
-}
-
-.trinity-shell .chat-composer {
   display: grid;
-  grid-template-columns: 44px 44px 44px minmax(0, 1fr);
+  grid-template-columns: 44px 44px 44px minmax(0, 1fr) auto;
   gap: 4px;
   align-items: center;
+  padding: 12px;
 }
 
+.trinity-shell .chat-composer,
 .trinity-shell .chat-composer-input,
 .trinity-shell .chat-composer-input > .ant-flex {
   display: contents;
 }
 
-.trinity-shell .chat-composer-sender {
+.trinity-shell .composer-attachments {
   grid-column: 1 / -1;
   grid-row: 1;
 }
 
+.trinity-shell .chat-composer-sender {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+
 .trinity-shell .chat-composer > .ant-upload-wrapper {
   grid-column: 1;
-  grid-row: 2;
+  grid-row: 3;
 }
 
 .trinity-shell .composer-call-button {
   grid-column: 2;
-  grid-row: 2;
+  grid-row: 3;
 }
 
 .trinity-shell .composer-mic-button {
   grid-column: 3;
-  grid-row: 2;
+  grid-row: 3;
+}
+
+.trinity-shell .composer-running-controls {
+  grid-column: 4;
+  grid-row: 3;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.trinity-shell .composer-running-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.trinity-shell .composer-running-controls .ant-select {
+  width: 152px;
+  max-width: 100%;
 }
 
 .trinity-shell .composer-model-toolbar {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
+  position: static;
+  grid-column: 5;
+  grid-row: 3;
   padding: 0;
-  max-width: calc(100% - 176px);
-}
-
-.trinity-shell .chat-composer :is(.ant-select, .ant-btn-dangerous) {
-  grid-column: 1 / -1;
+  min-width: 0;
+  max-width: 220px;
 }
 
 .trinity-shell .composer-model-trigger.ant-btn {
   border-radius: var(--radius-control);
 }
 
-.trinity-shell .composer-card:has([aria-label='Running task input']) .composer-model-toolbar {
-  position: static;
-  max-width: none;
-  padding: 0 12px 12px;
+@media (max-width: 760px) {
+  .trinity-shell .composer-card {
+    grid-template-columns: 44px 44px 44px minmax(0, 1fr);
+    padding: 8px;
+  }
+
+  .trinity-shell .composer-running-controls {
+    display: contents;
+  }
+
+  .trinity-shell .composer-running-controls .ant-select {
+    grid-column: 1 / 4;
+    grid-row: 4;
+    width: 132px;
+  }
+
+  .trinity-shell .composer-running-controls > .ant-btn {
+    grid-column: 4;
+    grid-row: 3;
+    justify-self: end;
+  }
+
+  .trinity-shell .composer-running-label {
+    display: none;
+  }
+
+  .trinity-shell .composer-model-toolbar {
+    grid-column: 4;
+    grid-row: 4;
+    justify-self: end;
+    max-width: 100%;
+  }
 }
 
 /* Softly lit onboarding uses the same material as the workspace navigation. */

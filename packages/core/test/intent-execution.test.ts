@@ -764,6 +764,64 @@ describe('dependency-aware evidence', () => {
     llm.assertExhausted();
   });
 
+  it('delivers fixture persona, local dialogue and the exact current correction together', async () => {
+    const correction = '我说的卡是银行卡，不是显卡。请回答刚才那个问题。';
+    const persona = {
+      content: '# Profile\n- 用户有 Java 开发经验。\n\n## Preferences\nKeep answers concise.\n',
+      revision: 1,
+      updatedAt: at,
+      autoSaveEnabled: false,
+    };
+    const f = await intentRuntime({
+      files: {},
+      persona,
+      localHistory: [{ request: '我的卡找不到了，先做什么？', answer: '先检查显卡是否插紧。' }],
+    });
+    const llm = new FakeLLM((request) => {
+      const reference = request.messages.find((message) => message.context === 'reference');
+      expect(reference?.role).toBe('user');
+      expect(reference?.content).toContain(persona.content);
+      expect(reference?.content).not.toContain(correction);
+      const referenceIndex = request.messages.indexOf(reference!);
+      expect(referenceIndex).toBeGreaterThan(
+        request.messages.findIndex((message) => message.content.startsWith('先检查显卡是否插紧')),
+      );
+      expect(
+        request.messages.findIndex((message) => message.content === correction),
+      ).toBeGreaterThan(referenceIndex);
+      expect(request.messages.some((message) => message.content.startsWith('我的卡找不到了'))).toBe(
+        true,
+      );
+      expect(
+        request.messages.some((message) => message.content.startsWith('先检查显卡是否插紧')),
+      ).toBe(true);
+      expect(request.messages.some((message) => message.content === correction)).toBe(true);
+      expect(request.messages.flatMap((message) => message.toolCalls ?? [])).toEqual([]);
+      return textChunks('先通过银行官方渠道冻结或挂失这张银行卡。');
+    });
+    const loop = new CoreAgentLoop({
+      llm,
+      model: 'fake/model',
+      tools: f.tools,
+      store: f.store,
+      workspaceRoot: '/fixture',
+      personalContext: f.personalContext,
+      sessionMetas: f.metas,
+      verification: true,
+    });
+    expect((await loop.run(f.owner.id, correction, sink)).reason).toBe('completed');
+    const events = await f.store.load(f.owner.id);
+    expect(events.some((event) => event.type === 'tool/call')).toBe(false);
+    expect(events.findLast((event) => event.type === 'memory/selection')?.receipt.persona).toEqual(
+      persona,
+    );
+    // Reprojection retains the same background block without rewriting the source receipt.
+    expect(toModelMessages(events).find((message) => message.context === 'reference')).toEqual(
+      llm.requests[0]!.messages.find((message) => message.context === 'reference'),
+    );
+    llm.assertExhausted();
+  });
+
   it('runs the evaluation browser fixture through real capture, artifacts, initial planning and verification', async () => {
     const f = await intentRuntime({
       files: {},

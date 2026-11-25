@@ -23,8 +23,18 @@ export const personaToolParametersSchema = z.discriminatedUnion('operation', [
       operation: z.literal('update'),
       expectedRevision: z.number().int().nonnegative(),
       sourceQuote: z.string().min(1).max(4000),
-      sourceEpisodeId: z.uuid().optional(),
-      sourceEventId: z.uuid().optional(),
+      sourceEpisodeId: z
+        .uuid()
+        .optional()
+        .describe(
+          'Scheduled memory consolidation only: the expanded original episode. Omit in ordinary conversation.',
+        ),
+      sourceEventId: z
+        .uuid()
+        .optional()
+        .describe(
+          'Optional in ordinary conversation: must identify the current committed user message. An earlier source is allowed only for scheduled memory consolidation with sourceEpisodeId.',
+        ),
       edits: z
         .array(
           z.object({ oldText: z.string().max(16000), newText: z.string().max(16000) }).strict(),
@@ -166,6 +176,7 @@ export const recallReceiptSchema = z.object({
   recallMode: z.enum(['lexical', 'hybrid']).optional(),
   evolutionRevision: z.number().int().nonnegative().optional(),
   facts: z.array(memoryFactSchema).max(50).optional(),
+  injectedFacts: z.array(memoryFactSchema).max(5).optional(),
   playbooks: z.array(playbookSchema).max(50).optional(),
   candidatesDelivered: z.array(z.uuid()).max(50).optional(),
   query: z.string().max(200).optional(),

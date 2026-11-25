@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { fuseEpisodes, SemanticRecall, reconcileEmbeddings } from '../../src/index.js';
 import {
   evaluationClock,
@@ -76,6 +76,32 @@ describe('memory retrieval evaluation gate', () => {
     await expect(
       recall.searchEpisodes(owner, query, { ...context, signal: AbortSignal.abort() }),
     ).rejects.toThrow();
+  });
+  it('keeps functional-word ILIKE matches out of hybrid ranks without changing the embedding query', async () => {
+    const history = vi.fn(async () => ({ episodes: [], nextBefore: null }));
+    const embed = vi.fn(async () => ({ vectors: [[1, 0]], dimensions: 2, model: 'fake/test' }));
+    const vectors: EpisodeVectorPort = {
+      validate: async () => undefined,
+      pending: async () => [],
+      complete: async () => undefined,
+      search: async () => [evaluationEpisodes[2]!],
+    };
+    const recall = new SemanticRecall({ ...index, history }, vectors, {
+      model: 'fake/test',
+      embed,
+    });
+    const query = { query: 'What food do I prefer?', timezone: 'UTC', limit: 10 };
+    const result = await recall.searchEpisodes(owner, query, context);
+    expect(history).toHaveBeenCalledWith(owner, { ...query, query: 'food prefer', limit: 50 });
+    expect(embed).toHaveBeenCalledWith([query.query], expect.objectContaining({ owner }));
+    expect(result.episodes).toEqual([evaluationEpisodes[2]]);
+
+    history.mockClear();
+    await recall.searchEpisodes(owner, { ...query, query: 'Where am I now?' }, context);
+    expect(history).not.toHaveBeenCalled();
+    embed.mockRejectedValueOnce(new Error('offline'));
+    await recall.searchEpisodes(owner, query, context);
+    expect(history).toHaveBeenLastCalledWith(owner, query);
   });
   it('interruption before publication leaves the job pending for a later tick', async () => {
     let complete = false;

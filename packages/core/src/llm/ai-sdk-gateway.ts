@@ -1,3 +1,4 @@
+import './provider-log-policy.js';
 import type {
   LlmResolvedRoute,
   ContentBlock,

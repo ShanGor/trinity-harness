@@ -210,6 +210,126 @@ it('honors auto-save off, while allowing an explicit remember request', async ()
   expect(f.persona?.autoSaveEnabled).toBe(false);
 });
 
+it('recovers from an older source ID using the current source and saves exactly once', async () => {
+  const f = await fixture();
+  const meta = await f.session();
+  await f.run(meta, 'My name is Alex', new FakeLLM(() => textChunks('Hello')));
+  const earlier = (await f.store.load(meta.id)).find((e) => e.type === 'message/user')!;
+  const promptId = randomUUID();
+  await f.store.append(meta.id, [
+    {
+      type: 'message/user',
+      eventId: promptId,
+      at,
+      surfaceOp: 'append',
+      content: [{ kind: 'text', text: 'My name is Alex' }],
+    },
+  ]);
+  const promptSeq = (await f.store.load(meta.id)).length;
+  const llm = new FakeLLM(
+    () => toolCallThenFinish('read-profile', 'persona', { operation: 'read' }),
+    () =>
+      toolCallThenFinish('save-earlier-source', 'persona', {
+        operation: 'update',
+        expectedRevision: 0,
+        sourceEventId: earlier.eventId,
+        sourceQuote: 'My name is Alex',
+        edits: [{ oldText: '', newText: '- My name is Alex' }],
+      }),
+    () =>
+      toolCallThenFinish('save-current-source', 'persona', {
+        operation: 'update',
+        expectedRevision: 0,
+        sourceEventId: promptId,
+        sourceQuote: 'My name is Alex',
+        edits: [{ oldText: '', newText: '- My name is Alex' }],
+      }),
+    () => textChunks('Saved.'),
+  );
+  expect((await f.run(meta, 'My name is Alex', llm, { promptSeq })).reason).toBe('completed');
+  expect(f.writes).toHaveLength(1);
+  expect(f.writes[0]?.source).toMatchObject({
+    sessionId: meta.id,
+    eventId: promptId,
+    excerpt: 'My name is Alex',
+  });
+  expect(f.persona?.revision).toBe(1);
+  expect(JSON.stringify(llm.requests[3]?.messages)).toContain('- My name is Alex');
+  expect(
+    (await f.store.load(meta.id)).findLast(
+      (e) => e.type === 'tool/result' && e.callId === 'save-earlier-source',
+    ),
+  ).toMatchObject({ isError: true });
+  expect(
+    (await f.store.load(meta.id)).findLast(
+      (e) => e.type === 'tool/result' && e.callId === 'save-current-source',
+    ),
+  ).toMatchObject({ isError: false, value: { saved: true, revision: 1 } });
+  llm.assertExhausted();
+});
+
+it.each([
+  'earlier',
+  'other-session',
+  'episode',
+  'absent-quote',
+  'quoted',
+  'auto-save-off',
+] as const)('retains foreground source restrictions with explicit IDs: %s', async (scenario) => {
+  const f = await fixture(scenario !== 'auto-save-off');
+  const meta = await f.session();
+  await f.run(meta, 'My name is Alex', new FakeLLM(() => textChunks('Hello')));
+  const earlier = (await f.store.load(meta.id)).find((e) => e.type === 'message/user')!;
+  const promptId = randomUUID();
+  const prompt =
+    scenario === 'quoted'
+      ? 'Translate: "My name is Alex"'
+      : scenario === 'absent-quote'
+        ? 'Hello again'
+        : 'My name is Alex';
+  await f.store.append(meta.id, [
+    {
+      type: 'message/user',
+      eventId: promptId,
+      at,
+      surfaceOp: 'append',
+      content: [{ kind: 'text', text: prompt }],
+    },
+  ]);
+  const promptSeq = (await f.store.load(meta.id)).length;
+  const other = await f.session();
+  await f.run(other, 'My name is Alex', new FakeLLM(() => textChunks('Hello')));
+  const otherPrompt = (await f.store.load(other.id)).find((e) => e.type === 'message/user')!;
+  const llm = new FakeLLM(
+    () =>
+      toolCallThenFinish('restricted-source', 'persona', {
+        operation: 'update',
+        expectedRevision: scenario === 'auto-save-off' ? 1 : 0,
+        sourceEventId:
+          scenario === 'earlier'
+            ? earlier.eventId
+            : scenario === 'other-session'
+              ? otherPrompt.eventId
+              : promptId,
+        ...(scenario === 'episode' ? { sourceEpisodeId: promptId } : {}),
+        sourceQuote: 'My name is Alex',
+        edits: [{ oldText: '', newText: '- My name is Alex' }],
+      }),
+    () => textChunks('Not saved.'),
+  );
+  await f.run(meta, prompt, llm, { promptSeq });
+  expect(f.writes).toHaveLength(0);
+  const result = (await f.store.load(meta.id)).findLast(
+    (e) => e.type === 'tool/result' && e.callId === 'restricted-source',
+  );
+  expect(result).toMatchObject({ isError: true });
+  if (['earlier', 'other-session', 'episode'].includes(scenario))
+    expect(result).toMatchObject({
+      value: { message: expect.stringContaining('sourceEventId may be omitted or must equal') },
+    });
+  llm.assertExhausted();
+});
+
 it.each(['> 我叫小张', '```text\n我叫小张\n```', '请翻译："我叫小张"', '今天请帮我查天气'])(
   'rejects sources from quotes/code or absent from the user: %s',
   async (prompt) => {

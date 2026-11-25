@@ -30,6 +30,21 @@ export const evaluationQuestions = [
   { category: 'negative', query: 'mortgage', expected: null },
 ] as const;
 
+// Additional phrasing is scored separately; keep the original 3/6 baseline stable.
+export const evaluationHoldoutQuestions = [
+  { category: 'fact', query: 'What is the name of my dog?', expected: 3 },
+  { category: 'correction', query: 'Which city did I move to?', expected: 1 },
+  { category: 'time', query: 'When is our launch?', expected: 4 },
+  { category: 'cross-language', query: '我的狗叫什么名字？', expected: 3 },
+  { category: 'cross-language', query: '我偏好什么口味？', expected: 2 },
+  { category: 'cross-language', query: '发布定在哪天？', expected: 4 },
+  { category: 'cross-language', query: '我现在搬到哪里了？', expected: 1 },
+  { category: 'historical', query: 'What did I say about Osaka?', expected: 0 },
+  { category: 'paraphrase', query: 'What meals do I enjoy?', expected: 2 },
+  { category: 'negative', query: 'passport renewal', expected: null },
+  { category: 'negative', query: '血型', expected: null },
+] as const;
+
 /** Mirrors PgConversationIndex's OR ILIKE and descending insertion order on literal fixtures. */
 export function lexicalFixture(query: string): TopicEpisode[] {
   const terms = memorySearchTerms(query);

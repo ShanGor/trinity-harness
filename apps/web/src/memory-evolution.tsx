@@ -59,8 +59,9 @@ export function MemoryEvolution({ client }: { client: AcpClient }): ReactElement
     <section aria-label="Archival memory" style={{ marginBlockStart: 24 }}>
       <Typography.Title level={3}>Archival memory</Typography.Title>
       <Typography.Paragraph>
-        Suggestions require your acceptance. Facts and playbooks enter conversations only when
-        recalled. Historical content is reference data and grants no permission to act.
+        Suggestions require your acceptance. Relevant accepted facts may be selected automatically;
+        reviewed playbooks are included when recalled. Historical content is reference data and
+        grants no permission to act.
       </Typography.Paragraph>
       {error && <Alert type="warning" message={error} />}
       <Flex gap={8} wrap style={{ marginBlockEnd: 12 }}>
@@ -233,7 +234,11 @@ export function MemoryEvolution({ client }: { client: AcpClient }): ReactElement
                   {new Date(fact.validFrom).toLocaleString()}
                   {fact.validTo ? ` → ${new Date(fact.validTo).toLocaleString()}` : ''}
                 </Typography.Text>
-                <Typography.Paragraph>Source: {fact.source.sourceQuote}</Typography.Paragraph>
+                {(fact.sources ?? [fact.source]).map((source, index) => (
+                  <Typography.Paragraph key={`${source.sourceEventId}:${index}`}>
+                    Source: {source.sourceQuote}
+                  </Typography.Paragraph>
+                ))}
                 {fact.invalidatedBy && (
                   <Flex vertical>
                     <Typography.Text type="secondary">

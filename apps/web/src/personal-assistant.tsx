@@ -505,6 +505,14 @@ export function AssistantTasks({
 }
 
 export function MemoryContextDisclosure({ receipt }: { receipt: RecallReceipt }): ReactElement {
+  const facts = [
+    ...new Map(
+      [...(receipt.injectedFacts ?? []), ...(receipt.facts ?? [])].map((fact) => [
+        fact.factId,
+        fact,
+      ]),
+    ).values(),
+  ];
   return (
     <Collapse
       size="small"
@@ -512,7 +520,7 @@ export function MemoryContextDisclosure({ receipt }: { receipt: RecallReceipt })
       items={[
         {
           key: 'memory',
-          label: `Memory context · ${receipt.memories.length} saved · ${receipt.episodes.length} episodes${receipt.facts?.length ? ` · ${receipt.facts.length} archival facts` : ''}${receipt.playbooks?.length ? ` · ${receipt.playbooks.length} playbooks` : ''}`,
+          label: `Memory context · ${receipt.memories.length} saved · ${receipt.episodes.length} episodes${facts.length ? ` · ${facts.length} archival facts` : ''}${receipt.playbooks?.length ? ` · ${receipt.playbooks.length} playbooks` : ''}`,
           children: (
             <>
               {receipt.persona && (
@@ -543,14 +551,21 @@ export function MemoryContextDisclosure({ receipt }: { receipt: RecallReceipt })
                   Semantic and keyword episode recall
                 </Typography.Paragraph>
               )}
-              {receipt.facts?.map((fact) => (
+              {!!receipt.injectedFacts?.length && (
+                <Typography.Paragraph type="secondary">
+                  {receipt.injectedFacts.length} archival facts selected automatically
+                </Typography.Paragraph>
+              )}
+              {facts.map((fact) => (
                 <details key={fact.factId}>
                   <summary>
                     {fact.text} · revision {fact.revision}
                   </summary>
-                  <Typography.Paragraph>
-                    Original source: {fact.source.sourceQuote}
-                  </Typography.Paragraph>
+                  {(fact.sources ?? [fact.source]).map((source, index) => (
+                    <Typography.Paragraph key={`${source.sourceEventId}:${index}`}>
+                      Original source: {source.sourceQuote}
+                    </Typography.Paragraph>
+                  ))}
                 </details>
               ))}
               {receipt.playbooks?.map((book) => (

@@ -18,6 +18,8 @@ import {
   recallResultSchema,
   scheduleDefinitionSchema,
   memoryProposalParametersSchema,
+  memoryMergeParametersSchema,
+  factMergeSchema,
   validateMemoryCommand,
   type MemoryEvolutionStorePort,
   type Identity,
@@ -32,6 +34,7 @@ import {
   type RevisionFence,
   type MemoryCandidate,
   type ConsolidationJournal,
+  type FactMerge,
 } from '@trinity-harness/contracts';
 import type { Db } from './client.js';
 import {
@@ -83,7 +86,7 @@ function unquoted(text: string): string {
   return text
     .replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`]*`|"[^"]*"|“[^”]*”|「[^」]*」/g, '\0')
     .split('\n')
-    .map((line) => (/^\s*>/.test(line) ? '\0' : line))
+    .map((line) => (/^\s*>|^(?: {4}|\t)/.test(line) ? '\0' : line))
     .join('\n');
 }
 
@@ -236,12 +239,17 @@ async function advance(tx: Tx, owner: Identity, revision: number): Promise<void>
 function draftSources(draft: CandidateSubmission['draft']): Source[] {
   return draft.type === 'fact' ? [draft.fact.source] : draft.playbook.sources;
 }
+function factSources(fact: MemoryFact): Source[] {
+  return fact.sources ?? [fact.source];
+}
 async function auditConsolidation(
   tx: Tx,
   owner: Identity,
-  command: CandidateSubmission,
+  command: CandidateSubmission | FactMerge,
+  mergeFacts: MemoryFact[] = [],
 ): Promise<void> {
-  const { journal, draft } = command;
+  const { journal } = command;
+  const merging = 'factIds' in command;
   const [origin] = await tx
     .select()
     .from(sessions)
@@ -269,7 +277,14 @@ async function auditConsolidation(
   )
     fail();
   const [run] = await tx
-    .select({ definition: assistantSchedules.definition, sessionId: scheduleOccurrences.sessionId })
+    .select({
+      definition: assistantSchedules.definition,
+      enabled: assistantSchedules.enabled,
+      revision: assistantSchedules.revision,
+      occurrenceRevision: scheduleOccurrences.revision,
+      scheduledAt: scheduleOccurrences.scheduledAt,
+      sessionId: scheduleOccurrences.sessionId,
+    })
     .from(scheduleOccurrences)
     .innerJoin(assistantSchedules, eq(assistantSchedules.id, scheduleOccurrences.scheduleId))
     .where(
@@ -278,11 +293,22 @@ async function auditConsolidation(
         scope(scheduleOccurrences, owner),
         eq(scheduleOccurrences.promptId, prompt.eventId),
       ),
-    );
+    )
+    .for('share');
   if (
     !run ||
     run.sessionId !== journal.sessionId ||
     scheduleDefinitionSchema.parse(run.definition).consolidation !== 'memory'
+  )
+    fail();
+  if (
+    merging &&
+    (!run.enabled ||
+      run.revision !== prompt.trigger.revision ||
+      run.occurrenceRevision !== prompt.trigger.revision ||
+      Date.parse(run.scheduledAt) !== Date.parse(prompt.trigger.scheduledAt) ||
+      !scheduleDefinitionSchema.parse(run.definition).mergeAcceptedFacts ||
+      prompt.trigger.mergeAcceptedFacts !== true)
   )
     fail();
   const selection = events.findLast(
@@ -299,12 +325,40 @@ async function auditConsolidation(
   const call = turn[callIndex];
   if (
     call?.type !== 'tool/call' ||
-    call.name !== 'memory_propose' ||
-    JSON.stringify(memoryProposalParametersSchema.parse(call.args)) !==
-      JSON.stringify({ draft, expectedRevision: command.expectedRevision })
+    call.name !== (merging ? 'memory_merge' : 'memory_propose') ||
+    JSON.stringify(
+      (merging ? memoryMergeParametersSchema : memoryProposalParametersSchema).parse(call.args),
+    ) !==
+      JSON.stringify(
+        merging
+          ? { factIds: command.factIds, expectedRevision: command.expectedRevision }
+          : { draft: command.draft, expectedRevision: command.expectedRevision },
+      )
   )
     fail();
-  for (const source of draftSources(draft)) {
+  if (merging) {
+    for (const fact of mergeFacts) {
+      if (fact.validFrom > prompt.trigger.scheduledAt) fail();
+      const delivered = turn.slice(0, callIndex).some((e, index) => {
+        if (
+          e.type !== 'tool/result' ||
+          e.isError ||
+          !turn
+            .slice(0, index)
+            .some((c) => c.type === 'tool/call' && c.name === 'recall' && c.callId === e.callId)
+        )
+          return false;
+        const result = recallResultSchema.safeParse(e.value);
+        return (
+          result.success &&
+          result.data.policyRevision === command.expectedPolicyRevision &&
+          result.data.facts?.some((saved) => isDeepStrictEqual(saved, fact))
+        );
+      });
+      if (!delivered) fail();
+    }
+  }
+  for (const source of merging ? mergeFacts.flatMap(factSources) : draftSources(command.draft)) {
     const [row] = await tx
       .select()
       .from(conversationEpisodes)
@@ -315,6 +369,7 @@ async function auditConsolidation(
         ),
       );
     if (!row || topicEpisodeSchema.parse(row.payload).at > prompt.trigger.scheduledAt) fail();
+    if (merging) continue; // Exact accepted fact snapshots above are the merge input authority.
     const delivered = turn.slice(0, callIndex).some((e, index) => {
       if (e.type !== 'tool/result' || e.isError) return false;
       if (
@@ -518,6 +573,98 @@ export class PgMemoryEvolutionStore implements MemoryEvolutionStorePort {
         });
         await advance(tx, owner, revision);
         return value;
+      })
+      .catch(safeFailure);
+  }
+  async merge(owner: Identity, raw: FactMerge, signal?: AbortSignal): Promise<MemoryFact> {
+    const command = factMergeSchema.parse(raw);
+    const hints = await this.db
+      .select()
+      .from(facts)
+      .where(and(scope(facts, owner), inArray(facts.id, command.factIds)))
+      .catch(safeFailure);
+    return this.db
+      .transaction(async (tx) => {
+        await locks(
+          tx,
+          owner,
+          hints.flatMap((row) => factSources(memoryFactSchema.parse(row.payload))),
+          command.journal,
+        );
+        if (await this.retry(tx, owner, factEvents, command)) {
+          const [prior] = await tx
+            .select()
+            .from(factEvents)
+            .where(and(scope(factEvents, owner), eq(factEvents.operationId, command.operationId)));
+          return memoryFactSchema.parse(z.object({ fact: z.unknown() }).parse(prior!.payload).fact);
+        }
+        const p = await this.fence(tx, owner, command);
+        if (!p.autoSave) fail();
+        const rows = await tx
+          .select()
+          .from(facts)
+          .where(and(scope(facts, owner), inArray(facts.id, command.factIds)));
+        const current = rows
+          .map((row) => memoryFactSchema.parse(row.payload))
+          .sort((a, b) => b.revision - a.revision || a.factId.localeCompare(b.factId));
+        if (
+          current.length !== command.factIds.length ||
+          current.some((fact) => fact.validTo !== null)
+        )
+          fail('MEMORY_CONFLICT');
+        const canonical = current[0]!;
+        const normalized = (text: string): string =>
+          text.normalize('NFC').replace(/\s+/gu, ' ').trim();
+        if (
+          current.some(
+            (fact) =>
+              fact.kind !== canonical.kind || normalized(fact.text) !== normalized(canonical.text),
+          )
+        )
+          fail('MEMORY_MERGE_NOT_EQUIVALENT');
+        await auditConsolidation(tx, owner, command, current);
+        const sources = [
+          ...new Map(
+            current.flatMap(factSources).map((source) => [JSON.stringify(source), source]),
+          ).values(),
+        ];
+        if (sources.length > 10) fail('MEMORY_MERGE_LIMIT');
+        for (const source of sources)
+          if (!(await sourceAllowed(tx, owner, source, p.floor))) fail();
+        const revision = command.expectedRevision + 1;
+        const at = this.now().toISOString();
+        const retired: MemoryFact[] = [];
+        for (const fact of current)
+          retired.push(
+            await this.retire(tx, owner, fact.factId, revision, at, command.operationId),
+          );
+        const fact: MemoryFact = {
+          kind: canonical.kind,
+          text: canonical.text,
+          source: canonical.source,
+          ...(sources.length > 1 ? { sources } : {}),
+          factId: command.operationId,
+          revision,
+          validFrom: at,
+          validTo: null,
+        };
+        signal?.throwIfAborted();
+        await tx.insert(facts).values({
+          tenantId: owner.tenantId,
+          userId: owner.userId,
+          id: fact.factId,
+          revision,
+          payload: fact,
+        });
+        await tx.insert(factEvents).values({
+          tenantId: owner.tenantId,
+          userId: owner.userId,
+          revision,
+          operationId: command.operationId,
+          payload: { type: 'merged', command, fact, retired },
+        });
+        await advance(tx, owner, revision);
+        return fact;
       })
       .catch(safeFailure);
   }
@@ -791,7 +938,8 @@ export class PgMemoryEvolutionStore implements MemoryEvolutionStorePort {
           .where(
             and(
               scope(facts, owner),
-              sourceFence(sql`${facts.payload}->'source'`, owner, before.floor),
+              query.factId ? eq(facts.id, query.factId) : undefined,
+              sql`not exists (select 1 from jsonb_array_elements(coalesce(${facts.payload}->'sources', jsonb_build_array(${facts.payload}->'source'))) as src where not ${sourceFence(sql`src`, owner, before.floor)})`,
               sql`${facts.payload}->>'validTo' is null`,
               query.kind ? sql`${facts.payload}->>'kind' = ${query.kind}` : undefined,
               query.query ? sql`${facts.payload}->>'text' ilike ${`%${query.query}%`}` : undefined,
@@ -802,7 +950,10 @@ export class PgMemoryEvolutionStore implements MemoryEvolutionStorePort {
         const result: MemoryFact[] = [];
         for (const row of rows) {
           const fact = memoryFactSchema.parse(row.payload);
-          if (await sourceAllowed(tx, owner, fact.source, before.floor)) result.push(fact);
+          let allowed = true;
+          for (const source of factSources(fact))
+            if (!(await sourceAllowed(tx, owner, source, before.floor))) allowed = false;
+          if (allowed) result.push(fact);
         }
         if (
           (await policy(tx, owner)).revision !== before.revision ||

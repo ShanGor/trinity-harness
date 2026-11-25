@@ -1,3 +1,4 @@
+import { memorySearchTerms } from '@trinity-harness/contracts';
 import type {
   ConversationIndexPort,
   EmbeddingPort,
@@ -8,6 +9,52 @@ import type {
   HybridRecallPage,
 } from '@trinity-harness/contracts';
 import { fuseEpisodes } from './ranking.js';
+
+// ILIKE is OR-based: pronouns/auxiliaries can match almost every episode ("do" even
+// matches "dog"). Do not let those accidental matches compete with semantic hits.
+// Keep this local to hybrid retrieval so the disabled/failure baseline stays exact.
+const functionalTerms = new Set([
+  'i',
+  'me',
+  'my',
+  'mine',
+  'we',
+  'us',
+  'ours',
+  'your',
+  'yours',
+  'he',
+  'him',
+  'his',
+  'she',
+  'her',
+  'hers',
+  'it',
+  'its',
+  'they',
+  'them',
+  'their',
+  'theirs',
+  'do',
+  'does',
+  'is',
+  'am',
+  'are',
+  'be',
+  'been',
+  'being',
+  'where',
+  'when',
+  'how',
+  'why',
+  'which',
+  'now',
+  'currently',
+]);
+
+export function memoryRecallTerms(query: string): string[] {
+  return memorySearchTerms(query).filter((term) => !functionalTerms.has(term));
+}
 
 export class SemanticRecall implements SemanticRecallPort {
   constructor(
@@ -25,7 +72,10 @@ export class SemanticRecall implements SemanticRecallPort {
     // Missing capability, pagination and date-only navigation retain exact baseline bytes/cursors.
     if (!this.embedding || !this.vectors || !query.query?.trim() || query.before)
       return this.index.history(owner, query);
-    const lexical = await this.index.history(owner, { ...query, limit: 50 });
+    const terms = memoryRecallTerms(query.query);
+    const lexical = terms.length
+      ? await this.index.history(owner, { ...query, query: terms.join(' '), limit: 50 })
+      : { episodes: [], nextBefore: null };
     try {
       const embedded = await this.embedding.embed([query.query], {
         purpose: 'memory-embedding',

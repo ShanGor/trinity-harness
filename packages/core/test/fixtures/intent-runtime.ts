@@ -6,6 +6,7 @@ import type {
   BrowserDriverPort,
   ConversationIndexPort,
   MemoryStorePort,
+  Persona,
   SessionMeta,
   SessionMetaStore,
   TopicEpisode,
@@ -61,6 +62,7 @@ export async function intentRuntime(task: {
   localHistory?: readonly { request: string; answer: string }[];
   otherHistory?: readonly { request: string; answer: string }[];
   pages?: Readonly<Record<string, string>>;
+  persona?: Persona;
 }): Promise<{
   store: MemorySessionStore;
   sandbox: FakeSandbox;
@@ -88,7 +90,12 @@ export async function intentRuntime(task: {
   const metas = new Map([[owner.id, owner]]);
   const episodes = new Map<string, TopicEpisode>();
   const memory: MemoryStorePort = {
-    snapshot: async () => ({ revision: 0, items: [], hasSuppression: false }),
+    snapshot: async () => ({
+      revision: 0,
+      items: [],
+      hasSuppression: false,
+      ...(task.persona ? { persona: task.persona } : {}),
+    }),
     change: async () => {
       throw new Error('Memory writes are unavailable in this fixture.');
     },

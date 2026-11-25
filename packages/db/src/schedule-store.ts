@@ -546,7 +546,11 @@ export class PgScheduleStore implements ScheduleStore {
               trigger: {
                 kind: 'schedule',
                 ...(definition.consolidation
-                  ? { consolidation: definition.consolidation, attempt }
+                  ? {
+                      consolidation: definition.consolidation,
+                      attempt,
+                      ...(definition.mergeAcceptedFacts ? { mergeAcceptedFacts: true } : {}),
+                    }
                   : {}),
                 scheduleId: schedule.id,
                 revision: schedule.revision,

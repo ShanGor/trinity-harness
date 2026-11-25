@@ -1035,9 +1035,29 @@ Personal profile content is a bounded Markdown document, not a fixed fact JSON s
 
 Memory settings exposes a plain Markdown editor, Save and explicit Reload. Failed/conflicting saves preserve the draft. Personal Main, side Chat and personal Work automatically receive the exact current document, recorded in `memory/selection` before dispatch and rendered directly as reference text without JSON escaping. Persona cannot grant execution rights or override the current request. Team contexts receive no Persona. The scope policy generation is the sum of legacy memory revision and Persona revision; updates invalidate context/checkpoint/child fences and conservatively suppress older episode generations, including after clearing the document. This can reduce unrelated historical recall. Original conversations and revision history remain retained.
 
+Personal model-context references use explicit background boundaries: supplied
+memory is not a new user message or a topic request. Guidance limits use to facts
+relevant to the current question, applies relevant preferences quietly and avoids
+turning a question about one fact into a profile inventory. The exact Persona,
+receipt revisions, source fences and conversation order remain intact; no Markdown
+preference parser or semantic relevance classifier is introduced. This improves
+presentation of reference data, not enforcement of semantic relevance. Small
+provider trials and residual failures are recorded in
+[intent evaluation results](intent-evaluation-results.md#memory-relevance-presentation-trials-2026-11-25).
+
 Migration 0019 copies current active legacy facts into Markdown when within the document bound and retains all original memory events. Oversized profiles remain readable through legacy fallback until edited; they are never silently truncated. Once a Persona exists, its document replaces legacy facts in model context, and old fact-write commands direct users to Memory settings instead of changing hidden values. Existing fact APIs remain readable for compatibility. Natural-language extraction and automatic assistant editing are not added by this change: merely mentioning a name or an assistant promising to remember it does not save it. Users edit and save the document explicitly.
 
 ### 21.8 Personal memory automation and history (2026-11-09)
+
+Foreground Persona updates may omit `sourceEventId` or identify the current
+authenticated committed user event explicitly. Compare the supplied ID to that
+event rather than treating field presence as a historical read. `sourceEpisodeId`
+and non-current source IDs remain restricted to scheduled consolidation; exact
+unquoted current-user provenance, owner/revision fences and auto-save policy still
+apply. Rejections explain the required current-source shape and confirm no save.
+Ordinary feedback on an answer is not itself a lasting preference; runtime/tool
+guidance distinguishes that feedback from explicit stable personal declarations.
+This guidance does not certify semantic source-to-patch entailment.
 
 The current personal memory loop now includes model-directed automatic Persona maintenance. Both stock composition roots register `persona` through the existing contracts/DI tool registry and current model request; there is no separate unmetered extraction call or background classifier. Runtime guidance asks the model to save stable user-stated facts and lasting preferences, correct changed facts and honor forgetting, before history recall or other work. Temporary task instructions, hypotheticals, assistant guesses and source documents must not become personal facts. This supersedes §21.7's manual-only limitation. General semantic extraction quality still depends on the model and is not established by deterministic mechanism tests.
 
@@ -1188,8 +1208,13 @@ lexical/vector candidates with RRF k=60 and a 90-day half-life. Ranking material
 eligible candidates first and uses exact cosine search; the 1536-D partial HNSW
 index is reserved, not a claim of accelerated or scale-accepted retrieval.
 
-Persona remains Core; archival facts and reviewed playbooks enter model context
-only through typed recall. Corrections atomically invalidate/create facts without
+Persona remains Core. With evolution enabled, personal requests automatically select
+at most five active archival facts by bounded lexical term relevance (eight terms,
+8 KiB serialized snapshots), recorded as `injectedFacts` in v3 receipts before
+dispatch. This makes no extra provider call and does not claim semantic fact ranking.
+Missing discovery leaves the baseline; delivered facts remain fail-closed under
+subsequent source/revision validation. Team requests receive no personal facts.
+Reviewed playbooks still enter through typed recall. Corrections atomically invalidate/create facts without
 raising episode suppression floors. Current source/exclusion/removal/policy and
 active-memory revisions are rechecked before later model calls. After successful
 recall pairs, additive v3 selection receipts record hybrid mode and exact delivered
@@ -1206,12 +1231,33 @@ comparisons, invalidate facts and search reviewed playbooks. Accepting a correct
 commits its retirement, replacement and decision together. Playbooks are reference
 only and grant no execution rights. Review-only schedules retain baseline behavior.
 
+An explicit `mergeAcceptedFacts` delegation on a memory-consolidation schedule may
+enable `memory_merge`. Older schedules retain their original authority. The tool
+accepts IDs and a store revision, never replacement prose: all inputs must be current,
+previously recalled, same-kind accepted facts with identical NFC/whitespace-normalized
+wording. The transaction rechecks the current enabled schedule/revision/occurrence,
+auto-save, owner/source policy and exact fact snapshots. It retains every original
+source (at most ten), retires the inputs and creates one replacement with a single
+append-only event/CAS advance. Any contributing source revocation hides the merged
+fact; originals do not resurrect. Paraphrases, contradictions and new claims remain
+reviewed candidates. Persona is untouched. The exact merge call is its minimal
+reference-edit plan; it does not authorize workspace or external effects.
+
+After the complete successful tool pair, the owning Loop refreshes only the
+acknowledged archival generation and validates the replacement sources, retiring
+old recall pairs through `recallAfterSeq`. Concurrent changes or interrupted result
+delivery fail closed without repeating a merge. Children cannot acknowledge writes.
+SDK default warning logging is disabled because compatibility warnings can include
+full reasoning/input; an explicitly installed operator logger is retained.
+
 [The implementation plan](memory-evolution-plan.md) and [evaluation results](memory-evaluation-results.md)
 record actual mechanisms and remaining gates. Deterministic fake-vector scores do
-not establish real semantic quality. Real-provider retrieval/poisoning, consenting
-account acceptance rates, deployment and performance acceptance remain open.
-Automatic fact injection and sleep-time merging remain unevaluated, unimplemented
-experiments. Matching readers must precede writers; production rollout is not
+not establish real semantic quality. Local Ollama retrieval has measured evidence;
+poisoning, consenting-account acceptance, deployment and representative-scale
+performance remain independent gates. Automatic fact injection and equivalent-fact
+merging have source mechanisms and deterministic checks; they are not production
+acceptance claims. Matching readers must precede writers (including merged multi-source
+fact readers); production rollout is not
 implied by this checkout.
 
 ### Scheduled run navigation

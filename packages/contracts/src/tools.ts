@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ModelUsage } from './usage.js';
 import type { TaskBudgetScope } from './task.js';
+import type { MemoryFact } from './memory-evolution.js';
 
 import type { PermissionPolicy } from './approval.js';
 import type { SandboxPort } from './sandbox.js';
@@ -37,9 +38,14 @@ export interface ToolContext {
   permissionPolicy?: PermissionPolicy | undefined;
   /** Inherited recall-policy fence; not supplied by model arguments. */
   contextGuard?: (() => Promise<void>) | undefined;
-  /** Main-loop-only acknowledgement of an authenticated, committed Persona write. Not inherited by children. */
+  /** Owning-loop acknowledgement of a committed Persona/archival write. Not inherited by children. */
   personalMemoryChanged?:
-    ((beforePolicyRevision: number, policyRevision: number) => void) | undefined;
+    | ((
+        beforePolicyRevision: number,
+        policyRevision: number,
+        archival?: { before: number; after: number; facts: MemoryFact[] },
+      ) => void)
+    | undefined;
   tenantId?: string | undefined;
   recordUsage?: ((usage: ModelUsage) => Promise<void>) | undefined;
   /** Runtime-generated execution status; persisted as progress, never as evidence. */

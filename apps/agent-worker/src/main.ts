@@ -2,6 +2,7 @@ import {
   EvolutionPersonalContext,
   SemanticRecall,
   createMemoryProposalTool,
+  createMemoryMergeTool,
 } from '@trinity-harness/memory';
 import { AiSdkEmbeddingGateway } from '@trinity-harness/core';
 import { PgMemoryEvolutionStore, PgEpisodeVectorStore } from '@trinity-harness/db';
@@ -307,6 +308,10 @@ async function main(): Promise<void> {
           metas,
           users: browserUsers,
         }),
+      );
+    if (memoryEvolution?.merge)
+      registry.register(
+        createMemoryMergeTool({ evolution: memoryEvolution, memory, metas, users: browserUsers }),
       );
     registry.register(
       createPersonaTool({ memory, metas, store, users: browserUsers, index: conversationIndex }),

@@ -31,6 +31,9 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
     if (!['development', 'holdout', 'all'].includes(split)) throw new Error('Invalid split');
     const runtime = process.env['TRINITY_INTENT_EVAL_RUNTIME'] ?? 'personal';
     if (!['minimal', 'personal'].includes(runtime)) throw new Error('Invalid evaluation runtime');
+    const personaMode = process.env['TRINITY_INTENT_EVAL_PERSONA'] ?? 'fixture';
+    if (!['fixture', 'omit'].includes(personaMode))
+      throw new Error('Invalid evaluation Persona mode');
     const selected = process.env['TRINITY_INTENT_EVAL_CASES']?.split(',');
     if (selected?.some((id) => !intentCases.some((task) => task.id === id)))
       throw new Error('Unknown TRINITY_INTENT_EVAL_CASES entry');
@@ -41,13 +44,20 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
         (runtime === 'personal' ||
           !(
             'localHistory' in task ||
+            'persona' in task ||
             'pages' in task ||
             task.id === 'scoped-configuration-change'
           )),
     );
     if (!cases.length) throw new Error('No evaluation cases selected');
     const pricing = loadModelPricingConfig(new URL('../../../config/models.yaml', import.meta.url));
-    const gateway = new AiSdkGateway();
+    const thinkingType = process.env['TRINITY_INTENT_EVAL_THINKING_TYPE'];
+    if (thinkingType && !['adaptive', 'enabled', 'disabled'].includes(thinkingType))
+      throw new Error('Invalid TRINITY_INTENT_EVAL_THINKING_TYPE');
+    const gatewayOptions = thinkingType
+      ? { thinkingType: thinkingType as 'adaptive' | 'enabled' | 'disabled' }
+      : {};
+    const gateway = new AiSdkGateway(undefined, gatewayOptions);
     const sourcePaths = [
       '../src/loop/agent-loop.ts',
       '../src/loop/progress-guidance.ts',
@@ -98,11 +108,12 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
             systemPrompt: DEFAULT_SYSTEM_PROMPT,
             conditions: {
               runtime,
+              personaMode,
               verification: true,
               maxSteps: runtime === 'personal' ? 24 : 12,
               maxOutputTokens: 4096,
               turnTimeoutMs: runtime === 'personal' ? 120000 : 90000,
-              gatewayOptions: 'default',
+              gatewayOptions,
               tools:
                 runtime === 'personal'
                   ? [
@@ -128,7 +139,9 @@ it.skipIf(process.env['TRINITY_RUN_INTENT_EVAL'] !== '1')(
     };
     for (let repeat = 0; repeat < repeats; repeat++) {
       for (const task of cases) {
-        const personal = runtime === 'personal' ? await intentRuntime(task) : undefined;
+        const fixtureTask: Parameters<typeof intentRuntime>[0] = { ...task };
+        if (personaMode === 'omit') delete fixtureTask.persona;
+        const personal = runtime === 'personal' ? await intentRuntime(fixtureTask) : undefined;
         const store = personal?.store ?? new MemorySessionStore();
         const sandbox = personal?.sandbox ?? new FakeSandbox();
         for (const [name, text] of Object.entries(task.files)) sandbox.files.set(name, text);

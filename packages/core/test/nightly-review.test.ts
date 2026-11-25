@@ -131,4 +131,21 @@ it('authorizes source-backed append-only consolidation without changing review m
   expect(request).toContain('Only append missing facts');
   expect(request).toContain('automatic memory is disabled');
   expect(request).not.toContain('Do not call persona');
+  expect(request).not.toContain('explicitly permits merging');
+});
+it('binds equivalent-fact merge delegation explicitly and preserves the default for existing schedules', () => {
+  expect(
+    scheduleCreateSchema.safeParse({
+      ...base,
+      operationId: base.sourceSessionId,
+      mergeAcceptedFacts: true,
+    }).success,
+  ).toBe(false);
+  const definition = { ...base, consolidation: 'memory' as const, mergeAcceptedFacts: true };
+  expect(
+    scheduleCreateSchema.safeParse({ ...definition, operationId: base.sourceSessionId }).success,
+  ).toBe(true);
+  expect(scheduledRequest(definition, new Date('2026-11-08T19:00:00Z'))).toContain(
+    'owner explicitly permits merging equivalent accepted archival facts',
+  );
 });

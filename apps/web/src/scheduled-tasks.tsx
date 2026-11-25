@@ -1,7 +1,18 @@
 import { CalendarUpdates } from './personal-calendar';
 import { readHistoryTimezone } from './history-timezone';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { Alert, Button, Form, Input, InputNumber, List, Modal, Select, Typography } from 'antd';
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Form,
+  Input,
+  InputNumber,
+  List,
+  Modal,
+  Select,
+  Typography,
+} from 'antd';
 import type { AcpClient, SessionSummary } from '@trinity-harness/client-acp';
 import {
   newId,
@@ -36,6 +47,7 @@ export function ScheduledTasks({
     hour: number;
     minute: number;
     timezone: string;
+    mergeAcceptedFacts?: boolean;
   }>();
   const hour = Form.useWatch('hour', form),
     minute = Form.useWatch('minute', form),
@@ -130,6 +142,7 @@ export function ScheduledTasks({
               setConsolidation('memory');
               form.setFieldsValue({
                 title: 'Nightly memory consolidation',
+                mergeAcceptedFacts: false,
                 request:
                   'Review my personal conversations, group recurring topics and save missing stable personal facts with original user sources.',
                 hour: 3,
@@ -261,6 +274,9 @@ export function ScheduledTasks({
             try {
               await client.createSchedule({
                 ...(consolidation ? { consolidation } : {}),
+                ...(consolidation === 'memory' && values.mergeAcceptedFacts
+                  ? { mergeAcceptedFacts: true }
+                  : {}),
                 title: values.title,
                 request: values.request,
                 sourceSessionId: values.sourceSessionId,
@@ -290,10 +306,18 @@ export function ScheduledTasks({
               type="info"
               message={
                 consolidation === 'memory'
-                  ? 'Groups the previous day by topic and automatically appends missing stable personal facts to Persona from expanded original user messages. Requires automatic memory to be enabled. Direct English/Chinese personal declarations are saved verbatim; unsupported wording and contradictions remain proposals. Existing facts are preserved. Saved revisions and sources appear in Memory, and the digest appears in Updates. Missed dates catch up within seven days; runs that attempted writes are never automatically retried.'
+                  ? 'Groups the previous day by topic and automatically appends missing stable personal facts to Persona from expanded original user messages. Requires automatic memory to be enabled. Direct English/Chinese personal declarations are saved verbatim; unsupported wording and contradictions remain proposals. Existing Persona content is preserved. The separate option below permits merging equivalent accepted archival facts while retaining history. Saved revisions and sources appear in Memory, and the digest appears in Updates. Missed dates catch up within seven days; runs that attempted writes are never automatically retried.'
                   : 'Reviews the previous local calendar day and delivers a digest with topic groups and source-linked memory proposals in Updates. Review proposals in Memory settings before saving. Missed reviews catch up the previous seven local days, oldest first. Failed recall-only reviews get up to three attempts with backoff; cancelled reviews are not retried. No automatic Persona changes.'
               }
             />
+          )}
+          {consolidation === 'memory' && (
+            <Form.Item name="mergeAcceptedFacts" valuePropName="checked">
+              <Checkbox>
+                Allow merging equivalent accepted archival facts; retain all original sources and
+                history
+              </Checkbox>
+            </Form.Item>
           )}
           <Form.Item name="title" label="Name" rules={[{ required: true, max: 200 }]}>
             <Input />

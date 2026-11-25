@@ -1,16 +1,16 @@
 # Memory Evolution 实施计划（2026-11-24）
 
-> 状态：**源码机制已实现，默认关闭；真实 provider、部署与语义验收尚未完成**。本文保留分阶段目标与门槛；实际验证见 [memory-evaluation-results.md](memory-evaluation-results.md)。
+> 状态：**源码机制（含自动注入、等价事实夜间合并）已实现，默认关闭；Ollama 检索已实测，部署与完整语义/投毒验收仍独立记录**。本文保留分阶段目标与门槛；实际验证见 [memory-evaluation-results.md](memory-evaluation-results.md)。
 > 前置阅读：design §21.7/§21.8/§21.9（Persona、记忆自动化、nightly review）、[refactor-as-personal-assistant.md](refactor-as-personal-assistant.md) §6。
 > 源码实现不等于生产交付；各阶段验收后须同步更新 [project-progress.md](project-progress.md) 与本文状态。
 
 ## 当前实现与边界
 
-- P0：已建立六题合成检索 harness，实际 PostgreSQL ILIKE 基线为 3/6；fake 向量融合为 6/6，仅证明机制。提供显式 opt-in 真实 provider runner。
+- P0：保留六题基线，另加 11 题；Ollama BGE-M3 为 17/17，Qwen3-embedding 0.6B 为 16/17，词法基线为 6/17。小型合成集不代表通用问答准确率。runner 在迁移前拒绝配置库与非空库。
 - P1：独立 `packages/memory`、contracts、SDK embedding gateway、异步 control-worker、持久 claim/retry、pgvector 存储、RRF/90 天半衰期与收据 v3 已接线。未配置/失败保留原词法结果和分页。
-- P2：facts/append-only events、owner CAS、来源重审、原子 invalidate+create、历史与 recall type=facts 已实现。Persona 和显式语法沿用基线，不自动注入 facts。
+- P2：facts/append-only events、owner CAS、来源重审、原子 invalidate+create、历史与 recall type=facts 已实现。Persona 和显式语法沿用基线；P4 增加模块内自动事实选择。
 - P3：`memory_propose` 仅在授权 memory consolidation 中提交带来源候选；Suggestions 用户接受/拒绝，接受事务创建 fact。候选绝不自动生效。
-- P4：playbook 同样先作为候选，经用户接受后才经 recall type=playbooks 提供；实现事实时间线、替换前后比较、失效、搜索和分层视图。自动注入与自动重组仍是未通过 eval 的实验目标，未实现/未开启。
+- P4：playbook 同样先作为候选，经用户接受后才经 recall type=playbooks 提供；治理 UI 展示完整合并来源。模块开启时自动注入最多五条词法相关 active facts（八个查询词、8 KiB 收据），不额外调用模型。新增夜间 `memory_merge`，须计划所有者明确勾选 `mergeAcceptedFacts`；旧计划不增加权限。只直接合并同类、NFC/空白归一后文字等价的已接受事实，不允许自动语义改写、矛盾裁决或新推断。所有来源与失效原件保留；任何来源撤销即停止交付整个合并事实。真实投毒及生产门槛仍独立。
 
 具体实现选择：
 
@@ -19,10 +19,11 @@
 3. embedding claims 持久保存五分钟 lease 和至多三次尝试；一次失败不阻断同批其他来源；独立可取消循环不阻塞调度/calendar tick，退出时先 drain 再关闭 PG。成功发布的同 hash/model 不重嵌；进程在 provider 返回后、投影提交前崩溃时，未持久化结果可能在 lease 过期后重算，不声称跨外部 provider 的 exactly-once。
 4. 所有模型调用仍经 gateway/配额/usage；前台 query embedding 额外占用当前 task request/token 预算，后台重建受批次、租约、重试、取消和 provider 超时约束。嵌入不会记录明文凭据。
 5. 关闭开关不装配新工具、适配器或 selection writer，数据休眠。已使用 archival 内容的未完成回合在继续 dispatch 前失败关闭，需用新请求进入基线。三端使用同一个 contracts env shape；Helm/Podman 必须一致部署，不能混跑相反设置的 writer。
+6. 合并与裁决共用 owner CAS；多来源存于事实 JSON/收据的 additive `sources`，无需追加 SQL 迁移。合并成功的完整工具对之后刷新精确确认的 active generation，并携带替换事实快照作来源重审。并发变化、结果丢失不触发重复合并。计划的合并授权是 owner 权限元数据，不是第二个部署开关。
 
 事实的 validFrom/validTo 记录记忆创建/裁决与失效时间，不从正文猜测现实世界的生效日期。带日期的原文和历史版本均保留；更精细的事实有效时间推理仍须真实语义评测。
 
-真实语义、用户候选接受率、投毒行为、部署和生产性能门槛保持未勾选；不应据机制测试跳过阶段 rollout 门槛。
+真实检索已有上述合成集结果；用户候选接受率、完整投毒行为、部署和生产性能仍需各自证据，不应据机制测试或小样本结果跳过 rollout 门槛。
 
 ## 1. 背景与动机
 
@@ -62,7 +63,7 @@
 
 - 团队/跨租户共享记忆（保持现有 out-of-scope 立场）；
 - RL 训练记忆策略（Memory-R1 方向）、A-MEM 式 Zettelkasten 链接网络；
-- 默认向每个 prompt 自动注入跨会话记忆（保持 model-directed recall 的安全默认；自动注入仅在 Phase 4 经 eval 门控评估）；
+- 在模块关闭时默认注入跨会话记忆，或自动注入整段历史/未接受候选；模块内只选择有界相关 active facts；
 - 任何对既有 `session_events`/`memory_events`/`persona_events` 的改写或迁移性删除。
 
 ## 3. 必须保留的不变量
@@ -220,7 +221,7 @@ embedding 维度随模型变化：维度与模型标识存入行内，切换 `ME
 
 - Playbook 蒸馏：nightly 运行可从成功任务 episode 提炼 `{taskType, approach, pitfalls[], sources[]}`，provenance 绑定，作为 reference-only 内容经 recall 提供；**不授予执行权**（与 skills 同一原则：skill/playbook 内容不是执行授权）。
 - 治理 UI：事实时间线/diff、手动失效、搜索；Persona 与 facts 的分层视图。
-- 评估项（经 eval 门控决定，不默认开启）：向 `memory/selection` 自动注入 top-N active facts；sleep-time 重组（合并冗余事实：invalidate+create，绝不代写 Persona）。
+- 已按用户后续要求实现有界自动事实选择与显式授权的等价事实夜间合并（invalidate+create，绝不代写 Persona）。语义改写/多事实推断仍不自动落地，真实模型及部署验收与机制测试分开。
 - **验收**：各项独立 eval 门控；注入项需额外验证投毒面（见 §8）。
 
 ## 8. 安全与投毒防御

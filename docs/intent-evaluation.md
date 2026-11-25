@@ -44,6 +44,18 @@ The test asserts that all requested cases were recorded. **A passing test is not
 
 ## Comparisons and release decisions
 
+`TRINITY_INTENT_EVAL_THINKING_TYPE` optionally sets the gateway's Anthropic
+`adaptive`, `enabled` or `disabled` thinking mode; omission retains default gateway
+behavior. The effective options are recorded in the report. Match the deployed
+model's settings when diagnosing behavior rather than assuming the default is
+equivalent.
+
+`TRINITY_INTENT_EVAL_PERSONA=omit` removes only fixture Persona from the personal
+evaluation runtime, allowing a background-profile ablation without changing the
+conversation or disabling personal context. The default is `fixture`; both modes
+are recorded. Omission is diagnostic and must not be used to score cases that
+require profile facts or preferences as though those facts were delivered.
+
 The implemented runtime extension is specified in [intent-execution-design.md](intent-execution-design.md) §9. Deterministic tests cover local versus unrelated history, older/multiple referents, exclusion after delivery, source/candidate expansion, compaction purpose, concurrent effects and active recovery replay. The personal-mode model runner can exercise these core mechanisms with fixtures; repeated comparative trials and human outcome review remain outstanding. Passing scripted tests alone cannot establish improved semantic task success or faithful translation quality.
 
 Compare before/after source versions using identical runtime mode, fixtures, model/provider, reasoning/output settings, tools, permissions, ceilings and repeat count. Preserve individual runs and account for endpoint failures; do not omit failed samples from success rates. Review answers without implementation labels where possible. Report task completion and rubric results alongside latency, requests, token buckets and costs by currency; never equate fewer calls with better judgment. Two repeats reveal variation but do not establish significance or broad generalization.
@@ -68,6 +80,26 @@ Development fixtures `retry-original-objective` and `bounded-readonly-analysis` 
 Reports include action metrics after the fixture's seeded history: calls by tool, failed results, declared mutation/unknown-effect calls and runtime guidance. Mutation counts describe attempted calls, not confirmed effects. Review final workspace differences and outcomes alongside the transcript; fewer calls alone is not success. The source fingerprint list includes general guidance and tool-budget implementation. If using a temporary baseline source overlay, record its effective source hashes separately because the report's on-disk hashes describe the checkout, not transformed code.
 
 The 2026-10-25 tool affordance update adds exact `resultSeq` selection for task verification, retaining legacy call IDs and all evidence fences. Compare evidence-selection failures and control-call counts alongside completion, rather than counting a shorter failed run as an improvement. Development iterations and observed limitations are recorded in [the action-control evaluation report](action-control-evaluation-2026-10-25.md).
+
+## Conversational relevance and correction diagnostics (2026-11-25)
+
+Development cases `ambiguous-phone-followup`, `correct-misheard-followup`,
+`correct-assistant-referent` and `relevant-persona-question` add synthetic Persona
+data to the existing personal-runtime fixture. They test an unclear short follow-up,
+an explicit correction after an irrelevant answer, a correction in another domain,
+and a legitimate question about a delivered personal fact. The first two use brief
+phone delivery. All fixture identities, profile facts and arithmetic are synthetic.
+The deterministic fixture test proves that Persona, local dialogue and the exact
+current correction are delivered together and permit a direct answer; it does not
+grade the model's interpretation. Repeated provider trials and a rejected prompt
+candidate are recorded in [evaluation results](intent-evaluation-results.md#conversational-relevance-and-correction-diagnostics-2026-11-25).
+
+Additional development cases cover quiet response preferences, current-request
+overrides, a local component follow-up, explicit profile review, an absent personal
+fact and an imperative embedded in Persona. They distinguish useful memory delivery
+from unrelated disclosure and over-refusal. The retained reference-boundary
+candidate, profile-omission control and remaining failures are documented in
+[memory relevance trials](intent-evaluation-results.md#memory-relevance-presentation-trials-2026-11-25).
 
 ## Explanation and verification follow-ups (2026-11-13)
 
