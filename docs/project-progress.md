@@ -5,6 +5,12 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Browser human inactivity return — 2026-11-27
+
+Implemented a durable five-minute human inactivity deadline in the existing browser control record. Applied human browser inputs reset it; frame polling, heartbeats, local draft/view changes, repeated takeover and duplicate/no-effect input do not. Timer and request admission enforce the deadline under existing browser/desktop locks. Automatic return retains privacy/native-page handoff, before/after owner/source/binding/generation checks, originating-chat control events and fresh observations in every chat. Unsafe handoffs pause; connection-lease expiry and uncertain effects retain their existing pause/quarantine behavior. The viewer explains the timeout. No new prompt/task resumption, database migration, browser binary or guest image change is included.
+
+Validation: 329 tests passed across 13 browser runtime, core, PostgreSQL and Web test files, including persisted activity deadlines, exact expiry despite polling, applied-input reset, timer-only return, originating-session revocation, settled/unsettled intervention and viewer gesture/draft preservation. Repository lint, all workspace typechecks, changed-file formatting and whitespace checks passed. Matching readers/Web and replacement Browser Runtime writer must be deployed; authenticated live-owner idle return, active typing, protected-page and disconnect acceptance remain open. No deployment is claimed.
+
 ### Scheduled source closure and recovery — 2026-11-25
 
 The local nightly consolidation stopped on 17 November because its source Work

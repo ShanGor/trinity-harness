@@ -215,6 +215,9 @@ export const browserControlRecordSchema = z
     controllerId: z.uuid().nullable(),
     expiresAt: z.iso.datetime().nullable(),
     sequence: z.number().int().nonnegative(),
+    /** Human activity deadline, independent of the renewable connection lease. */
+    idleReturnAt: z.iso.datetime().nullable().optional(),
+    controllerSessionId: z.uuid().nullable().optional(),
     frame: browserFrameTargetSchema.nullable(),
     frames: z.array(browserFrameTargetSchema).max(8).default([]),
     keyboard: z

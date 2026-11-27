@@ -503,6 +503,45 @@ it('drops private pixels when returning control and cancels the watch when close
     throw error;
   }
 });
+it('accepts automatic idle return, cancels a held gesture and preserves the local text draft', async () => {
+  fakeClock();
+  const f = await mount();
+  try {
+    await act(async () => f.button('Start browser').click());
+    expect(document.body.textContent).toContain('After 5 minutes without browser input');
+    const draft = document.querySelector<HTMLTextAreaElement>(
+      '[aria-label="Text to insert into browser"]',
+    )!;
+    await act(async () => inputValue(draft, 'Keep my local draft'));
+    const p = pointerImage();
+    await act(async () => p.dispatch('pointerdown'));
+    const original = f.interactBrowser.getMockImplementation()!;
+    f.interactBrowser.mockImplementation(async (request, signal) => {
+      const result = await original(request, signal);
+      return {
+        state: {
+          ...result.state,
+          mode: 'agent',
+          controllerId: null,
+          expiresAt: null,
+          epoch: result.state.epoch + 1,
+        },
+      };
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(document.querySelector('[role="status"]')?.textContent).toContain(
+      'Agent controls the browser',
+    );
+    expect(document.querySelector('.browser-preview-image')).toBeNull();
+    expect(draft.disabled).toBe(true);
+    expect(draft.value).toBe('Keep my local draft');
+    expect(document.querySelector('[aria-label="Text to insert into browser"]')).toBe(draft);
+    await act(async () => p.dispatch('pointerup'));
+    expect(inputs(f)).toEqual([]);
+  } finally {
+    await f.close();
+  }
+});
 function dismissBrowser(via: 'close button' | 'outside click' | 'Escape'): void {
   if (via === 'close button') {
     document.querySelector<HTMLButtonElement>('.ant-modal-close')!.click();

@@ -310,6 +310,8 @@ interface ActiveBrowserOperation {
   intervention?: BrowserIntervention;
 }
 
+const HUMAN_IDLE_RETURN_MS = 5 * 60_000;
+
 /** Stateful sandbox supervisor. Workers only hold HTTP clients. */
 export class ManagedBrowserSupervisor
   implements BrowserRuntimePort, BrowserPreviewPort, BrowserInteractionPort
@@ -409,7 +411,13 @@ export class ManagedBrowserSupervisor
     }
     const cancel = new AbortController();
     this.leases.set(record.sessionId, cancel);
-    const delay = Math.max(1, Date.parse(record.expiresAt) - this.now().getTime());
+    const delay = Math.max(
+      1,
+      Math.min(
+        Date.parse(record.expiresAt),
+        record.idleReturnAt ? Date.parse(record.idleReturnAt) : Infinity,
+      ) - this.now().getTime(),
+    );
     AbortSignal.any([
       cancel.signal,
       this.shutdown.signal,
@@ -423,16 +431,19 @@ export class ManagedBrowserSupervisor
         void this.options.store
           .run(
             desktopLock ? `desktop:${record.sessionId}` : record.sessionId,
-            async () => {
+            async (lockSignal) => {
               if (cancel.signal.aborted) return;
               if (
                 desktopLock &&
                 this.activeOperations.get(record.sessionId)?.intervention !== intervention
               )
                 return;
-              const current = await this.control(record.sessionId);
+              const current = await this.control(
+                record.sessionId,
+                AbortSignal.any([lockSignal, this.shutdown.signal, AbortSignal.timeout(60_000)]),
+              );
               if (current?.mode === 'human') this.armLease(current);
-              else if (current?.mode === 'paused' && intervention?.settled) intervention.release();
+              else if (intervention?.settled) intervention.release();
             },
             this.shutdown.signal,
           )
@@ -441,23 +452,70 @@ export class ManagedBrowserSupervisor
       { once: true },
     );
   }
-  private async control(sessionId: string): Promise<BrowserControlRecord | null> {
+  private async idleHandoffReady(
+    record: BrowserControlRecord,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const source = record.controllerSessionId ?? record.sessionId;
+    const session = this.sessions.get(record.sessionId);
+    const valid = async (): Promise<boolean> => {
+      const binding = await this.options.store.binding(record.sessionId);
+      const intervention = this.activeOperations.get(record.sessionId)?.intervention;
+      return !!(
+        session &&
+        this.sessions.get(record.sessionId) === session &&
+        !this.stopping.has(session) &&
+        binding?.status === 'active' &&
+        binding.owner === this.options.owner &&
+        binding.generation === record.generation &&
+        session.generation === record.generation &&
+        (!intervention || intervention.closed || intervention.settled) &&
+        (await this.canView(source, record.sessionId, signal))
+      );
+    };
+    if (!(await valid()) || !session?.humanFrame) return false;
+    const captured = session.humanHandoff
+      ? await session.humanHandoff(signal)
+      : await session.humanFrame(false, signal);
+    signal.throwIfAborted();
+    return (
+      (captured.handoff === 'navigation_only' ||
+        (captured.preview.state === 'frame' &&
+          captured.preview.generation === record.generation)) &&
+      (await valid())
+    );
+  }
+  private async control(
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<BrowserControlRecord | null> {
     const record = (await this.options.interactionStore?.get(sessionId)) ?? null;
-    if (
-      record?.mode === 'human' &&
-      record.expiresAt &&
-      Date.parse(record.expiresAt) <= this.now().getTime()
-    ) {
-      record.mode = 'paused';
+    const leaseExpired =
+      !!record?.expiresAt && Date.parse(record.expiresAt) <= this.now().getTime();
+    const idleExpired =
+      !!record?.idleReturnAt && Date.parse(record.idleReturnAt) <= this.now().getTime();
+    if (record?.mode === 'human' && (leaseExpired || idleExpired)) {
+      const source = record.controllerSessionId ?? sessionId;
+      record.mode =
+        record.expiresAt && !leaseExpired && (await this.idleHandoffReady(record, signal))
+          ? 'agent'
+          : 'paused';
       record.epoch++;
       record.controllerId = null;
+      record.controllerSessionId = null;
       record.expiresAt = null;
+      record.idleReturnAt = null;
       record.frame = null;
       record.frames = [];
       record.keyboard = null;
+      record.needsObservation = true;
+      record.observedSessions = [];
       await this.options.interactionStore!.put(record);
-      await this.controlEvent(record);
+      await this.controlEvent(record, source);
+      this.armLease(record);
       this.armIdle(sessionId);
+      const intervention = this.activeOperations.get(sessionId)?.intervention;
+      if (intervention?.settled) intervention.release();
     }
     return record;
   }
@@ -588,7 +646,7 @@ export class ManagedBrowserSupervisor
           if (!(await this.canView(request.sessionId, scope, operationSignal)))
             return failure('NOT_AUTHORIZED', 'Browser ownership is unavailable.');
           let session = this.sessions.get(scope);
-          let record = await this.control(scope);
+          let record = await this.control(scope, operationSignal);
           const bound = await this.options.store.binding(scope);
           if (!session && bound?.status === 'active')
             return failure(
@@ -605,7 +663,9 @@ export class ManagedBrowserSupervisor
                 mode: 'paused',
                 epoch: record.epoch + 1,
                 controllerId: null,
+                controllerSessionId: null,
                 expiresAt: null,
+                idleReturnAt: null,
                 frame: null,
                 frames: [],
                 keyboard: null,
@@ -696,8 +756,12 @@ export class ManagedBrowserSupervisor
               ...record,
               mode: 'human',
               controllerId: request.viewId,
+              controllerSessionId: controls ? record.controllerSessionId : request.sessionId,
               epoch: controls ? record.epoch : record.epoch + 1,
               expiresAt: new Date(this.now().getTime() + 15_000).toISOString(),
+              idleReturnAt: controls
+                ? record.idleReturnAt
+                : new Date(this.now().getTime() + HUMAN_IDLE_RETURN_MS).toISOString(),
               frame: null,
               frames: [],
               keyboard: null,
@@ -729,7 +793,9 @@ export class ManagedBrowserSupervisor
               ...record,
               mode: request.operation === 'release' ? 'agent' : 'paused',
               controllerId: null,
+              controllerSessionId: null,
               expiresAt: null,
+              idleReturnAt: null,
               epoch: record.epoch + 1,
               frame: null,
               frames: [],
@@ -812,7 +878,9 @@ export class ManagedBrowserSupervisor
                   mode: 'paused',
                   epoch: record.epoch + 1,
                   controllerId: null,
+                  controllerSessionId: null,
                   expiresAt: null,
+                  idleReturnAt: null,
                 };
                 await this.options.interactionStore!.finish(scope, request.requestId, 'none');
                 await this.options.interactionStore!.put(record);
@@ -851,6 +919,9 @@ export class ManagedBrowserSupervisor
                 },
               ]);
               await this.options.interactionStore!.finish(scope, request.requestId, 'applied');
+              record.idleReturnAt = new Date(
+                this.now().getTime() + HUMAN_IDLE_RETURN_MS,
+              ).toISOString();
               await this.options.interactionStore!.put(record);
             } catch {
               const inputEpoch = record.epoch;
@@ -859,7 +930,9 @@ export class ManagedBrowserSupervisor
                 mode: 'quarantined',
                 epoch: record.epoch + 1,
                 controllerId: null,
+                controllerSessionId: null,
                 expiresAt: null,
+                idleReturnAt: null,
                 frame: null,
                 frames: [],
                 keyboard: null,
@@ -944,7 +1017,9 @@ export class ManagedBrowserSupervisor
                   mode: 'paused',
                   epoch: record.epoch + 1,
                   controllerId: null,
+                  controllerSessionId: null,
                   expiresAt: null,
+                  idleReturnAt: null,
                   frame: null,
                   frames: [],
                   keyboard: null,
@@ -1088,7 +1163,7 @@ export class ManagedBrowserSupervisor
       if (!this.options.scope) await this.destroy(scope);
       return browserRuntimeFailure(request, 'NOT_AUTHORIZED');
     }
-    const control = await this.control(scope);
+    const control = await this.control(scope, active);
     if (control && control.mode !== 'agent')
       return {
         isError: true,

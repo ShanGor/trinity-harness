@@ -47,6 +47,8 @@ describe.skipIf(!reachable)('durable browser control and input journal', () => {
       mode: 'quarantined',
       controllerId: randomUUID(),
       expiresAt: '2026-10-26T00:01:00Z',
+      idleReturnAt: '2026-10-26T00:05:00Z',
+      controllerSessionId: sourceSessionId,
       sequence: 1,
       frame: null,
     });

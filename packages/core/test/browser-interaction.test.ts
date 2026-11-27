@@ -880,6 +880,276 @@ it('pauses expired control without automatically returning it to the agent', asy
   ).toBe('paused');
   expect((await f.supervisor.execute(f.model())).value).toMatchObject({ code: 'NOT_EXECUTED' });
 });
+
+async function advanceConnected(
+  f: ReturnType<typeof setup>,
+  milliseconds: number,
+  operation: 'frame' | 'heartbeat' = 'frame',
+): Promise<BrowserInteractionResult> {
+  let remaining = milliseconds;
+  let response!: BrowserInteractionResult;
+  while (remaining > 0) {
+    const step = Math.min(10_000, remaining);
+    f.advance(step);
+    remaining -= step;
+    const record = (await f.controls.get(f.sessionId))!;
+    response = await f.supervisor.interact({
+      sessionId: f.sessionId,
+      viewId: f.viewId,
+      ...(operation === 'heartbeat'
+        ? { operation, generation: f.generation, epoch: record.epoch }
+        : { operation }),
+    });
+  }
+  return response;
+}
+
+it('returns idle human control at five minutes despite frame polling and fences old inputs', async () => {
+  const f = setup();
+  const taken = await f.take();
+  const oldInput = f.input(taken);
+  const deadline = (await f.controls.get(f.sessionId))!.idleReturnAt;
+  expect((await advanceConnected(f, 299_999)).state.mode).toBe('human');
+  expect((await f.controls.get(f.sessionId))!.idleReturnAt).toBe(deadline);
+  f.advance(1);
+  const returned = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'state',
+  });
+  expect(returned.state).toMatchObject({ mode: 'agent', controllerId: null, expiresAt: null });
+  expect(returned.state.epoch).toBe(taken.state.epoch + 1);
+  expect(await f.controls.get(f.sessionId)).toMatchObject({
+    idleReturnAt: null,
+    frame: null,
+    frames: [],
+    keyboard: null,
+    needsObservation: true,
+    observedSessions: [],
+  });
+  expect((await f.supervisor.interact(oldInput)).error?.code).toBe('STALE_CONTROL');
+  expect(f.humanInput).not.toHaveBeenCalled();
+  expect((await f.supervisor.execute(f.model('scroll'))).value).toMatchObject({
+    code: 'STALE_TARGET',
+  });
+  expect((await f.supervisor.execute(f.model('read_page'))).isError).toBe(false);
+  expect((await f.supervisor.execute(f.model('scroll'))).isError).toBe(false);
+  const changes = (await f.events.load(f.sessionId)).filter(
+    (e) => e.type === 'browser/control_changed',
+  );
+  expect(changes.map((e) => e.mode)).toEqual(['human', 'agent']);
+});
+
+it('resets the idle deadline on applied input, but not heartbeats, repeated takeover or duplicates', async () => {
+  const f = setup();
+  await f.take();
+  const originalDeadline = (await f.controls.get(f.sessionId))!.idleReturnAt;
+  await advanceConnected(f, 240_000, 'heartbeat');
+  const taken = await f.take();
+  expect((await f.controls.get(f.sessionId))!.idleReturnAt).toBe(originalDeadline);
+  const input = { ...f.input(taken), capture: false };
+  expect((await f.supervisor.interact(input)).input?.effect).toBe('applied');
+  const deadline = (await f.controls.get(f.sessionId))!.idleReturnAt;
+  expect(Date.parse(deadline!) - Date.parse(originalDeadline!)).toBe(240_000);
+  await advanceConnected(f, 60_000, 'heartbeat');
+  expect((await f.supervisor.interact(input)).input?.effect).toBe('applied');
+  expect((await f.controls.get(f.sessionId))!.idleReturnAt).toBe(deadline);
+  expect((await advanceConnected(f, 239_999, 'heartbeat')).state.mode).toBe('human');
+  f.advance(1);
+  expect(
+    (await f.supervisor.interact({ sessionId: f.sessionId, viewId: f.viewId, operation: 'state' }))
+      .state.mode,
+  ).toBe('agent');
+  expect(f.humanInput).toHaveBeenCalledTimes(1);
+});
+
+it('does not count rejected or no-effect input as human activity', async () => {
+  const f = setup();
+  const taken = await f.take();
+  const deadline = (await f.controls.get(f.sessionId))!.idleReturnAt;
+  f.advance(6_000);
+  expect((await f.supervisor.interact(f.input(taken))).error?.code).toBe('STALE_FRAME');
+  const frame = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'frame',
+  });
+  f.humanInput.mockResolvedValueOnce({ effect: 'none' });
+  expect((await f.supervisor.interact(f.input(frame))).input?.effect).toBe('none');
+  expect((await f.controls.get(f.sessionId))!.idleReturnAt).toBe(deadline);
+});
+
+it.each(['private page', 'changed generation', 'unavailable capture'] as const)(
+  'pauses rather than automatically returning control with %s',
+  async (reason) => {
+    const f = setup();
+    await f.take();
+    await advanceConnected(f, 299_999, 'heartbeat');
+    if (reason === 'private page') f.sensitive();
+    if (reason === 'changed generation')
+      f.journal.records.get(f.sessionId)!.generation = randomUUID();
+    if (reason === 'unavailable capture')
+      f.capture.mockResolvedValue({ preview: { state: 'unavailable' } });
+    f.advance(1);
+    const response = await f.supervisor.interact({
+      sessionId: f.sessionId,
+      viewId: f.viewId,
+      operation: 'state',
+    });
+    expect(response.state.mode).toBe('paused');
+    expect((await f.controls.get(f.sessionId))!.needsObservation).toBe(true);
+    expect(
+      (await f.events.load(f.sessionId)).some(
+        (e) => e.type === 'browser/control_changed' && e.mode === 'agent',
+      ),
+    ).toBe(false);
+  },
+);
+
+it.each([false, true])(
+  'enforces the idle deadline without viewer polling (owner revoked: %s)',
+  async (revoked) => {
+    const timers: { ms: number; timer: AbortController }[] = [];
+    const spy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const timer = new AbortController();
+      timers.push({ ms, timer });
+      return timer.signal;
+    });
+    try {
+      const f = setup();
+      await f.take();
+      await advanceConnected(f, 299_999, 'heartbeat');
+      // Fire the original lease callback late, as after an event-loop delay. It
+      // must rearm to the durable activity deadline rather than another lease.
+      timers.find((entry) => entry.ms === 15_000)!.timer.abort();
+      await vi.waitFor(() => expect(timers.some((entry) => entry.ms === 1)).toBe(true));
+      if (revoked) f.revoke();
+      f.advance(1);
+      timers.find((entry) => entry.ms === 1)!.timer.abort();
+      await vi.waitFor(() =>
+        expect(f.controls.records.get(f.sessionId)?.mode).toBe(revoked ? 'paused' : 'agent'),
+      );
+      expect(f.dispose).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  },
+);
+
+it('pauses an unresolved desktop intervention at the idle deadline without repeating the agent action', async () => {
+  const f = setup(false, true);
+  const command = f.model();
+  let finish!: (value: BrowserRuntimeResult) => void;
+  f.execute.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const agent = f.supervisor.execute(command);
+  await vi.waitFor(() => expect(f.execute).toHaveBeenCalledTimes(1));
+  await f.take();
+  await advanceConnected(f, 299_999, 'heartbeat');
+  f.advance(1);
+  expect(
+    (await f.supervisor.interact({ sessionId: f.sessionId, viewId: f.viewId, operation: 'state' }))
+      .state.mode,
+  ).toBe('paused');
+  finish(result(command));
+  expect((await agent).value).toMatchObject({ effect: 'unknown' });
+  expect(f.execute).toHaveBeenCalledTimes(1);
+});
+
+it('journals idle return in the originating side chat and requires fresh observations in every chat', async () => {
+  const f = setup(true);
+  await f.supervisor.interact({ sessionId: f.sideId, viewId: f.viewId, operation: 'take' });
+  await advanceConnected(f, 299_999, 'heartbeat');
+  f.advance(1);
+  await f.supervisor.interact({ sessionId: f.sessionId, viewId: f.viewId, operation: 'state' });
+  expect(
+    (await f.events.load(f.sideId))
+      .filter((e) => e.type === 'browser/control_changed')
+      .map((e) => e.mode),
+  ).toEqual(['human', 'agent']);
+  expect(await f.events.load(f.sessionId)).toEqual([]);
+  expect((await f.supervisor.execute(f.model('scroll'))).value).toMatchObject({
+    code: 'STALE_TARGET',
+  });
+  expect(
+    (await f.supervisor.execute({ ...f.model('scroll'), sessionId: f.sideId })).value,
+  ).toMatchObject({ code: 'STALE_TARGET' });
+});
+
+it('releases a settled desktop intervention when request admission performs idle return', async () => {
+  const f = setup(false, true);
+  const command = f.model();
+  let finish!: (value: BrowserRuntimeResult) => void;
+  f.execute.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const agent = f.supervisor.execute(command);
+  await vi.waitFor(() => expect(f.execute).toHaveBeenCalledTimes(1));
+  await f.take();
+  finish(result(command));
+  // The original action has settled, but the agent command keeps its reservation
+  // until handoff. An idle heartbeat must release it just like explicit return.
+  await advanceConnected(f, 299_999, 'heartbeat');
+  f.advance(1);
+  expect(
+    (await f.supervisor.interact({ sessionId: f.sessionId, viewId: f.viewId, operation: 'state' }))
+      .state.mode,
+  ).toBe('agent');
+  expect((await agent).value).toMatchObject({ effect: 'unknown' });
+  expect(f.execute).toHaveBeenCalledTimes(1);
+});
+
+it('rechecks originating-session access after idle handoff capture', async () => {
+  const f = setup(true);
+  await f.supervisor.interact({ sessionId: f.sideId, viewId: f.viewId, operation: 'take' });
+  await advanceConnected(f, 299_999, 'heartbeat');
+  const original = f.capture.getMockImplementation()!;
+  f.capture.mockImplementationOnce(async (privateView) => {
+    const capture = await original(privateView);
+    f.revokeSession(f.sideId);
+    return capture;
+  });
+  f.advance(1);
+  const response = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'state',
+  });
+  expect(response.state.mode).toBe('paused');
+  expect(
+    (await f.events.load(f.sideId))
+      .filter((e) => e.type === 'browser/control_changed')
+      .map((e) => e.mode),
+  ).toEqual(['human', 'paused']);
+});
+
+it('accepts a verified native-page navigation-only idle handoff without publishing pixels', async () => {
+  const f = setup();
+  await f.take();
+  await advanceConnected(f, 299_999, 'heartbeat');
+  const session = await f.create.mock.results[0]!.value;
+  session.humanHandoff = async () => ({
+    preview: { state: 'unavailable' },
+    handoff: 'navigation_only',
+  });
+  f.advance(1);
+  const response = await f.supervisor.interact({
+    sessionId: f.sessionId,
+    viewId: f.viewId,
+    operation: 'state',
+  });
+  expect(response.state.mode).toBe('agent');
+  expect(response.frame).toBeUndefined();
+  expect(JSON.stringify(await f.events.load(f.sessionId))).not.toContain('aW1hZ2U=');
+});
+
 it('requires a privacy-safe return and a new model observation before subsequent effects', async () => {
   const f = setup(),
     taken = await f.take();

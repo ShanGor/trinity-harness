@@ -99,6 +99,14 @@ Local development rollout validation (2026-10-26): the maintenance wrapper drain
 
 用户明确接管后可在私有视图处理登录输入；观看者的敏感页面预览仍被抑制。截图只发给用户，不写入证据或模型上下文。人类操作会使当前 browser 状态凭据失效，已保存的 immutable sources 保持可引用。启用桌面路径时可查看隔离的来宾桌面；WebRTC、uinput 和跨任意 guest 程序的全局互斥仍未实现，维持 `trusted-managed` 标签。
 
+### Five-minute human inactivity return
+
+An explicit human takeover starts a five-minute inactivity deadline. Each successfully applied remote browser action (click, text/key, drag, scroll, navigation or tab action) resets it. Watching frames, connection heartbeats, local zoom/pan or draft editing, duplicate requests, no-effect inputs and repeated takeover by the current controller do not count as browser activity. The viewer explains this rule while the user controls the browser.
+
+The deadline and originating controller session are persisted in the existing PG control record. The runtime schedules the earlier of connection-lease expiry and inactivity expiry and rechecks current durable state under the existing lock; incoming browser requests also enforce the deadline. No frontend timer is authoritative. At five minutes, a still-connected human controller hands back to the agent after the same privacy-safe/native-page handoff used by explicit return, with owner/source access, runtime binding and generation rechecked before and after capture. Unsettled intervention, protected content, unavailable capture or invalid ownership/binding leaves the browser paused. Capture is not published as model evidence. Old input targets and per-chat current-state receipts are invalidated; the originating chat receives the ordinary metadata-only control event, and the agent must obtain fresh observations.
+
+The fifteen-second connection lease remains separate: lease expiry, explicit pause, hidden-tab pause and uncertain input never automatically return control. A timer handback changes browser ownership only; it does not create a prompt, replay effects or automatically restart an ended/cancelled task. Legacy records without an activity deadline retain their old behavior until a new takeover. Deploy matching contracts/DB record readers and Web, replace older runtime writers and restart Browser Runtime. No database migration, patched executable or guest image rebuild is required. Deployed-owner-route acceptance remains separate from deterministic tests.
+
 ## 启用 Scheduled / Updates
 
 Personal Calendar extends this deployment with migrations `0025`–`0027` and matching

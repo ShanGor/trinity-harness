@@ -1116,6 +1116,7 @@ export function InteractiveBrowserView({
       )}
       <p className="browser-preview-meta">
         Private view · Closing returns control to the agent. Hiding this browser tab pauses control.
+        {owns && ' After 5 minutes without browser input, control returns to the agent when safe.'}
       </p>
     </Modal>
   );
