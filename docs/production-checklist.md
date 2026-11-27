@@ -4,6 +4,20 @@
 > Walk top to bottom before declaring a release ready; record evidence
 > (command output / screenshot) next to each item.
 
+## Compaction output-limit recovery (2026-11-27)
+
+- [x] Deterministic regressions cover smaller-excerpt recovery, complete source
+      coverage, rejection of partial checkpoints, bounded exhaustion, cancellation,
+      usage accounting and continued Loop completion. Core/compaction tests:
+      1,131 passed, 23 opt-in skipped; lint and workspace typechecks passed.
+- [x] Matching local images deployed; six containers, API/scheduler health and
+      server/worker source hashes passed. Packaged in-memory recovery smoke passed
+      without external calls. No active application turns preceded rollout; the
+      old API required the script's forced-stop fallback after 60 seconds.
+- [ ] Verify MiniMax-M3 can finish a real compaction after output-limit recovery.
+      Preserve the historical failed turn;
+      deterministic tests do not establish real-model recovery or task completion.
+
 ## Memory Evolution (locally enabled 2026-11-24; broader acceptance open)
 
 - [ ] Deploy and measure the short-turn latency changes (2026-11-25): closed
@@ -361,3 +375,6 @@ See the [Steering specification](in-flight-steering-gap-analysis.md#9-implementa
 
 - [x] Implement the Soft Glass visual strategy across Login/Main, replacing the flat neutral revision: luminous backdrop, frosted inset navigation, raised composer/login, coherent icons/type/radii and 780px reading width. Pass 334 frontend tests, lint, frontend typecheck/build; inspect empty/populated desktop/mobile fixtures and draft preservation across five viewport widths (2026-11-23).
 - [ ] Deploy and accept Soft Glass with authenticated sessions. Check Safari, real-phone keyboard/safe areas, composited contrast, accessibility/fallback modes and populated attachments/approvals/voice surfaces. Local Chromium and mocked ACP captures do not establish those results.
+
+- [x] Implement the 2026-11-27 shared sidebar scroll area, searchable All conversations and derived unused-automation-workspace filtering. Pass 390 frontend/API/PostgreSQL tests, lint, workspace typechecks, formatting and Web build; inspect mocked desktop, short-window and mobile layouts.
+- [ ] Deploy matching session-summary readers/server and Web. Confirm the actual Nightly memory workspace leaves Recent, ordinary source conversations remain available, Scheduled run access works and scrolling/search/drafts remain usable on authenticated desktop and real phones. No migration or guest rebuild is needed.

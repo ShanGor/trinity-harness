@@ -1611,6 +1611,7 @@ export async function buildServer(
           sessionRole: m.sessionRole,
           taskState: m.taskState,
           scheduledRun: m.scheduledRun,
+          automationWorkspace: m.automationWorkspace,
           originSessionId: m.originSessionId,
           scope: m.scope ?? 'personal',
           ...(m.scopeId !== undefined ? { scopeId: m.scopeId } : {}),

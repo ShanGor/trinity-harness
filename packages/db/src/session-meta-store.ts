@@ -7,7 +7,7 @@ import type {
 import { and, desc, eq, inArray, isNull, or, sql, getTableColumns } from 'drizzle-orm';
 
 import type { Db } from './client.js';
-import { sessions, teamMembers, sessionEvents } from './schema.js';
+import { sessions, teamMembers, sessionEvents, assistantSchedules } from './schema.js';
 import { computeEventHash, GENESIS_HASH } from './session-store.js';
 import { randomUUID } from 'node:crypto';
 
@@ -22,6 +22,7 @@ function toMeta(
   row: typeof sessions.$inferSelect & {
     taskState?: SessionMeta['taskState'];
     scheduledRun?: boolean;
+    automationWorkspace?: boolean;
   },
 ): SessionMeta {
   const meta: SessionMeta = {
@@ -40,6 +41,9 @@ function toMeta(
     createdAt: new Date(row.createdAt).toISOString(),
     ...(row.taskState ? { taskState: row.taskState } : {}),
     ...(row.scheduledRun !== undefined ? { scheduledRun: row.scheduledRun } : {}),
+    ...(row.automationWorkspace !== undefined
+      ? { automationWorkspace: row.automationWorkspace }
+      : {}),
   };
   if (row.closedAt) {
     meta.closedAt = new Date(row.closedAt).toISOString();
@@ -172,9 +176,18 @@ export class PgSessionMetaStore implements SessionMetaStore {
           ),
     );
     const latest = sql`(select payload from ${sessionEvents} e where e.session_id = ${sessions.id} and e.type in ('message/user','turn/start','turn/end','approval/requested','approval/resolved') order by e.seq desc limit 1)`;
+    // Qualify outer columns explicitly: schedule rows also have id/tenant_id/user_id.
+    const automationWorkspace = sql<boolean>`exists (select 1 from ${assistantSchedules} automation
+          where automation.tenant_id = ${sessions}.tenant_id
+          and automation.user_id = ${sessions}.user_id
+          and automation.definition->>'sourceSessionId' = ${sessions}.id::text)
+          and not exists (select 1 from ${sessionEvents} conversation
+            where conversation.session_id = ${sessions}.id
+            and conversation.type in ('prompt/queued', 'message/user'))`;
     const rows = await this.db
       .select({
         ...getTableColumns(sessions),
+        automationWorkspace,
         scheduledRun: sql<boolean>`exists (select 1 from ${sessionEvents} scheduled
           where scheduled.session_id = ${sessions.id}
           and scheduled.type in ('prompt/queued', 'message/user')

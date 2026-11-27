@@ -2,11 +2,12 @@ import { useRef, type PointerEvent, type ReactElement, type ReactNode } from 're
 import { Button } from 'antd';
 import type { SessionSummary } from '@trinity-harness/client-acp';
 
-/** Scheduled executions remain discoverable in Run history, including after opening them. */
-export function recentConversations(sessions: SessionSummary[]): SessionSummary[] {
-  return sessions
-    .filter((session) => session.sessionRole !== 'main' && !session.scheduledRun)
-    .slice(0, 12);
+/** Keep automation in Scheduled; retain ordinary conversations regardless of their title. */
+export function sidebarConversations(sessions: SessionSummary[]): SessionSummary[] {
+  return sessions.filter(
+    (session) =>
+      session.sessionRole !== 'main' && !session.scheduledRun && !session.automationWorkspace,
+  );
 }
 
 export function HistorySidebar({

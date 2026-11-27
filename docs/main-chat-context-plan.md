@@ -10,6 +10,13 @@ acceptance in [production checklist](production-checklist.md).
 
 ## Product requirements
 
+Compaction output-limit recovery (2026-11-27): a summarizer `length` finish
+discards partial output and retries the unread excerpt at half its size, up to
+three size reductions per compaction. The source cursor and rolling checkpoint
+advance only on complete nonempty output. All requests retain existing admission,
+usage and cancellation. Exhaustion reports the output limit explicitly and leaves
+the original history intact.
+
 Main remains one continuous conversation. Its visible transcript, model working
 context, durable memory and searchable source history have separate lifecycles.
 Midnight adds a visual date boundary; it never closes the session, discards active

@@ -243,6 +243,40 @@ describe('M2 auth / tenants / RBAC', () => {
     expect((await fetch(`${baseUrl}/api/health`)).status).toBe(200);
   });
 
+  it('delivers derived automation navigation metadata only with accessible session summaries', async () => {
+    const email = `automation-${crypto.randomUUID()}@example.com`;
+    const owner = await bundle.users.createUser({
+      tenantId: 't1',
+      email,
+      passwordHash: `h:${passwordOf()}`,
+      role: 'member',
+    });
+    const id = crypto.randomUUID();
+    await bundle.metas.create({
+      id,
+      tenantId: 't1',
+      userId: owner.id,
+      title: 'Nightly memory workspace',
+      workspaceUri: '/workspace',
+      kind: 'work',
+      sessionRole: 'task',
+      automationWorkspace: true,
+      scheduledRun: false,
+    });
+    const token = (await login(baseUrl, email, passwordOf())).token!;
+    const response = await authed(baseUrl, token, '/api/sessions');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      sessions: [
+        {
+          sessionId: id,
+          automationWorkspace: true,
+          scheduledRun: false,
+        },
+      ],
+    });
+  });
+
   it('saves voice preferences for the authenticated account and fails visibly on storage errors', async () => {
     const bundle = await makeApp();
     const baseUrl = await bundle.app.listen({ port: 0, host: '127.0.0.1' });

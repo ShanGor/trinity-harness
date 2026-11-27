@@ -435,7 +435,8 @@
   background: #e9e9e6;
 }
 .trinity-shell .sider-section-label {
-  margin: 30px 12px 10px;
+  margin: 20px 12px 10px;
+  font-size: 12px;
   font-weight: 500;
 }
 .trinity-shell .history-item.ant-list-item {
@@ -445,6 +446,12 @@
 }
 .trinity-shell .history-item .ant-list-item-meta-title {
   margin: 0;
+}
+.trinity-shell .history-item .ant-list-item-action {
+  margin-inline-start: 4px;
+}
+.trinity-shell .history-item .ant-list-item-action > li {
+  padding: 0;
 }
 .trinity-shell .history-item .ant-list-item-meta-description {
   display: none;
@@ -634,13 +641,6 @@
     align-items: stretch;
     flex-wrap: nowrap;
     gap: 0;
-  }
-  .trinity-shell .history-scroll {
-    flex-basis: auto;
-    max-height: none;
-  }
-  .trinity-shell .history-scroll .ant-list-items {
-    display: block;
   }
   .trinity-shell .history-item.ant-list-item {
     min-width: 0;

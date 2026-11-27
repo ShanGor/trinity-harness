@@ -1275,6 +1275,18 @@ implied by this checkout.
 
 ### Scheduled run navigation
 
+2026-11-27 sidebar refinement: navigation and conversation shortcuts use one scroll
+container with a fixed brand/account footer, native-width scrollbar and compact
+desktop navigation (44px mobile targets). Recent retains 12 shortcuts; All
+conversations expands accessible ordinary sessions in place with local title search.
+The additive optional `automationWorkspace` summary field is derived from an
+owner/tenant-matched schedule source binding and absence of committed `message/user`
+or `prompt/queued` events. Paused definitions retain that classification; an actual
+conversation removes it. Both shortcut views exclude these unused workspaces while
+Tasks and schedule source controls retain access. Titles never determine visibility.
+No event, database schema, permission or execution behavior changes are required;
+deploy the matching summary reader, server and Web.
+
 Closed or inaccessible source Work sessions stop their schedules. Resume revalidates
 the source and current owner before enabling; it cannot restore revoked access.
 Scheduled explains `access_revoked` and offers a new daily schedule prefilled from

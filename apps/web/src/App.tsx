@@ -1,5 +1,5 @@
 import { PersonalCalendar } from './personal-calendar';
-import { recentConversations } from './history-sidebar';
+import { sidebarConversations } from './history-sidebar';
 import { workspaceLinkPath, openWorkspaceDocument } from './workspace-links';
 import { chatDateHeadings } from './chat-dates';
 import { saveHistoryTimezone, useHistoryTimezone } from './history-timezone';
@@ -1145,7 +1145,7 @@ export default function App() {
       if (sessionRef.current === id) setLoadingOlder(false);
     }
   }, [loadingOlder, message]);
-  const recentSessions = useMemo(() => recentConversations(sessions), [sessions]);
+  const conversationSessions = useMemo(() => sidebarConversations(sessions), [sessions]);
   const linkedActiveIds = useMemo(
     () =>
       sessions
@@ -1533,79 +1533,78 @@ export default function App() {
             <span>AI Workspace</span>
           </div>
         </div>
-        <nav className="sidebar-navigation" aria-label="Workspace navigation">
-          <Button
-            className="new-chat-button"
-            type="text"
-            disabled={creationPending}
-            onClick={newChat}
-          >
-            <PlusOutlined aria-hidden="true" /> New
-          </Button>
-          <Button
-            type="text"
-            onClick={() => mainSessionId && switchSession(mainSessionId)}
-            aria-current={isMain && page === 'conversation' ? 'page' : undefined}
-          >
-            <MessageOutlined aria-hidden="true" />
-            {'Main chat'}
-          </Button>
-          <Button
-            type="text"
-            onClick={() => {
-              void refreshSessions();
-              setPage('tasks');
-            }}
-            aria-current={page === 'tasks' ? 'page' : undefined}
-          >
-            <AppstoreOutlined aria-hidden="true" /> Tasks{' '}
-            {sessions.filter(
-              (entry) =>
-                entry.kind === 'work' &&
-                ['queued', 'running', 'needs_approval'].includes(entry.taskState ?? ''),
-            ).length || ''}
-          </Button>
-          <Button
-            type="text"
-            onClick={() => setPage('history')}
-            aria-current={page === 'history' ? 'page' : undefined}
-          >
-            <HistoryOutlined aria-hidden="true" />
-            {'History'}
-          </Button>
-          <Button
-            type="text"
-            aria-current={page === 'calendar' ? 'page' : undefined}
-            onClick={() => setPage('calendar')}
-          >
-            <CalendarOutlined aria-hidden="true" />
-            {'Calendar'}
-          </Button>
-          <Button
-            type="text"
-            aria-current={page === 'scheduled' ? 'page' : undefined}
-            onClick={() => setPage('scheduled')}
-          >
-            <CalendarOutlined aria-hidden="true" />
-            {'Scheduled'}
-          </Button>
-          <InboxIndicator client={client} onOpen={() => setPage('scheduled')} />
-          <Button
-            type="text"
-            aria-current={page === 'computer' ? 'page' : undefined}
-            onClick={() => {
-              void refreshSessions();
-              setPage('computer');
-            }}
-          >
-            <DesktopOutlined aria-hidden="true" />
-            {'Browser / VM'}
-          </Button>
-        </nav>
-        <span className="sider-section-label">Recent</span>
-        <div className="history-scroll">
+        <div className="sidebar-scroll">
+          <nav className="sidebar-navigation" aria-label="Workspace navigation">
+            <Button
+              className="new-chat-button"
+              type="text"
+              disabled={creationPending}
+              onClick={newChat}
+            >
+              <PlusOutlined aria-hidden="true" /> New
+            </Button>
+            <Button
+              type="text"
+              onClick={() => mainSessionId && switchSession(mainSessionId)}
+              aria-current={isMain && page === 'conversation' ? 'page' : undefined}
+            >
+              <MessageOutlined aria-hidden="true" />
+              {'Main chat'}
+            </Button>
+            <Button
+              type="text"
+              onClick={() => {
+                void refreshSessions();
+                setPage('tasks');
+              }}
+              aria-current={page === 'tasks' ? 'page' : undefined}
+            >
+              <AppstoreOutlined aria-hidden="true" /> Tasks{' '}
+              {sessions.filter(
+                (entry) =>
+                  entry.kind === 'work' &&
+                  ['queued', 'running', 'needs_approval'].includes(entry.taskState ?? ''),
+              ).length || ''}
+            </Button>
+            <Button
+              type="text"
+              onClick={() => setPage('history')}
+              aria-current={page === 'history' ? 'page' : undefined}
+            >
+              <HistoryOutlined aria-hidden="true" />
+              {'History'}
+            </Button>
+            <Button
+              type="text"
+              aria-current={page === 'calendar' ? 'page' : undefined}
+              onClick={() => setPage('calendar')}
+            >
+              <CalendarOutlined aria-hidden="true" />
+              {'Calendar'}
+            </Button>
+            <Button
+              type="text"
+              aria-current={page === 'scheduled' ? 'page' : undefined}
+              onClick={() => setPage('scheduled')}
+            >
+              <CalendarOutlined aria-hidden="true" />
+              {'Scheduled'}
+            </Button>
+            <InboxIndicator client={client} onOpen={() => setPage('scheduled')} />
+            <Button
+              type="text"
+              aria-current={page === 'computer' ? 'page' : undefined}
+              onClick={() => {
+                void refreshSessions();
+                setPage('computer');
+              }}
+            >
+              <DesktopOutlined aria-hidden="true" />
+              {'Browser / VM'}
+            </Button>
+          </nav>
           <RecentConversations
-            sessions={recentSessions}
+            sessions={conversationSessions}
             sessionId={sessionId}
             user={user}
             teams={teams}
@@ -2007,78 +2006,123 @@ const RecentConversations = memo(function RecentConversations({
   onExport: (id: string) => Promise<void>;
   onDelete: (id: string) => void;
 }): ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  const [query, setQuery] = useState('');
+  const matching = useMemo(() => {
+    const search = query.trim().toLocaleLowerCase();
+    return search
+      ? sessions.filter((session) =>
+          (session.title || 'Untitled conversation').toLocaleLowerCase().includes(search),
+        )
+      : sessions;
+  }, [sessions, query]);
   return (
-    <List
-      size="small"
-      dataSource={sessions}
-      locale={{ emptyText: 'No sessions yet' }}
-      renderItem={(s) => (
-        <List.Item
-          onClick={() => onSelect(s.sessionId)}
-          className={`history-item${s.sessionId === sessionId ? ' active' : ''}`}
-          actions={[
-            <Dropdown
-              key="actions"
-              menu={{
-                items: [
-                  { key: 'export', label: 'Export JSON' },
-                  {
-                    key: 'delete',
-                    label: 'Delete',
-                    danger: true,
-                    disabled:
-                      s.sessionRole === 'main' ||
-                      user.role === 'viewer' ||
-                      (user.role !== 'admin' && s.userId !== user.id),
-                  },
-                ],
-                onClick: ({ key, domEvent }) => {
-                  domEvent.stopPropagation();
-                  if (key === 'export') void onExport(s.sessionId);
-                  if (key === 'delete') onDelete(s.sessionId);
-                },
-              }}
-            >
-              <Button
-                size="small"
-                type="text"
-                aria-label={`Actions for ${s.title || 'untitled conversation'}`}
-                onClick={(event) => event.stopPropagation()}
-              >
-                ⋯
-              </Button>
-            </Dropdown>,
-          ]}
-        >
-          <List.Item.Meta
-            title={
-              <Button
-                type="text"
-                className="history-title"
-                aria-current={s.sessionId === sessionId ? 'true' : undefined}
-                title={s.title || 'Untitled conversation'}
-              >
-                {s.title || 'Untitled conversation'}
-              </Button>
-            }
-            description={
-              <Flex gap={8} align="center">
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {new Date(s.createdAt).toLocaleString()}
-                </Typography.Text>
-                <Tag title={workspaceLabel(s, teams)} style={{ fontSize: 11, lineHeight: '14px' }}>
-                  {s.kind === 'chat'
-                    ? 'Chat'
-                    : s.kind === 'work'
-                      ? `Work · ${s.taskState?.replaceAll('_', ' ') ?? 'draft'}`
-                      : 'Existing conversation'}
-                </Tag>
-              </Flex>
-            }
-          />
-        </List.Item>
+    <section
+      className="sidebar-conversations"
+      aria-label={expanded ? 'Conversations' : 'Recent conversations'}
+    >
+      <h2 className="sider-section-label">{expanded ? 'Conversations' : 'Recent'}</h2>
+      {expanded && (
+        <Input
+          className="sidebar-conversation-search"
+          aria-label="Search conversations"
+          placeholder="Search conversations"
+          allowClear
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
       )}
-    />
+      <List
+        id="sidebar-conversation-list"
+        size="small"
+        dataSource={expanded ? matching : sessions.slice(0, 12)}
+        locale={{ emptyText: query.trim() ? 'No matching conversations' : 'No conversations yet' }}
+        renderItem={(s) => (
+          <List.Item
+            onClick={() => onSelect(s.sessionId)}
+            className={`history-item${s.sessionId === sessionId ? ' active' : ''}`}
+            actions={[
+              <Dropdown
+                key="actions"
+                menu={{
+                  items: [
+                    { key: 'export', label: 'Export JSON' },
+                    {
+                      key: 'delete',
+                      label: 'Delete',
+                      danger: true,
+                      disabled:
+                        s.sessionRole === 'main' ||
+                        user.role === 'viewer' ||
+                        (user.role !== 'admin' && s.userId !== user.id),
+                    },
+                  ],
+                  onClick: ({ key, domEvent }) => {
+                    domEvent.stopPropagation();
+                    if (key === 'export') void onExport(s.sessionId);
+                    if (key === 'delete') onDelete(s.sessionId);
+                  },
+                }}
+              >
+                <Button
+                  size="small"
+                  type="text"
+                  aria-label={`Actions for ${s.title || 'untitled conversation'}`}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  ⋯
+                </Button>
+              </Dropdown>,
+            ]}
+          >
+            <List.Item.Meta
+              title={
+                <Button
+                  type="text"
+                  className="history-title"
+                  aria-current={s.sessionId === sessionId ? 'true' : undefined}
+                  title={s.title || 'Untitled conversation'}
+                >
+                  {s.title || 'Untitled conversation'}
+                </Button>
+              }
+              description={
+                <Flex gap={8} align="center">
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {new Date(s.createdAt).toLocaleString()}
+                  </Typography.Text>
+                  <Tag
+                    title={workspaceLabel(s, teams)}
+                    style={{ fontSize: 11, lineHeight: '14px' }}
+                  >
+                    {s.kind === 'chat'
+                      ? 'Chat'
+                      : s.kind === 'work'
+                        ? `Work · ${s.taskState?.replaceAll('_', ' ') ?? 'draft'}`
+                        : 'Existing conversation'}
+                  </Tag>
+                </Flex>
+              }
+            />
+          </List.Item>
+        )}
+      />
+      {(expanded || sessions.length > 12) && (
+        <Button
+          className="sidebar-conversations-toggle"
+          type="text"
+          aria-expanded={expanded}
+          aria-controls="sidebar-conversation-list"
+          onClick={(event) => {
+            setExpanded(!expanded);
+            setQuery('');
+            event.currentTarget.closest('section')?.scrollIntoView({ block: 'start' });
+          }}
+        >
+          {expanded ? 'Show recent' : `All conversations (${sessions.length})`}
+        </Button>
+      )}
+    </section>
   );
 });
 

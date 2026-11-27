@@ -96,6 +96,48 @@ function definition(): ScheduleCreate {
 }
 
 describe.skipIf(!reachable)('durable runtime control', () => {
+  it('classifies only unused owned schedule sources as automation workspaces', async () => {
+    const id = randomUUID();
+    await metas.create({
+      id,
+      tenantId: owner.tenantId,
+      userId: owner.userId,
+      title: 'Nightly memory workspace',
+      kind: 'work',
+      sessionRole: 'task',
+      scope: 'personal',
+      workspaceUri: '/tmp/automation',
+      policy: 'read-only',
+    });
+    const listed = async () => (await metas.listForIdentity(owner)).find((s) => s.id === id);
+    expect((await listed())?.automationWorkspace).toBe(false);
+    const schedule = await schedules.create(owner, { ...definition(), sourceSessionId: id }, at);
+    expect(await listed()).toMatchObject({ automationWorkspace: true, scheduledRun: false });
+    await schedules.setEnabled(owner, schedule.id, schedule.revision, false, at);
+    expect((await listed())?.automationWorkspace).toBe(true);
+    // Another owner's reference cannot classify this workspace.
+    await pool.query('update assistant_schedules set user_id=$1 where id=$2', [
+      randomUUID(),
+      schedule.id,
+    ]);
+    expect((await listed())?.automationWorkspace).toBe(false);
+    await pool.query('update assistant_schedules set user_id=$1 where id=$2', [
+      owner.userId,
+      schedule.id,
+    ]);
+    // A real conversation in the same workspace remains available in Recent.
+    await events.append(id, [
+      {
+        type: 'message/user',
+        eventId: randomUUID(),
+        at: at.toISOString(),
+        surfaceOp: 'append',
+        content: [{ kind: 'text', text: 'Discuss my memory setup' }],
+      },
+    ]);
+    expect((await listed())?.automationWorkspace).toBe(false);
+  });
+
   it.each(['review', 'memory'] as const)(
     'commits a dated nightly %s once and excludes derived digests from recall indexing',
     async (consolidation) => {

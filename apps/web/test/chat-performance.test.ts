@@ -177,6 +177,7 @@ beforeEach(async () => {
   const computedStyle = window.getComputedStyle.bind(window);
   vi.spyOn(window, 'getComputedStyle').mockImplementation((element) => computedStyle(element));
   Element.prototype.scrollTo = vi.fn();
+  Element.prototype.scrollIntoView = vi.fn();
   sessionStorage.setItem('trinity.token', 'test-token');
   dateRender = vi.spyOn(Date.prototype, 'toLocaleString').mockReturnValue('Oct 8');
   fake.getTimeline.mockReset().mockResolvedValue({ events: [], lastSeq: 0, nextBefore: null });
@@ -217,6 +218,34 @@ afterEach(async () => {
 });
 
 describe('chat typing and streaming performance', () => {
+  it('browses and searches all conversation shortcuts without replacing the composer draft', async () => {
+    const composer = container.querySelector('textarea')!;
+    await type(composer, 'Keep my draft while browsing');
+    expect(container.querySelectorAll('.history-item')).toHaveLength(12);
+    const navigation = container.querySelector('.sidebar-navigation')!;
+    const scroll = container.querySelector('.sidebar-scroll')!;
+    expect(scroll.contains(navigation)).toBe(true);
+    expect(scroll.contains(container.querySelector('.sidebar-conversations'))).toBe(true);
+    expect(scroll.contains(container.querySelector('.sidebar-account'))).toBe(false);
+    await click(container.querySelector('.sidebar-conversations-toggle'));
+    expect(container.querySelectorAll('.history-item')).toHaveLength(30);
+    const search = container.querySelector('input[aria-label="Search conversations"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+        search,
+        'Conversation 29',
+      );
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container.querySelectorAll('.history-item')).toHaveLength(1);
+    expect(container.querySelector('.history-item')?.textContent).toContain('Conversation 29');
+    expect(container.querySelector('textarea')).toBe(composer);
+    expect(composer.value).toBe('Keep my draft while browsing');
+    await click(container.querySelector('.sidebar-conversations-toggle'));
+    expect(container.querySelectorAll('.history-item')).toHaveLength(12);
+    expect(container.querySelector('input[aria-label="Search conversations"]')).toBeNull();
+  });
+
   it('shows one reconnect notice, clears it on recovery, and preserves drafts, focus and history', async () => {
     await click(container.querySelector('.history-item'));
     await emit({

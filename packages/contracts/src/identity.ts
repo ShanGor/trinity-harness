@@ -64,6 +64,8 @@ export const sessionMetaSchema = z.object({
   creationOperationId: z.uuid().optional(),
   /** Derived from committed schedule triggers; never supplied during session creation. */
   scheduledRun: z.boolean().optional(),
+  /** Unused schedule source workspace, derived from owned schedules and session events. */
+  automationWorkspace: z.boolean().optional(),
   taskState: z
     .enum(['draft', 'queued', 'running', 'needs_approval', 'completed', 'failed', 'cancelled'])
     .optional(),
@@ -96,6 +98,7 @@ export const sessionSummarySchema = sessionMetaSchema
     originSessionId: true,
     taskState: true,
     scheduledRun: true,
+    automationWorkspace: true,
   })
   .extend({ sessionId: z.uuid(), scope: z.enum(['personal', 'team']).default('personal') });
 export type SessionSummary = z.infer<typeof sessionSummarySchema>;

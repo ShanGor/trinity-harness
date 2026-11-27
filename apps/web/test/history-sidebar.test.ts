@@ -6,7 +6,7 @@ import {
   HistorySidebar,
   HistoryDivider,
   resizeHistoryRatio,
-  recentConversations,
+  sidebarConversations,
 } from '../src/history-sidebar';
 
 describe('conversation history visibility', () => {
@@ -93,6 +93,27 @@ describe('conversation history visibility', () => {
   });
 });
 
+it('excludes unused automation workspaces without matching conversation titles', () => {
+  const base = {
+    createdAt: '2026-11-27T00:00:00Z',
+    workspaceUri: '/workspace',
+    scope: 'personal' as const,
+    kind: 'work' as const,
+  };
+  const sessions = [
+    {
+      ...base,
+      sessionId: 'automation',
+      title: 'Nightly memory workspace',
+      automationWorkspace: true,
+    },
+    { ...base, sessionId: 'normal', title: 'Nightly memory workspace', automationWorkspace: false },
+    { ...base, sessionId: 'legacy', title: 'Nightly memory discussion' },
+    { ...base, sessionId: 'main', title: 'Main', sessionRole: 'main' as const },
+  ];
+  expect(sidebarConversations(sessions).map((s) => s.sessionId)).toEqual(['normal', 'legacy']);
+});
+
 describe('history resize constraints', () => {
   it('converts a pointer movement to a change in the width ratio', () => {
     expect(resizeHistoryRatio(0.22, 100, 1000)).toBeCloseTo(0.32);
@@ -127,11 +148,11 @@ it('keeps historical and opened scheduled runs out of Recent without displacing 
     kind: 'work' as const,
     scheduledRun: i < 3,
   }));
-  expect(recentConversations(sessions).map((s) => s.sessionId)).toEqual(
-    sessions.slice(3, 15).map((s) => s.sessionId),
+  expect(sidebarConversations(sessions).map((s) => s.sessionId)).toEqual(
+    sessions.slice(3).map((s) => s.sessionId),
   );
   // Opening or following up on a run cannot remove its durable classification.
   expect(
-    recentConversations([{ ...sessions[0]!, taskState: 'completed' }, ...sessions.slice(3)]),
-  ).toEqual(sessions.slice(3, 15));
+    sidebarConversations([{ ...sessions[0]!, taskState: 'completed' }, ...sessions.slice(3)]),
+  ).toEqual(sessions.slice(3));
 });

@@ -264,6 +264,115 @@ describe('ContextManager', () => {
 });
 
 describe('checkpoint safety and bounded summarization', () => {
+  it('recovers a length finish by covering smaller excerpts without accepting partial output', async () => {
+    const store = new MemorySessionStore();
+    await store.append('s', [
+      user('original request'),
+      assistant('verified evidence '.repeat(100)),
+    ]);
+    const samples: unknown[] = [];
+    const completeExcerpts: string[] = [];
+    const llm = new FakeLLM(
+      () => [
+        { kind: 'text-delta', text: 'PARTIAL MUST NOT BECOME A CHECKPOINT' },
+        { kind: 'usage', inputTokens: 500, outputTokens: 256, reasoningTokens: 250 },
+        { kind: 'finish', reason: 'length' },
+      ],
+      ...Array.from({ length: 3 }, () => (request: LLMRequest) => {
+        expect(request.messages[0]!.content).not.toContain('PARTIAL MUST NOT');
+        completeExcerpts.push(
+          request.messages[0]!.content.split(/Conversation excerpt \(part \d+\):\n/)[1]!,
+        );
+        return textChunks('Complete checkpoint');
+      }),
+    );
+    const manager = new ContextManager({ store, llm, model: 'fake', maxTokens: 10, keepTokens: 0 });
+    expect(
+      (
+        await manager.compact('s', {
+          recordUsage: async (_model, usage) => {
+            samples.push(...usage);
+          },
+        })
+      ).compacted,
+    ).toBe(true);
+    const original = llm.requests[0]!.messages[0]!.content.split(
+      'Conversation excerpt (part 1):\n',
+    )[1]!;
+    expect(completeExcerpts.join('')).toBe(original);
+    expect(completeExcerpts[0]!.length).toBeLessThan(original.length);
+    expect(llm.requests[2]!.messages[0]!.content).toContain(
+      'Prior checkpoint:\nComplete checkpoint',
+    );
+    expect(samples).toContainEqual(expect.objectContaining({ outputTokens: 256 }));
+    const events = await store.load('s');
+    expect(events.filter((event) => event.type === 'compaction/summary')).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({
+      type: 'compaction/summary',
+      summary: 'Complete checkpoint',
+    });
+  });
+
+  it('bounds length recovery and retains history when every smaller excerpt is truncated', async () => {
+    const store = new MemorySessionStore();
+    await store.append('s', [user('original request'), assistant('evidence '.repeat(100))]);
+    const before = await store.load('s');
+    const llm = new FakeLLM(
+      ...Array.from({ length: 4 }, () => () => [
+        { kind: 'finish' as const, reason: 'length' as const },
+      ]),
+    );
+    const manager = new ContextManager({ store, llm, model: 'fake', maxTokens: 10, keepTokens: 0 });
+    await expect(manager.compact('s')).rejects.toMatchObject({
+      code: 'CONTEXT_COMPACTION_TRUNCATED',
+    });
+    expect(llm.requests).toHaveLength(4);
+    expect(await store.load('s')).toEqual(before);
+  });
+
+  it('does not retry a provider error as truncation', async () => {
+    const store = new MemorySessionStore();
+    await store.append('s', [user('request'), assistant('evidence '.repeat(100))]);
+    const before = await store.load('s');
+    const llm = new FakeLLM(() => [{ kind: 'finish', reason: 'error' }]);
+    const manager = new ContextManager({ store, llm, model: 'fake', maxTokens: 10, keepTokens: 0 });
+    await expect(manager.compact('s')).rejects.toMatchObject({ code: 'CONTEXT_COMPACTION_FAILED' });
+    expect(llm.requests).toHaveLength(1);
+    expect(await store.load('s')).toEqual(before);
+  });
+
+  it('retains the entire original history if a later excerpt fails', async () => {
+    const store = new MemorySessionStore();
+    await store.append('s', [user('request'), assistant('evidence '.repeat(100))]);
+    const before = await store.load('s');
+    const llm = new FakeLLM(
+      () => [{ kind: 'finish', reason: 'length' }],
+      () => textChunks('Only the first half was summarized'),
+      () => [{ kind: 'finish', reason: 'error' }],
+    );
+    const manager = new ContextManager({ store, llm, model: 'fake', maxTokens: 10, keepTokens: 0 });
+    await expect(manager.compact('s')).rejects.toMatchObject({ code: 'CONTEXT_COMPACTION_FAILED' });
+    expect(await store.load('s')).toEqual(before);
+    llm.assertExhausted();
+  });
+
+  it('honors cancellation before dispatching a smaller excerpt', async () => {
+    const store = new MemorySessionStore();
+    await store.append('s', [user('request'), assistant('evidence '.repeat(100))]);
+    const before = await store.load('s');
+    const controller = new AbortController();
+    const llm = new FakeLLM(() => {
+      controller.abort();
+      return [{ kind: 'finish', reason: 'length' }];
+    });
+    const manager = new ContextManager({ store, llm, model: 'fake', maxTokens: 10, keepTokens: 0 });
+    await expect(manager.compact('s', { signal: controller.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(llm.requests).toHaveLength(1);
+    expect(await store.load('s')).toEqual(before);
+  });
+
   it.each(['empty', 'truncated', 'interrupted'] as const)(
     'retains original history after an %s summary',
     async (kind) => {

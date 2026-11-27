@@ -106,49 +106,73 @@ describe('CoreAgentLoop M4: compaction between steps', () => {
     expect(llm.requests[2]!.messages[0]!.content).toContain('x'.repeat(100));
   });
 
-  it('emits context/compacted on the sink when a compaction lands', async () => {
-    const store = new MemorySessionStore();
-    const registry = new CoreToolRegistry(new FakeSandbox());
-    await store.append('s1', [
-      {
-        type: 'message/user',
-        eventId: crypto.randomUUID(),
-        at: new Date().toISOString(),
-        surfaceOp: 'append',
-        content: [{ kind: 'text', text: 'old '.padEnd(400, 'o') }],
-      },
-      {
-        type: 'message/assistant',
-        eventId: crypto.randomUUID(),
-        at: new Date().toISOString(),
-        surfaceOp: 'append',
-        content: [{ kind: 'text', text: 'old-a'.padEnd(400, 'a') }],
-      },
-    ]);
-    const llm = new FakeLLM(
-      () => textChunks('SUMMARY'),
-      () => textChunks('done'),
-    );
-    const context = new ContextManager({
-      llm,
-      model: 'fake/model',
-      store,
-      maxTokens: 100,
-      keepTokens: 40,
-      estimate: (messages) => messages.reduce((n, m) => n + m.content.length, 0),
-    });
-    const loop = new CoreAgentLoop({
-      llm,
-      model: 'fake/model',
-      tools: registry,
-      store,
-      workspaceRoot: '/ws',
-      context,
-    });
-    const sink = new CollectingSink();
-    await loop.run('s1', 'new prompt', sink);
-    expect(sink.events.some((e) => e.type === 'context/compacted')).toBe(true);
-  });
+  it.each([false, true])(
+    'emits context/compacted after successful recovery=%s',
+    async (recover) => {
+      const store = new MemorySessionStore();
+      const registry = new CoreToolRegistry(new FakeSandbox());
+      await store.append('s1', [
+        {
+          type: 'message/user',
+          eventId: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          surfaceOp: 'append',
+          content: [{ kind: 'text', text: 'old '.padEnd(400, 'o') }],
+        },
+        {
+          type: 'message/assistant',
+          eventId: crypto.randomUUID(),
+          at: new Date().toISOString(),
+          surfaceOp: 'append',
+          content: [{ kind: 'text', text: 'old-a'.padEnd(400, 'a') }],
+        },
+      ]);
+      const llm = new FakeLLM(
+        ...(recover
+          ? [
+              () => [
+                { kind: 'usage' as const, inputTokens: 500, outputTokens: 8192 },
+                { kind: 'finish' as const, reason: 'length' as const },
+              ],
+              () => textChunks('CHECKPOINT PART 1'),
+              () => textChunks('CHECKPOINT PART 2'),
+            ]
+          : []),
+        () => textChunks('SUMMARY'),
+        () => textChunks('done'),
+      );
+      const context = new ContextManager({
+        llm,
+        model: 'fake/model',
+        store,
+        maxTokens: 100,
+        keepTokens: 40,
+        estimate: (messages) => messages.reduce((n, m) => n + m.content.length, 0),
+      });
+      const loop = new CoreAgentLoop({
+        llm,
+        model: 'fake/model',
+        tools: registry,
+        store,
+        workspaceRoot: '/ws',
+        context,
+      });
+      const sink = new CollectingSink();
+      const outcome = await loop.run('s1', 'new prompt', sink);
+      expect(outcome.reason).toBe('completed');
+      expect(sink.events.some((e) => e.type === 'context/compacted')).toBe(true);
+      if (recover) {
+        const events = await store.load('s1');
+        expect(
+          events.some(
+            (event) => event.type === 'model/usage' && event.usage.tokens.outputTokens === 8192,
+          ),
+        ).toBe(true);
+        expect(events.filter((event) => event.type === 'compaction/summary')).toHaveLength(1);
+        expect(events.filter((event) => event.type === 'tool/call')).toHaveLength(0);
+      }
+    },
+  );
 });
 
 describe('CoreAgentLoop M4: tool-result spill', () => {

@@ -5,6 +5,57 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Compaction output-limit recovery — 2026-11-27
+
+Main's latest failed turn ended at 03:06:53 UTC after 48 completed tool calls.
+Its MiniMax-M3 compaction request consumed all 8,192 output tokens, including
+8,058 reasoning tokens. The summarizer rejected the length finish under a generic
+stream-error message; no checkpoint replaced the original event history.
+
+Compaction now distinguishes output truncation from provider stream errors and
+retries the unread excerpt at half its size, with at most three size reductions
+per compaction. Only complete nonempty summaries advance the source cursor;
+failed partial text never enters a checkpoint. Existing per-request admission,
+usage, routing and cancellation remain in effect. Exhaustion retains history and
+reports `CONTEXT_COMPACTION_TRUNCATED` with the output-limit cause.
+
+Validation: core and compaction contract tests passed (1,131 tests; 23 opt-in tests
+skipped). Regressions cover exact excerpt coverage, prior-checkpoint carry,
+partial-output rejection, bounded exhaustion, later-excerpt failure, cancellation,
+usage accounting and continued agent completion. Repository lint and all workspace
+typechecks passed. Matching application images deployed locally; all six containers,
+API and scheduler health checks passed. Server/worker source hashes match the
+checkout, and a packaged in-memory recovery smoke passed with no external calls.
+The old API required the deployment script's 60-second forced-stop fallback;
+no current application turns were running before rollout. Real-provider recovery
+acceptance remains pending; the failed user task has not been replayed. No
+migration or guest update is needed.
+
+### Sidebar scrolling and automation workspaces — 2026-11-27
+
+Navigation and conversation shortcuts now share one vertical scroll area, keeping
+the brand and account footer fixed. Compact desktop navigation, a native-width
+scrollbar and smaller action margins leave more room for readable conversation
+titles; mobile controls retain 44px targets. Recent shows 12 ordinary sessions;
+All conversations expands the accessible list in place with title search and
+Show recent, preserving the composer and its draft.
+
+The visible Nightly memory workspace was an empty schedule source, not an
+execution. Additive `automationWorkspace` summary metadata derives this distinction
+from owner/tenant-matched schedule bindings and absence of user/queued prompts,
+including paused schedules. Both shortcut views omit unused automation workspaces
+and scheduled executions without matching titles, deleting sessions or rewriting
+events. A source used for ordinary conversation becomes visible again. Tasks and
+Scheduled retain their existing workspace/run access.
+
+Validation: 390 tests passed across frontend, authenticated API, scheduling and
+PostgreSQL regressions. Repository lint, all workspace typechecks, formatting and
+Web production build passed. Local mocked-API Chromium checks covered desktop,
+1280×520 short windows and 390px mobile layout, one sidebar scroller, fixed account
+access, older-session search and mobile target sizes. Matching server/Web must be
+deployed; authenticated deployment and real-device acceptance remain open. No
+database migration or guest image change is required; no deployment is claimed.
+
 ### Browser human inactivity return — 2026-11-27
 
 Implemented a durable five-minute human inactivity deadline in the existing browser control record. Applied human browser inputs reset it; frame polling, heartbeats, local draft/view changes, repeated takeover and duplicate/no-effect input do not. Timer and request admission enforce the deadline under existing browser/desktop locks. Automatic return retains privacy/native-page handoff, before/after owner/source/binding/generation checks, originating-chat control events and fresh observations in every chat. Unsafe handoffs pause; connection-lease expiry and uncertain effects retain their existing pause/quarantine behavior. The viewer explains the timeout. No new prompt/task resumption, database migration, browser binary or guest image change is included.

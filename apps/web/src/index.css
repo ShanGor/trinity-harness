@@ -132,12 +132,37 @@ select {
   font-weight: 600;
 }
 
-.history-scroll {
+.sidebar-scroll {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 2px 4px 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 12px;
   overscroll-behavior: contain;
+}
+
+.sider-brand,
+.sidebar-account {
+  flex: none;
+}
+
+.sidebar-conversations {
+  display: flow-root;
+}
+
+.sidebar-conversation-search {
+  width: calc(100% - 16px);
+  margin: 0 8px 8px;
+}
+
+.sidebar-conversations-toggle.ant-btn {
+  width: calc(100% - 8px);
+  min-height: 44px;
+  margin: 4px;
+  color: var(--text-muted);
+  text-align: left;
 }
 
 .history-item.ant-list-item {
@@ -817,16 +842,6 @@ select {
 
   .sider-section-label {
     display: none;
-  }
-
-  .history-scroll {
-    flex-basis: 100%;
-    max-height: 92px;
-  }
-
-  .history-scroll .ant-list-items {
-    display: flex;
-    gap: 4px;
   }
 
   .history-item.ant-list-item {
