@@ -239,6 +239,38 @@ export class PgScheduleStore implements ScheduleStore {
         .from(personalCalendarItems)
         .where(eq(personalCalendarItems.scheduleId, id));
       if (calendar) throw new Error('Manage linked schedules through Calendar');
+      if (enabled) {
+        const definition = scheduleDefinitionSchema.parse(current.definition);
+        const [source] = await tx
+          .select()
+          .from(sessions)
+          .where(eq(sessions.id, definition.sourceSessionId))
+          .for('share');
+        const [owner] = await tx
+          .select()
+          .from(users)
+          .where(eq(users.id, identity.userId))
+          .for('share');
+        if (
+          !source ||
+          source.closedAt ||
+          !source.workspaceUri ||
+          source.scope !== 'personal' ||
+          source.userId !== identity.userId ||
+          source.tenantId !== identity.tenantId ||
+          !owner ||
+          owner.tenantId !== identity.tenantId ||
+          owner.role === 'viewer' ||
+          (definition.sourcePolicy &&
+            !isDeepStrictEqual(
+              definition.sourcePolicy,
+              parsePermissionPolicy(source.policy ?? 'workspace-write'),
+            ))
+        )
+          throw new Error(
+            'Schedule source unavailable; create a replacement with an active Work session',
+          );
+      }
       const next = enabled
         ? nextScheduleInstant(scheduleDefinitionSchema.parse(current.definition), at)
         : null;

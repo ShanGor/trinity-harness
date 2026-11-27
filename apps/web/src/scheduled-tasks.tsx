@@ -39,6 +39,7 @@ export function ScheduledTasks({
   const [creating, setCreating] = useState(false);
   const [consolidation, setConsolidation] = useState<'review' | 'memory' | undefined>();
   const [saving, setSaving] = useState(false);
+  const [replacement, setReplacement] = useState<ScheduleRecord | null>(null);
   const operation = useRef(newId());
   const [form] = Form.useForm<{
     title: string;
@@ -61,14 +62,22 @@ export function ScheduledTasks({
           request: 'Preview',
           sourceSessionId: '00000000-0000-7000-8000-000000000001',
           timezone,
-          timing: { kind: 'daily', hour, minute, weekdays: [0, 1, 2, 3, 4, 5, 6] },
+          timing: {
+            kind: 'daily',
+            hour,
+            minute,
+            weekdays:
+              replacement?.timing.kind === 'daily'
+                ? replacement.timing.weekdays
+                : [0, 1, 2, 3, 4, 5, 6],
+          },
         },
         new Date(),
       );
     } catch {
       return null;
     }
-  }, [hour, minute, timezone]);
+  }, [hour, minute, timezone, replacement]);
   const load = useCallback(async (): Promise<void> => {
     try {
       const [result, notices] = await Promise.all([client.getSchedules(), client.getInbox()]);
@@ -88,7 +97,9 @@ export function ScheduledTasks({
       await client.setScheduleEnabled(schedule, !schedule.enabled);
       await load();
     } catch {
-      setError('The schedule changed or has no future occurrence. Refresh and try again.');
+      setError(
+        'Could not change this schedule. Refresh and try again. If its source Work session was closed or access changed, set up a replacement with an active personal Work workspace.',
+      );
     }
   };
   return (
@@ -114,6 +125,7 @@ export function ScheduledTasks({
             type="primary"
             onClick={() => {
               operation.current = newId();
+              setReplacement(null);
               setConsolidation(undefined);
               setCreating(true);
             }}
@@ -123,6 +135,7 @@ export function ScheduledTasks({
           <Button
             onClick={() => {
               operation.current = newId();
+              setReplacement(null);
               setConsolidation('review');
               form.setFieldsValue({
                 title: 'Nightly digest and memory review',
@@ -139,6 +152,7 @@ export function ScheduledTasks({
           <Button
             onClick={() => {
               operation.current = newId();
+              setReplacement(null);
               setConsolidation('memory');
               form.setFieldsValue({
                 title: 'Nightly memory consolidation',
@@ -178,6 +192,32 @@ export function ScheduledTasks({
                         ? 'Pause'
                         : 'Resume'}
                   </Button>,
+                  ...(!schedule.enabled &&
+                  !schedule.calendarItemId &&
+                  schedule.timing.kind === 'daily'
+                    ? [
+                        <Button
+                          key="replace"
+                          onClick={() => {
+                            operation.current = newId();
+                            setReplacement(schedule);
+                            setConsolidation(schedule.consolidation);
+                            form.setFieldsValue({
+                              title: schedule.title,
+                              request: schedule.request,
+                              sourceSessionId: undefined,
+                              hour: schedule.timing.kind === 'daily' ? schedule.timing.hour : 3,
+                              minute: schedule.timing.kind === 'daily' ? schedule.timing.minute : 0,
+                              timezone: schedule.timezone,
+                              mergeAcceptedFacts: schedule.mergeAcceptedFacts ?? false,
+                            });
+                            setCreating(true);
+                          }}
+                        >
+                          Set up replacement
+                        </Button>,
+                      ]
+                    : []),
                 ]}
               >
                 <List.Item.Meta
@@ -193,6 +233,14 @@ export function ScheduledTasks({
                             })
                           : 'none'}
                       </span>
+                      {!schedule.enabled &&
+                        inbox.find((item) => item.scheduleId === schedule.id)?.reason ===
+                          'access_revoked' && (
+                          <Alert
+                            type="warning"
+                            message="Stopped because the source Work session was closed or access changed. Set up a replacement with an active personal Work workspace to restart future runs."
+                          />
+                        )}
                     </>
                   }
                 />
@@ -240,7 +288,7 @@ export function ScheduledTasks({
               >
                 <List.Item.Meta
                   title={`${item.readAt ? '' : '● '}${item.title}`}
-                  description={`${item.status} · ${item.reason === 'expired' ? 'Older catch-up dates expired (seven-day limit)' : (item.reason ?? '')} · ${new Date(item.at).toLocaleString()}${item.attempts ? ` · Attempt ${item.attempts}` : ''}${item.retryAt ? ` · Retry after ${new Date(item.retryAt).toLocaleString()}` : ''}`}
+                  description={`${item.status} · ${item.reason === 'expired' ? 'Older catch-up dates expired (seven-day limit)' : item.reason === 'access_revoked' ? 'Source Work session closed or access changed; schedule stopped' : (item.reason ?? '')} · ${new Date(item.at).toLocaleString()}${item.attempts ? ` · Attempt ${item.attempts}` : ''}${item.retryAt ? ` · Retry after ${new Date(item.retryAt).toLocaleString()}` : ''}`}
                 />
               </List.Item>
             )}
@@ -286,7 +334,10 @@ export function ScheduledTasks({
                   kind: 'daily',
                   hour: values.hour,
                   minute: values.minute,
-                  weekdays: [0, 1, 2, 3, 4, 5, 6],
+                  weekdays:
+                    replacement?.timing.kind === 'daily'
+                      ? replacement.timing.weekdays
+                      : [0, 1, 2, 3, 4, 5, 6],
                 },
               });
               setCreating(false);
@@ -301,6 +352,12 @@ export function ScheduledTasks({
             }
           }}
         >
+          {replacement && (
+            <Alert
+              type="info"
+              message="Choose an active personal Work workspace for this replacement. The original schedule stays paused and its run history is preserved. The replacement starts with the next scheduled time; paused dates are not rerun."
+            />
+          )}
           {consolidation && (
             <Alert
               type="info"

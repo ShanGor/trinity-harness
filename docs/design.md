@@ -1273,6 +1273,13 @@ implied by this checkout.
 
 ### Scheduled run navigation
 
+Closed or inaccessible source Work sessions stop their schedules. Resume revalidates
+the source and current owner before enabling; it cannot restore revoked access.
+Scheduled explains `access_revoked` and offers a new daily schedule prefilled from
+the paused definition, requiring an active personal Work source. Replacement keeps
+the original history and paused schedule, preserves weekdays and delegation flags,
+and begins at the next future instant without backfilling paused dates.
+
 Session summaries expose `scheduledRun`, derived from committed `prompt/queued`
 or `message/user` schedule triggers. It is presentation metadata, never a new
 session kind or a client-selected creation flag. Historical executions and older

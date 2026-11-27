@@ -406,6 +406,36 @@ describe.skipIf(!reachable)('durable runtime control', () => {
     );
     await metas.setPolicy(source, 'read-only');
   });
+  it('refuses to resume a schedule whose source was closed, while preserving history and pause', async () => {
+    const sourceId = randomUUID();
+    await metas.create({
+      id: sourceId,
+      tenantId: owner.tenantId,
+      userId: owner.userId,
+      title: 'Disposable source',
+      kind: 'work',
+      sessionRole: 'task',
+      scope: 'personal',
+      workspaceUri: `/tmp/${owner.userId}/${sourceId}`,
+      policy: 'read-only',
+    });
+    const schedule = await schedules.create(owner, { ...nightly(), sourceSessionId: sourceId }, at);
+    await metas.close(sourceId);
+    await schedules.tick(new Date('2026-10-24T00:01:00Z'));
+    const before = (await schedules.list(owner)).find((item) => item.id === schedule.id)!;
+    const history = (await schedules.inbox(owner)).filter(
+      (item) => item.scheduleId === schedule.id,
+    );
+    expect(before.enabled).toBe(false);
+    expect(history).toMatchObject([{ status: 'skipped', reason: 'access_revoked' }]);
+    await expect(
+      schedules.setEnabled(owner, schedule.id, before.revision, true, at),
+    ).rejects.toThrow('Schedule source unavailable');
+    expect((await schedules.list(owner)).find((item) => item.id === schedule.id)).toEqual(before);
+    expect(
+      (await schedules.inbox(owner)).filter((item) => item.scheduleId === schedule.id),
+    ).toEqual(history);
+  });
   it('reserves capacity once per user, fences old generations and never moves an uncertain VM', async () => {
     const store = new PgEnvironmentStore(db, pool);
     const nodes = [{ id: 'node-1', endpoint: 'https://node.test/', vcpus: 2, memoryMiB: 2304 }];

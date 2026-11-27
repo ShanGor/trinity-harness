@@ -1099,7 +1099,7 @@ export async function buildServer(
       );
       return result ?? reply.code(409).send({ error: 'schedule missing or revision changed' });
     } catch {
-      return reply.code(409).send({ error: 'schedule has no future occurrence' });
+      return reply.code(409).send({ error: 'schedule source unavailable or no future occurrence' });
     }
   });
   app.get('/api/inbox', async (req) =>

@@ -154,3 +154,104 @@ it('opens executions from Run history independently of the schedule controls', a
   );
   expect(onOpen).toHaveBeenCalledWith('run-session');
 });
+
+it('explains a revoked source and prepares a replacement without resuming the broken schedule', async () => {
+  const create = vi.spyOn(client, 'createSchedule').mockResolvedValue(undefined);
+  const resume = vi.spyOn(client, 'setScheduleEnabled');
+  vi.mocked(client.getSchedules).mockResolvedValue({
+    available: true,
+    schedules: [
+      {
+        id: 'schedule',
+        revision: 1,
+        enabled: false,
+        title: 'My nightly consolidation',
+        request: 'Review my conversations',
+        sourceSessionId: 'closed-source',
+        consolidation: 'memory',
+        mergeAcceptedFacts: true,
+        timezone: 'Asia/Hong_Kong',
+        timing: { kind: 'daily', hour: 3, minute: 15, weekdays: [1, 3, 5] },
+        createdAt: '2026-11-15T00:00:00Z',
+        nextFireAt: '2026-11-17T19:15:00Z',
+      },
+    ],
+  });
+  vi.mocked(client.getInbox).mockResolvedValue({
+    available: true,
+    items: [
+      {
+        id: 'revoked',
+        scheduleId: 'schedule',
+        title: 'My nightly consolidation',
+        status: 'skipped',
+        reason: 'access_revoked',
+        sessionId: null,
+        at: '2026-11-16T19:15:00Z',
+        readAt: null,
+      },
+    ],
+  });
+  await act(async () =>
+    root.render(
+      createElement(ScheduledTasks, {
+        client,
+        sessions: [
+          {
+            sessionId: 'active-source',
+            title: 'Active Work',
+            kind: 'work',
+            scope: 'personal',
+            workspaceUri: '/workspace',
+            createdAt: '2026-11-25T00:00:00Z',
+          },
+        ],
+        onOpen: vi.fn(),
+      }),
+    ),
+  );
+  expect(container.textContent).toContain('Stopped because the source Work session was closed');
+  expect(container.textContent).toContain(
+    'Source Work session closed or access changed; schedule stopped',
+  );
+  await act(async () =>
+    [...container.querySelectorAll('button')]
+      .find((button) => button.textContent === 'Set up replacement')!
+      .click(),
+  );
+  expect(document.body.textContent).toContain('The original schedule stays paused');
+  expect((document.querySelector('input[id="title"]') as HTMLInputElement).value).toBe(
+    'My nightly consolidation',
+  );
+  expect((document.querySelector('input[id="minute"]') as HTMLInputElement).value).toBe('15');
+  expect((document.querySelector('input[id="sourceSessionId"]') as HTMLInputElement).value).toBe(
+    '',
+  );
+  expect(
+    (document.querySelector('input[id="mergeAcceptedFacts"]') as HTMLInputElement).checked,
+  ).toBe(true);
+  expect(create).not.toHaveBeenCalled();
+  expect(resume).not.toHaveBeenCalled();
+  const select = document.querySelector('input[id="sourceSessionId"]')!;
+  await act(async () => select.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
+  const option = [...document.querySelectorAll('.ant-select-item-option-content')].find(
+    (element) => element.textContent === 'Active Work',
+  )! as HTMLElement;
+  await act(async () => option.click());
+  await act(async () =>
+    document
+      .querySelector('form')!
+      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })),
+  );
+  expect(create).toHaveBeenCalledWith(
+    expect.objectContaining({
+      sourceSessionId: 'active-source',
+      request: 'Review my conversations',
+      consolidation: 'memory',
+      mergeAcceptedFacts: true,
+      timezone: 'Asia/Hong_Kong',
+      timing: { kind: 'daily', hour: 3, minute: 15, weekdays: [1, 3, 5] },
+    }),
+  );
+  expect(resume).not.toHaveBeenCalled();
+});

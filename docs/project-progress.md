@@ -5,6 +5,29 @@
 
 ## Current milestone: M6 — Extensibility (next)
 
+### Scheduled source closure and recovery — 2026-11-25
+
+The local nightly consolidation stopped on 17 November because its source Work
+session had been closed on 16 November. The control worker remained healthy; its
+durable occurrence correctly recorded `skipped / access_revoked` and disabled
+future runs. Scheduled now explains that cause and offers a prefilled replacement
+with a newly selected active personal Work source, preserving weekdays, memory
+delegation flags and original run history. Resume checks current source/owner
+authorization transactionally rather than briefly enabling a broken schedule.
+Closed sessions and their immutable events remain unchanged. Replacements start
+at the next future instant and do not replay paused dates.
+
+Validation: 367 relevant frontend, scheduling, API and isolated PostgreSQL tests
+passed; repository lint and workspace typecheck passed. The replacement-form
+regression also submits an active source and verifies original weekdays/delegation
+flags. Matching local application/Web images deployed with all six services running
+and API/control-worker health passing. Recovery used authenticated API operations,
+created a dedicated personal Work with the original permission policy and restored
+daily 03:00 Asia/Hong_Kong execution (next: 26 November). A separate one-off recovery
+review completed successfully on 25 November; the old source, schedule and execution
+events remain unchanged. No paused dates were replayed. Authenticated browser
+inspection verified the source-closure warning and replacement form.
+
 ### Short-turn latency diagnosis and context boundaries — 2026-11-25
 
 The latest observed personal turn used three MiniMax-M3.1-Flash assistant requests:

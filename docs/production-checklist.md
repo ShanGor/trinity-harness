@@ -300,6 +300,16 @@ Two-repeat synthetic real-model export acceptance passed twice (four trials); th
 
 ### Operational personal memory and scheduling (2026-11-15)
 
+- [x] Explain source closure/access revocation in Scheduled and support a prefilled
+      replacement with an active personal Work source; reject Resume while the
+      source/owner remains unavailable. Regression tests preserve disabled state,
+      original history and explicit replacement enrollment (2026-11-25).
+- [x] Deploy matching local readers/writers/Web and restore the affected daily
+      03:00 Asia/Hong_Kong delegation through authenticated API operations with a
+      dedicated personal Work and original permissions. One-off recovery completed
+      on 25 November; next daily run is 26 November. Closed source/history remain
+      intact; paused dates were not replayed.
+
 - [x] Matching local server/worker/control-worker/Web deployed; scheduler included in
       full deployment and saved-container lifecycle operations, with reconciliation health.
 - [x] Guarded originating Persona save/refresh and child-write denial regressions.
